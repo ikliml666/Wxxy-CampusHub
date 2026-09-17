@@ -122,6 +122,7 @@
 
 ## 六、参考资料
 
+- **Windows 前端设计文档：`docs/design/frontend-design.md`（2026-09-17 实机走查 + 设计定稿：痛点清单/功能映射/信息架构/视觉 token/选型）**
 - 架构模板：`../Wxxy-CampusLogin/.codewiki/_architecture.md`（协议单点+平台外壳、IPC 契约、省电约束、Known Issues）
 - 4030 诊断与平台接口速查：`~/.zcode/cli/memories/.../synjones-platform-4030-diagnosis.md`
-- 深澜 WebVPN URL 规则：社区公开实现（srun webvpn url encrypt/decrypt）
+- 深澜 WebVPN URL 规则：社区公开实现（srun webvpn url encrypt/decrypt）+ `docs/cas-recon/REPORT.md` 已采集的本校代理 URL 样本
