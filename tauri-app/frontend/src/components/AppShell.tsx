@@ -1,7 +1,7 @@
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bell, Moon, Search, Sun, UserRound } from "lucide-react";
+import { Bell, LogOut, Moon, Search, Sun, UserRound } from "lucide-react";
 import type { PanelId } from "@/shared/types";
 import { useUiStore } from "@/stores/uiStore";
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,7 @@ const PANEL_MAP: Record<PanelId, ComponentType> = {
   settings: SettingsPanel,
 };
 
-export default function AppShell() {
+export default function AppShell({ onLogout }: { onLogout: () => void }) {
   const activePanel = useUiStore((s) => s.activePanel);
   // 快速连切时 useDeferredValue 只渲染最终面板，AnimatePresence 不闪烁
   const deferredPanel = useDeferredValue(activePanel);
@@ -39,6 +39,21 @@ export default function AppShell() {
     const next = document.documentElement.classList.toggle("dark");
     setDark(next);
   };
+
+  // 头像下拉：极简实现（不引 DropdownMenu 依赖）；打开期间点外部关闭
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [userMenuOpen]);
 
   return (
     <div className="min-h-screen">
@@ -67,9 +82,37 @@ export default function AppShell() {
           >
             {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
           </Button>
-          <Button variant="ghost" size="icon-sm" aria-label="账号（占位）">
-            <UserRound className="size-4" />
-          </Button>
+          <div className="relative" ref={userMenuRef}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="账号菜单"
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+              onClick={() => setUserMenuOpen((v) => !v)}
+            >
+              <UserRound className="size-4" />
+            </Button>
+            {userMenuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full z-40 mt-2 w-36 rounded-[10px] border border-line bg-surface p-1 shadow-[0_8px_30px_rgb(0_0_0/0.12)]"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    onLogout();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-text hover:bg-bg"
+                >
+                  <LogOut className="size-4" aria-hidden="true" />
+                  退出登录
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
       <main className="pb-28">
