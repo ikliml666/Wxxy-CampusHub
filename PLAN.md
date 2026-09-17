@@ -66,6 +66,7 @@
 ## 四、里程碑
 
 ### M0 · 项目脚手架 ⬜
+> 实施计划（任务级）：`docs/superpowers/plans/2026-09-17-m0-m1-foundation.md`（M0+M1，2026-09-17 定稿）
 - [x] 项目定名 Wxxy-CampusHub，`git init` + 首次提交（2026-09-15）
 - [ ] Tauri 2 + React 19 + TS + Vite + Tailwind 脚手架（目录结构对照 Wxxy-CampusLogin：`src-tauri/{commands,auth,infra,config,network,...}` + `frontend/src/{hooks,components,shared,...}`）
 - [ ] Rust 协议核心 crate 骨架（为安卓 path 依赖预留：无桌面依赖约束）
