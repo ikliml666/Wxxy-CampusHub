@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/campus-schedule"]
+members = ["crates/campus-schedule", "crates/campus-auth"]
 
 [profile.release]
 lto = "thin"

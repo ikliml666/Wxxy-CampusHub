@@ -1,0 +1,24 @@
+[package]
+name = "campus-auth"
+version = "0.1.0"
+edition = "2021"
+description = "锡院助手 CAS 统一身份认证协议核心：textbook RSA 加密 / CAS 登录客户端 / 会话 Cookie Jar"
+license = "Apache-2.0"
+
+[dependencies]
+num-bigint-dig = "0.8"
+num-traits = "0.2"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "cookies",
+    "charset",
+] }
+
+[dev-dependencies]
+# cas_live.rs 集成测试的 #[tokio::test] 运行时（计划依赖清单未列，async live 测试必需）
+tokio = { version = "1", features = ["rt", "macros"] }
