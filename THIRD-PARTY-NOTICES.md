@@ -18,4 +18,7 @@
 ## 二、第三方依赖（包管理器级）
 
 - `campus-schedule` crate：serde / serde_json / chrono / thiserror（MIT 或 Apache-2.0 双许可；chrono 另含 Unicode-3.0 组件）
-- M0 后统一汇总
+- `campus-auth` crate：num-bigint-dig / num-traits / thiserror / serde / serde_json / base64 / reqwest / image（MIT 或 Apache-2.0 双许可；image 含部分组件许可详见其 crate 页）
+- 前端（`tauri-app/frontend`，详见 package.json）：react / react-dom（MIT）、zustand（MIT）、framer-motion（MIT）、gsap（标准"Own Use"许可）、lucide-react（ISC）、clsx（MIT）、tailwind-merge（MIT）、tailwindcss（MIT）、vite（MIT）、TypeScript（Apache-2.0）、@tauri-apps/api|cli（MIT/Apache-2.0）、@radix-ui/react-slot|react-tooltip（MIT）、class-variance-authority（Apache-2.0）、tw-animate-css（MIT）
+- **Outfit 字体**（`tauri-app/frontend/public/fonts/`，经 @fontsource/outfit 分发）：SIL Open Font License 1.1，版权 © The Outfit Project Authors（<https://github.com/googlefonts/outfit>）；OFL 许可证全文随包分发于 `node_modules/@fontsource/outfit/LICENSE`，随应用分发字体时须一并附带
+- M0 完成后统一汇总 Cargo.lock / package-lock.json 级完整清单

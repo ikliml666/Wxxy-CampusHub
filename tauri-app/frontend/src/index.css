@@ -1,0 +1,81 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-brand: #5b2e90;      /* 锡院紫 */
+  --color-bg: #f7f6f9;         /* 纸灰页底 */
+  --color-surface: #ffffff;    /* 卡片 */
+  --color-text: #1f1b29;       /* 墨紫黑 */
+  --color-text-2: #6e6878;     /* 次要文字 */
+  --color-line: #e8e5ee;       /* 1px 边线 */
+  --color-wallet: #0f9d77;     /* 域绿：一卡通/余额 */
+  --color-info: #7c5cbf;       /* 域紫：资讯/公告 */
+  --color-todo: #d9822b;       /* 域琥珀：待办 */
+  --color-sched: #2b7dbf;      /* 域湖蓝：日程/会议 */
+  --color-alert: #d9455b;      /* 低余额/告警 */
+  --font-sans: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-num: "Outfit", "Segoe UI", sans-serif;
+}
+
+:root {
+  color-scheme: light;
+  /* shadcn 语义变量 → 域色映射（Task 4 组件源码消费这些名字） */
+  --background: var(--color-bg);
+  --foreground: var(--color-text);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-text);
+  --primary: var(--color-brand);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-bg);
+  --secondary-foreground: var(--color-text);
+  --muted: var(--color-bg);
+  --muted-foreground: var(--color-text-2);
+  --accent: var(--color-bg);
+  --accent-foreground: var(--color-text);
+  --destructive: var(--color-alert);
+  --border: var(--color-line);
+  --input: var(--color-line);
+  --ring: var(--color-brand);
+  --radius: 10px;
+}
+:root.dark { color-scheme: dark; }
+.dark {
+  --color-bg: #17151c;
+  --color-surface: #201d28;
+  --color-text: #efedf4;
+  --color-text-2: #a29aad;
+  --color-line: #35303f;
+  --color-brand: #8b5cf6;      /* 深主题品牌提亮一档（设计文档 §6 自评） */
+  --color-wallet: #2ec49a;     /* 域色深主题各提亮一档 */
+  --color-info: #a48bd9;
+  --color-todo: #eda45c;
+  --color-sched: #5da3e0;
+  --color-alert: #e56b7d;
+}
+body { @apply bg-bg text-text font-sans antialiased; }
+.tabular-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+/* Outfit（数字/金额等宽显示用，latin 子集，OFL 许可） */
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/outfit-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/outfit-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/outfit-latin-600-normal.woff2") format("woff2");
+}
