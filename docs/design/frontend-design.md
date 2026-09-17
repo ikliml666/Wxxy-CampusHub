@@ -216,6 +216,44 @@
 
 风格定位：**Linear 风的克制 + 学校 VI 紫锚点**；Fluent 仅取「跟随系统深浅色/材质」的 Windows 亲和感，不做企业风。
 
+## 附录 A · 应用中心 30 应用 SSO 实测矩阵（2026-09-17，浏览器逐站访问）
+
+官方 `isCas:"cas"` 元数据**不可全信**（有标记 cas 实则需单独登录的，也有域名仅 WebVPN 可达的）。客户端应用页应自带可达性元数据，打开策略分三类：**A=CAS 直达**（签发 ST 自动进内页）、**B=WebVPN 路径**（域名校内不可直连，需 WebVPN 会话，M4 自动包装）、**C=外链浏览器**。
+
+### A 类 · CAS 直达可用（含表单底座，客户端可深度集成）
+
+| 应用 | 域/底座 | 实测落点 |
+|---|---|---|
+| 校园一键通 | whall（联奕网关） | ticket → 「选择角色」内页 |
+| 创新创业管理平台 | cxcyjy | → `/pt/System/Home` 主页 |
+| 超星泛雅教学平台 | chaoxing CASSO | → `bjxy.fanya.chaoxing.com/portal` |
+| 教务系统 | jwgl（正方） | → `jwglxt/xtgl/index_initMenu.html` |
+| 心理预约 / 请假申请表 / 助学贷款登记 / 调阅监控申请 | whall gemini 表单 | ticket → 各表单页 |
+| 办事大厅 | whall 首页 | 直达 |
+| 申请邮箱 / 网络报修 / 漏洞处置单 | yd.cwxu.edu.cn（低代码表单） | 直达表单页 |
+| 一卡通（慧新E校） | 10.3.100.110 SSO 桥 | → `/plat/shouyeUser` 首页 |
+| 电子资源（图书馆页）/ 万方 | 公开页/公网+校园 IP | 直达 |
+
+### B 类 · 需 WebVPN 会话（域名仅经深澜网关可达，未登 WebVPN 时被甩到 CAS 登录页）
+
+教学质量保障系统（jxzlbz1）、财务系统（cwbx）、中国知网校园镜像（tsgcnki）、IEEE（tsgieee）、ScienceDirect（tsgscid）、SCIE（tsgwebof）、图书馆空间管理（tsgkjyy）——**M4 WebVPN 登录打通后这组全部自动可达**（复用已验证的 WebVPN CAS 联动）。
+
+### C 类 · 异常/需注意
+
+| 应用 | 状态 |
+|---|---|
+| 毕业论文管理系统（lw.cwxu.edu.cn） | 标记 cas 实则停在自家登录页 → SSO 断，按外链+提示处理 |
+| 校内临时摆摊设点申请 / 报告厅使用申请表 | SSO 通但页面 403（教师账号无该学生表单权限）→ 属权限而非链路问题 |
+| 联创自助文印 / 馆藏数字化借阅 | http 内网域名完全不可达（死链）→ 客户端标记「暂不可用」 |
+| 学校官网（www1） | 经 WebVPN 包装路径，行为待校内/校外环境复测 |
+| 虚拟图书馆（flyread） | 可达但为「读者系统」自有登录，非 CAS |
+
+### 对 M2/M4 的设计结论
+
+1. **应用页打开策略引擎**：按附录 A 的 A/B/C 分类决定「CAS 直达 / WebVPN 包装 / 浏览器外链」，元数据集中配置（`appAccess.json`），不信任官方 isCas 字段。
+2. **两大表单底座**（whall gemini、yd.cwxu.edu.cn 低代码）SSO 稳定且为标准 Web 表单——「直达」体验成立；客户端只做打开+会话保持，不做表单重写。
+3. **门户数据接口全景已采集**（M2 直接复用）：`/api/upp/appStore/v2/queryApp`（应用清单）、`/api/upp/layout/getPageContent`（首页布局）、`/api/uppinfo/infoCenter/querySimpleInfoCenter`（资讯栏目）、`/api/uppflow/process/querySimpleFlowItems`（待办三区）、`/api/uppcard/kbsz/queryAWeekSchedule`（课表）、`/api/uppexcard/ext/dynamicData/...`（会议卡片，源 10.1.90.34）、`/api/uppexcard/ext/myData/getData`（邮箱未读）、`/api/uppmessage/message/queryUserMessagePage`（消息中心）、`/api/upp/config/querySemesterInfo`（学期）。
+
 
 ## 九、里程碑落地顺序建议
 
