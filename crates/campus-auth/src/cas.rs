@@ -25,6 +25,8 @@ const PORTAL_HOME: &str = "https://my.cwxu.edu.cn/";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 /// CAS 客户端（内部 `.cookie_provider(Arc<RecordingJar>)` 挂载记录型 Jar）。
+/// Clone 供 AppState 锁内廉价 clone（reqwest::Client 为 Arc 包装），drop guard 后再 await。
+#[derive(Clone)]
 pub struct CasClient {
     http: reqwest::Client,
     jar: Arc<RecordingJar>,

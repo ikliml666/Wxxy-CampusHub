@@ -18,3 +18,6 @@ scripts/captcha-samples/*.png
 # 环境与本地
 .env
 *.local
+
+# 标注辅助拼图（由 contact_sheet 从样本生成，随样本一起不进 git）
+scripts/captcha-sheets/
