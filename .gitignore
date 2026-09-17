@@ -1,0 +1,13 @@
+# 侦察运行时产物（每次 probe.js 运行重新生成）
+docs/cas-recon/captcha.png
+
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+
+# 环境与本地
+.env
+*.local

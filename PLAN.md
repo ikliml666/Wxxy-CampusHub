@@ -31,8 +31,13 @@
 ### 1. 融合门户（公网）
 - 入口 `https://my.cwxu.edu.cn/#/studentNewPage`，SPA + hash 路由，**公网可访问**
 - 登录走 CAS：`https://wxcas.cwxu.edu.cn/lyuapServer/login?service=https://my.cwxu.edu.cn/shiro-cas`
-  - 三种登录方式：微信扫码 / 短信 / 账号密码 + 验证码（学生账号=学号）
-  - 浏览器自动填充的历史验证码值为纯数字，疑似**算术题验证码**（形态待最终确认，见未决事项）
+  - 三种登录方式：微信扫码 / 短信 / 账号密码（学生账号=学号）
+  - **协议已逆向并实测打通（2026-09-17，详见 `docs/cas-recon/REPORT.md`）**：
+    ① `GET /lyuapServer/kaptcha` 取算术题验证码（两一位数 +/-/*，uid+base64 PNG，无 Cookie 依赖）
+    ② `POST /lyuapServer/v1/tickets`（x-www-form-urlencoded）：`username/password(RSA密文)/service/loginType/id(=验证码uid)/code(=答案)/otpcode`，请求头 `token=RSA("lyasp"+毫秒时间戳)`
+    ③ 响应 JSON 直含 `ticket`(ST) 与 `tgt`(TGT)，回跳 `service?ticket=ST` 完成门户 SSO
+    ④ 密码加密为 textbook RSA（1024 位，公钥 e=010001、n 见 REPORT，little-endian 组块 126 字节、无 padding、hex 不补零）
+    ⑤ 错误码全集见 REPORT（NOUSER=账号密码错、CODEFALSE=验证码错等）；实测假账号+正确验证码返回 NOUSER，协议字段全部验证通过
 - 学生首页功能模块：问候/搜索、个人卡片（**一卡通余额、邮箱未读、图书借阅**）、信息服务链接（知网/校历/官网/图书馆）、快捷入口、应用中心（`#/newlyappCenter`）、**资讯中心**（通知公告/校园要闻/教务处/学工处/团委等分类）、**待办中心**（待办/已办/申请）、日程会议列表
 
 ### 2. 慧新E校（内网，新中中平台）
@@ -58,6 +63,7 @@
 - 验收：`tauri dev` 双端（先只 Windows target）空窗口跑通，命令面注册表就位
 
 ### M1 · CAS 登录 + 账号管理 ⬜
+- [x] CAS 登录协议逆向与实测（端点/参数/RSA/验证码形态全定案，probe.js 端到端验证 2026-09-17）
 - [ ] CAS 账密登录全流程（`/lyuapServer/login` 表单流程 + 会话 cookie 管理）
 - [ ] 验证码自动识别（形态确认后选方案：算术解析 / 轻量本地识别），失败自动重试
 - [ ] 多账号管理 + 密码加密存储（Windows 先 DPAPI，对齐 Wxxy-CampusLogin `account::crypto` 模式）
@@ -105,7 +111,7 @@
 
 | 事项 | 状态 | 应对 |
 |---|---|---|
-| CAS 验证码具体形态（算术题 or 扭曲字符） | 待确认（探索被打断处） | M1 开始时登录页实抓一次定方案 |
+| CAS 验证码具体形态 | **已定案（2026-09-17）**：算术题（两一位数 + - *，本地解析可行，模板匹配方案） | 实测见 `docs/cas-recon/REPORT.md` |
 | 深澜 WebVPN URL 加密参数（学校部署的 salt/key） | 待逆向 | 参考社区公开实现 + 抓包对照；M4 内解决 |
 | 门户接口无文档，学校升级可能变更 | 长期风险 | 协议层集中封装 + 失败降级提示 |
 | `synAccessSource=app` 依赖服务端现状 | 长期风险 | 学校若修复 PC 授权则对 app 来源无影响；该参数保持常量集中管理 |
