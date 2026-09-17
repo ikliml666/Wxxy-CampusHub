@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-17 · 导航改版：悬浮 Dock 标签栏（用户指定，对齐 CampusLogin）
+
+- **模块**：设计文档 §4/§6/§7
+- **摘要**：用户指定页面切换采用 Wxxy-CampusLogin 同款悬浮标签栏。分身取证其 `DockNav.tsx` 实现（fixed bottom-5 玻璃 Dock、纯图标+hover tooltip、framer-motion 弹簧胶囊与圆点指示条、gsap 磁吸放大 scale 1.35、zustand activePanel 切换 + AnimatePresence 过渡 + useDeferredValue、内容区 pb-28 预留），设计文档已按本项目语境改写：
+  - 顶栏导航废除，改为底部悬浮 Dock（8 项：今日/资讯/待办/日程/应用/钱包/电费/设置）；顶条仅剩 ⌘K/通知/主题/账号
+  - **域色创新**：激活胶囊/指示条/图标用该项域色（非统一色），域色编码系统从内容延伸到导航
+  - 依赖增量：framer-motion + gsap（磁吸可裁剪）；签名元素由「域色 spine」更新为「域色 Dock」
+- **验证**：取证基于 CampusLogin 源码逐文件核查（组件/样式/交互/依赖均文件:行号级证据）
+
 ## 2026-09-17 · 课表核心 Rust 移植（campus-schedule crate，M2.5 首个交付）
 
 - **模块**：Rust 协议核心（`crates/campus-schedule/`，纯逻辑无 Tauri 依赖，为安卓 path 依赖预留）
