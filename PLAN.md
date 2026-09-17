@@ -37,7 +37,9 @@
     ② `POST /lyuapServer/v1/tickets`（x-www-form-urlencoded）：`username/password(RSA密文)/service/loginType/id(=验证码uid)/code(=答案)/otpcode`，请求头 `token=RSA("lyasp"+毫秒时间戳)`
     ③ 响应 JSON 直含 `ticket`(ST) 与 `tgt`(TGT)，回跳 `service?ticket=ST` 完成门户 SSO
     ④ 密码加密为 textbook RSA（1024 位，公钥 e=010001、n 见 REPORT，little-endian 组块 126 字节、无 padding、hex 不补零）
-    ⑤ 错误码全集见 REPORT（NOUSER=账号密码错、CODEFALSE=验证码错等）；实测假账号+正确验证码返回 NOUSER，协议字段全部验证通过
+    ⑤ 错误码全集见 REPORT（NOUSER=账号密码错、CODEFALSE=验证码错等）
+    ⑥ **真实账号端到端登录已验证（2026-09-17）**：CAS 签发 TGT+ST → 门户会话 Cookie（customsid/Authorization/rememberMe）建立；成功响应顶层即 `{tgt,ticket}`
+    ⑦ **WebVPN（深澜 Srun）CAS 联动已验证（2026-09-17）**：CAS service 换成 `https://webvpn.cwxu.edu.cn/login?cas_login=true` 即可签发 WebVPN 会话（先取初始 wengine_vpn_ticket → ticket 回跳 → wengine-vpn-token-login）；深澜代理 URL 样本已采集（M4 素材）
 - 学生首页功能模块：问候/搜索、个人卡片（**一卡通余额、邮箱未读、图书借阅**）、信息服务链接（知网/校历/官网/图书馆）、快捷入口、应用中心（`#/newlyappCenter`）、**资讯中心**（通知公告/校园要闻/教务处/学工处/团委等分类）、**待办中心**（待办/已办/申请）、日程会议列表
 
 ### 2. 慧新E校（内网，新中中平台）

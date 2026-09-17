@@ -1,5 +1,18 @@
 # 更新日志
 
+## 2026-09-17 · CAS 真实账号端到端登录 + WebVPN 联动登录验证（M1/M4 侦察）
+
+- **模块**：CAS 登录协议（`docs/cas-recon/`）
+- **摘要**：在协议逆向基础上完成真实账号端到端验证：
+  - **CAS 真实登录成功**：`POST /v1/tickets` 响应顶层即 `{"tgt":"TGT-...","ticket":"ST-..."}`（无 data 包裹、无 Set-Cookie——CASTGC 由前端 JS 写入，客户端可忽略）
+  - **门户 SSO 成功**：shiro-cas 验票 302 后种下 `customsid`（Shiro 会话）/`Authorization`（门户 API 令牌）/`rememberMe`；302 目标为 http:// 明文，客户端应替换 https
+  - **WebVPN（深澜 Srun）联动登录成功**：CAS `service=https://webvpn.cwxu.edu.cn/login?cas_login=true` → 初始 `wengine_vpn_ticket` → ticket 回跳 → `wengine-vpn-token-login` 一次性 token → WebVPN 会话建立（首页复查不再跳 /login）
+  - 深澜代理 URL 活样本已采集（`/https/77726476706e69737468656265737421<加密hex>/...`，两主机样本入库），为 M4 URL 加密逆向铺路
+- **交付物**：`cas.js`（CAS 公共库）、`webvpn.js`（WebVPN 探针）、probe.js 增强（--creds 凭据文件读取、SSO 重定向链验证）、REPORT.md 补真实登录与 WebVPN 章节
+- **安全**：凭据经文件读取（`--creds`），命令行/日志/响应均不落明文；`账号与密码.txt` 已加入 .gitignore
+- **验证**：真实账号两次探针全部通过（门户会话 Cookie + WebVPN 会话 Cookie 判定）
+- **PLAN.md**：侦察结论补 ⑥⑦ 两条（真实登录、WebVPN 联动）；M4 深澜素材就绪
+
 ## 2026-09-17 · CAS 统一身份认证登录协议逆向与实测（M1 侦察）
 
 - **模块**：CAS 登录协议（`docs/cas-recon/`）

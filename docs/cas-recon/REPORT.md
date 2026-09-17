@@ -47,17 +47,42 @@
 | GET /kaptcha | kaptchaType=1，uid + base64 PNG（算术题 `3*1=`、`3*2=`、`1*2=`、`0*0=`、`0*0=`、`4+3=`） |
 | POST /v1/tickets（假账号 22000000 + 正确验证码） | `{"code":"NOUSER"}` ← 验证码/加密/字段全部通过，直达账号校验 |
 | POST /v1/tickets（错误验证码） | `{"code":"CODEFALSE"}` ← 对照组 |
+| **POST /v1/tickets（真实账号，2026-09-17）** | **`{"tgt":"TGT-...","ticket":"ST-..."}` 登录成功**（响应顶层即 tgt/ticket，无 data 包裹、无 Set-Cookie——CASTGC 由前端 JS 写入，客户端可忽略） |
+| **SSO 回跳 my.cwxu.edu.cn** | **门户会话建立**：shiro-cas 验票 302 → `http://my.cwxu.edu.cn/#/index`，种 `customsid`（Shiro 会话）/ `Authorization`（门户 API 令牌）/ `rememberMe`。302 目标是 http:// 明文，客户端应替换为 https |
+
+## 三·二、WebVPN（深澜 Srun）CAS 联动登录（webvpn.js 实测通过，2026-09-17）
+
+```
+1. GET  https://webvpn.cwxu.edu.cn/
+   ← 302 /login + Set-Cookie: wengine_vpn_ticketwebvpn_cwxu_edu_cn=<初始值>
+2. CAS 登录（POST /lyuapServer/v1/tickets，service=https://webvpn.cwxu.edu.cn/login?cas_login=true）
+   ← {"tgt":..., "ticket":"ST-..."}
+3. GET  https://webvpn.cwxu.edu.cn/login?cas_login=true&ticket=<ST>   （带初始 wengine_vpn_ticket）
+   ← 302 wengine-vpn-token-login?token=<一次性token> → 200
+   ← Cookie: wengine_vpn_ticketwebvpn_cwxu_edu_cn(登录态) + show_vpn/show_fast/heartbeat/show_faq
+4. 复查 GET / → 302 到门户的 WebVPN 代理页（非 /login）＝ 会话有效
+```
+
+- WebVPN 本身就是 CAS 客户端：未登录访问 /login 会 302 到「WebVPN 代理路径下的 CAS 登录页」，协议层可直接用 CAS REST 流程拿 ST 回跳，**无需走代理登录页**。
+- 深澜代理 URL 样本（M4 逆向素材）：`/https/77726476706e69737468656265737421<加密hex>/...`
+  - `wxcas.cwxu.edu.cn` → `e7ef429d347e6b47661dc7a99c406d3676`
+  - `my.cwxu.edu.cn` → `fdee0f9f30287d1e7b0c9ce29b5b`
+  - 前缀 `77726476706e69737468656265737421` 为深澜固定特征串
 
 ## 四、文件说明
 
-- `probe.js` — 端到端探针：`node probe.js --captcha` 抓验证码 → 看图 → `node probe.js <学号> <密码> <答案>` 提交
+- `probe.js` — 门户 SSO 探针：`node probe.js --captcha` 抓验证码 → 看图 → `node probe.js <学号> <密码> <答案>` 或 `node probe.js --creds <凭据文件> <答案>`（成功后自动回跳验证门户会话）
+- `webvpn.js` — WebVPN 联动探针：`node webvpn.js --creds <凭据文件> <答案>`
+- `cas.js` — CAS 协议公共库（加密/cookie jar/登录函数，探针共用）
 - `rsa30.js` — 从线上 app.js 原样提取的 webpack 模块 30（Rust 实现的对照基准）
 - `extract-rsa.js` — 提取脚本（含加密自测，输入 app.js 路径）
 - app.js 原件不入库（602KB 第三方产物），如需重跑提取脚本：浏览器另存登录页主 JS 后传入
 
 ## 五、对 M1 实现的结论
 
-1. Rust 协议核心无需浏览器、无 Cookie jar 依赖即可完成 CAS 登录（reqwest + num-bigint 即可）。
+1. Rust 协议核心无需浏览器、无 Cookie jar 依赖即可完成 CAS 登录（reqwest + num-bigint 即可）；成功响应顶层即 `{tgt, ticket}`。
 2. 验证码为算术题（两操作数一位数，+/-/*），识别可纯本地：分色提取字符 → 模板匹配 → 计算，样本字体/布局高度规律。
 3. 密码加密为无 padding textbook RSA，实现时按第二节参数逐条对照 rsa30.js 做 golden test。
 4. 掉线检测可探测门户已登录页特征（沿用 Wxxy-CampusLogin 页面特征字符串模式）。
+5. 门户 SSO 与 WebVPN 登录共用同一 CAS 登录函数，仅 `service` 参数不同（门户=`https://my.cwxu.edu.cn/shiro-cas`，WebVPN=`https://webvpn.cwxu.edu.cn/login?cas_login=true` 且需先取初始 wengine_vpn_ticket）。
+6. CAS TGT 过期续签路径（`POST /v1/tickets/{CASTGC}` 签发新 ST）已在 JS 中确认存在，M1 保活可评估是否采用（客户端自持 TGT）。
