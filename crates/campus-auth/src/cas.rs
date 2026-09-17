@@ -18,8 +18,8 @@ pub const PORTAL_SERVICE: &str = "https://my.cwxu.edu.cn/shiro-cas";
 pub const WEBVPN_SERVICE: &str = "https://webvpn.cwxu.edu.cn/login?cas_login=true";
 pub const JWGL_SERVICE: &str = "https://jwgl.cwxu.edu.cn/sso/lyiotlogin";
 
-/// 门户首页（portal_probe 探测目标）。
-const PORTAL_HOME: &str = "https://my.cwxu.edu.cn/";
+/// 门户探测端点（首页）。
+const PORTAL_PROBE: &str = "https://my.cwxu.edu.cn/";
 
 /// 真实 Chrome UA（cas.js 同款）。
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -28,6 +28,8 @@ const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 /// Clone 供 AppState 锁内廉价 clone（reqwest::Client 为 Arc 包装），drop guard 后再 await。
 #[derive(Clone)]
 pub struct CasClient {
+    /// 手动跟随重定向（sso_follow 用；Policy::none）
+    http_manual: reqwest::Client,
     http: reqwest::Client,
     jar: Arc<RecordingJar>,
 }
@@ -87,7 +89,19 @@ impl CasClient {
             .user_agent(USER_AGENT)
             .cookie_provider(jar.clone())
             .build()?;
-        Ok(Self { http, jar })
+        // 手动跟随重定向用：sso_follow 的 302 链里存在响应 body 中断的跳（hyper
+        // IncompleteMessage），默认策略会因此整链失败；手动跟随只要拿到 Location 与
+        // Set-Cookie 即可继续，body 异常可忽略。与 http 共享同一 cookie jar。
+        let http_manual = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .cookie_provider(jar.clone())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self {
+            http,
+            http_manual,
+            jar,
+        })
     }
 
     /// 会话 Jar 句柄（check_session / 持久化用）。
@@ -154,7 +168,9 @@ impl CasClient {
         parse_login_response(&text)
     }
 
-    /// GET service?ticket= 跟 302 链到落点（reqwest 默认跟随重定向）。
+    /// GET service?ticket= 手动跟随 302 链到落点。
+    /// 不用默认重定向策略：该 302 链中存在响应体中断的跳（hyper `IncompleteMessage`），
+    /// 默认策略会因读 body 失败使整链报错；手动跟随只要 Location 与 Set-Cookie 即可继续。
     pub async fn sso_follow(
         &self,
         service_url: &str,
@@ -163,8 +179,35 @@ impl CasClient {
         let mut url = reqwest::Url::parse(service_url)
             .map_err(|e| CampusAuthError::Parse(format!("service URL 非法: {e}")))?;
         url.query_pairs_mut().append_pair("ticket", ticket);
-        let resp = self.http.get(url).send().await?;
-        let mut final_url = resp.url().clone();
+        let mut final_url = url.clone();
+        // 302 链中门户落点是 http:// 明文，而服务端对明文请求直接中断连接——
+        // 每次请求前把 cwxu 域名的 http 升级为 https（只升不降，避免来回跳）。
+        let upgrade = |u: &mut reqwest::Url| {
+            if u.scheme() == "http" && u.host_str().is_some_and(|h| h.ends_with(".cwxu.edu.cn")) {
+                let _ = u.set_scheme("https");
+            }
+        };
+        for _ in 0..10 {
+            upgrade(&mut final_url);
+            let resp = self.http_manual.get(final_url.clone()).send().await?;
+            let status = resp.status();
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            // 尽力读 body：某些跳 body 会中断（不影响 Set-Cookie 已入 jar 与下一跳）
+            let _ = resp.bytes().await;
+            if status.is_redirection() {
+                if let Some(loc) = loc {
+                    final_url = final_url
+                        .join(&loc)
+                        .map_err(|e| CampusAuthError::Parse(format!("重定向 URL 非法: {e}")))?;
+                    continue;
+                }
+            }
+            break;
+        }
         // REPORT.md 三节实测：门户 302 落点是 http:// 明文，客户端应替换为 https
         if final_url.scheme() == "http"
             && final_url.host_str().is_some_and(|h| h.ends_with(".cwxu.edu.cn"))
@@ -176,21 +219,25 @@ impl CasClient {
         Ok(final_url)
     }
 
-    /// 门户会话探测：customsid 存在且未被打回 CAS 登录页 = Alive。
+    /// 门户会话探测：jar 有 customsid 且访问门户首页未被弹回 CAS 域 = Alive。
+    /// 判据取舍（均实测）：
+    /// - 正文匹配不可用：门户首页 HTML 恒含 `lyuapServer/login` 常量（2 处），会把已登录判成 Expired；
+    /// - `/shiro-cas` 端点不可用：无 ticket 访问会触发服务端断连（hyper IncompleteMessage）；
+    /// - 未登录场景由 `customsid` 缺失挡住（首页未登录也返回 200 外壳，前端路由才跳登录）。
+    ///
+    /// ponytail: 过期精确检测待 M2 接入门户 API 后用鉴权接口（401/302 即过期）替代。
     pub async fn portal_probe(&self) -> SessionState {
         if !self.jar.has("customsid") {
             return SessionState::Expired;
         }
-        let Ok(resp) = self.http.get(PORTAL_HOME).send().await else {
+        let Ok(resp) = self.http.get(PORTAL_PROBE).send().await else {
             return SessionState::Expired;
         };
-        // 被打回 CAS：重定向链终点落在 CAS 域，或正文含 CAS 登录页路径特征
         let bounced = resp
             .url()
             .host_str()
             .is_some_and(|h| h.contains("wxcas.cwxu.edu.cn"));
-        let body = resp.text().await.unwrap_or_default();
-        if bounced || body.contains("lyuapServer/login") {
+        if bounced {
             SessionState::Expired
         } else {
             SessionState::Alive
