@@ -10,6 +10,10 @@ target/
 
 # Node
 node_modules/
+dist/
+
+# 验证码样本（体积大且无提交价值，labels/samples.json 与模板 JSON 照常进 git）
+scripts/captcha-samples/*.png
 
 # 环境与本地
 .env
