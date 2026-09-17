@@ -65,22 +65,22 @@
 
 ## 四、里程碑
 
-### M0 · 项目脚手架 ⬜
+### M0 · 项目脚手架 ✅（2026-09-17 完成）
 > 实施计划（任务级）：`docs/superpowers/plans/2026-09-17-m0-m1-foundation.md`（M0+M1，2026-09-17 定稿）
 - [x] 项目定名 Wxxy-CampusHub，`git init` + 首次提交（2026-09-15）
-- [ ] Tauri 2 + React 19 + TS + Vite + Tailwind 脚手架（目录结构对照 Wxxy-CampusLogin：`src-tauri/{commands,auth,infra,config,network,...}` + `frontend/src/{hooks,components,shared,...}`）
-- [ ] Rust 协议核心 crate 骨架（为安卓 path 依赖预留：无桌面依赖约束）
-- [ ] `tauriApi.ts` IPC 出口 + `CommandResult` 三态契约 + zustand 基建
-- [ ] CodeWiki 初始化（`cw` 全量编译）；CHANGELOG.md
-- 验收：`tauri dev` 双端（先只 Windows target）空窗口跑通，命令面注册表就位
+- [x] Tauri 2 + React 19 + TS + Vite + Tailwind v4 脚手架（`tauri-app/{frontend,src-tauri}` + 根 Cargo workspace；域色 token + shadcn 源码入库）
+- [x] Rust 协议核心 crate（`crates/campus-auth` CAS 协议 + `crates/campus-schedule` 课表，均无桌面依赖）
+- [x] `tauriApi.ts` IPC 出口 + `CommandResult` 三态契约 + zustand 基建（含悬浮 Dock 导航 8 面板）
+- [x] CodeWiki 初始化（10 篇文章）＋ CHANGELOG.md
+- 验收 ✅：`tauri dev` 起真实窗口渲染登录页（截图 `docs/verify/`），命令面注册表就位（7 条命令）
 
-### M1 · CAS 登录 + 账号管理 ⬜
+### M1 · CAS 登录 + 账号管理 ✅（2026-09-17 完成，真实账号端到端打通）
 - [x] CAS 登录协议逆向与实测（端点/参数/RSA/验证码形态全定案，probe.js 端到端验证 2026-09-17）
-- [ ] CAS 账密登录全流程（`/lyuapServer/login` 表单流程 + 会话 cookie 管理）
-- [ ] 验证码自动识别（形态确认后选方案：算术解析 / 轻量本地识别），失败自动重试
-- [ ] 多账号管理 + 密码加密存储（Windows 先 DPAPI，对齐 Wxxy-CampusLogin `account::crypto` 模式）
-- [ ] 登录态保活与过期检测（门户 cookie + CAS TGT）
-- 验收：命令行/界面完成登录，掉线自动检测，敏感信息日志脱敏
+- [x] CAS 账密登录全流程（REST `/v1/tickets` + 手动跟随 SSO 302 链 + RecordingJar 会话捕获；live 测试通过）
+- [x] 验证码自动识别（颜色不变强度图 + bbox 锚定 + NCC 模板匹配，**100%/0 自信错误**；失败自动换图 ≤3 张）
+- [x] 多账号密码加密存储（DPAPI 裸 FFI + accounts.json）＋ 已存账号一键免密重登（切换/重命名 UI 归 M2 设置页）
+- [x] 登录态检测（session.json DPAPI 持久化 + 启动 check_session + 失败清会话降级；定时保活轮询归 M5）
+- 验收 ✅：真实账号 live 端到端通过（ST/TGT 签发 → 门户三 cookie → Alive）；日志用户名打码、密码永不落盘；`docs/verify/` 有界面截图
 
 ### M2 · 门户核心页 ⬜
 - [ ] **首页（v2 精简版，2026-09-17 用户拍板）**：问候 + 钱包三卡（一卡通/邮箱/图书）+ 下一节课横幅（依赖课表，无数据时隐藏）+ 固定快捷动作 4-6 个；**不含**资讯/快捷应用/待办/会议/信息服务/课表卡片——各模块独立成页并靠 M5 系统通知触达

@@ -1,5 +1,24 @@
 # 更新日志
 
+## 2026-09-17 · M0+M1 交付：脚手架 + CAS 登录闭环（含验证码自动识别，真实账号端到端打通）
+
+- **模块**：`crates/campus-auth/`（新）、`tauri-app/{frontend,src-tauri}`（新）、根 workspace、CodeWiki
+- **计划与评审**：`docs/superpowers/plans/2026-09-17-m0-m1-foundation.md`（12 任务）——先经 deepseek-flash 独立评审（5 P0/10 P1/14 P2 全部消化，含 golden 值实测固化、reqwest CookieStore 读回限制、shadcn CLI 行为、beforeDevCommand cwd 等）
+- **M0 脚手架**：
+  - 根 Cargo workspace（campus-schedule + campus-auth + tauri-app/src-tauri）
+  - 前端：Vite 6 + React 19 + TS strict + Tailwind v4；域色 token 系统（10 色 + shadcn 语义映射 + 深色提亮档 + Outfit 数字字体）；`tauriApi.ts` 唯一 IPC 出口 + `CommandResult` 三态契约；AppShell 顶条 + **域色悬浮 Dock 导航**（8 项、framer-motion 域色胶囊/指示条、gsap 磁吸、reduced-motion 降级）；8 面板骨架；shadcn button/input/card/tooltip 源码入库
+  - `src-tauri`：AppState（tokio Mutex 锁纪律）+ DPAPI 裸 FFI 账号加密库 + session.json 会话持久化 + Tauri 2 配置（capabilities 最小集、CSP img-src data:）
+  - **CodeWiki 初始化**（7 篇架构/模块/概念/决策文章 + 3 篇踩坑记录）
+- **M1 登录闭环**：
+  - `crates/campus-auth`：textbook RSA（golden 对拍线上 JS，2 组固化向量）、CAS 客户端（kaptcha/login/16 错误码映射/**手动跟随 302 链**/portal_probe）、**RecordingJar**（自实现 CookieStore 记录会话，弥补 reqwest 0.12 内部 Jar 不可读回）
+  - **算术验证码自动识别 100%**：颜色不变强度图（`765-Σrgb` 按峰值归一化）+ bbox 锚定 16×14 画布 + NCC(0.88/0.03) + ±1px 位移补偿；**模板集 70/70、holdout 30/30、自信错误 0、拒绝 0**（三分类评测口径）
+  - 7 条 Tauri 命令（login/login_manual/login_saved/get_captcha/check_session/logout/list_accounts）+ 重试状态机（仅 WrongCaptcha 重试 ≤3、NOUSER 绝不自动重试、识别失败不消耗 CAS 错误计数）
+  - 登录页（四态状态机 + CAPTCHA_MANUAL 手动兜底 + 已存账号免密重登）+ 今日页骨架
+- **验证（均为实际输出）**：`cargo test --workspace` 全绿（campus-schedule 12 + campus-auth 12 + campus-hub 11）；clippy 新增代码零告警；`npm run build` 通过；**真实账号 live 测试通过**（`cargo test -p campus-auth -- --ignored cas_live`：自动识别 → CAS 签发 ST/TGT → SSO 回跳 → 门户三 cookie → 会话 Alive）；`npm run tauri dev` 起真实窗口渲染登录页（截图 `docs/verify/`）；浏览器验收 Dock 域色胶囊/深浅主题/面板切换（截图 `docs/verify/`）
+- **踩坑记录（写进 CodeWiki learnings）**：验证码识别五个独立根因（彩色灰度丢形/片序错/细笔画空网格/平局误杀/漏乘法分支）、CAS SSO 三坑（重定向中断/明文落点断连/探测误判）、批量图片标注不可靠（改结构化拼图 + 客观特征交叉校验）
+- **工程修正**：新增 `tauri-app/package.json`（承载 Tauri CLI——CLI 只从 cwd 及子目录发现 src-tauri）；`.gitignore` 补 dist/ 与样本/拼图 PNG
+- **未做（后续里程碑）**：M2 门户各页、M2.5 课表页与调课通知引擎、M3 一卡通/电费、M4 WebVPN 路由、M5 通知中心
+
 ## 2026-09-17 · 导航改版：悬浮 Dock 标签栏（用户指定，对齐 CampusLogin）
 
 - **模块**：设计文档 §4/§6/§7

@@ -1,0 +1,14 @@
+{
+  "name": "campushub-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri CLI 宿主：src-tauri 与 frontend 的兄弟目录约定（Tauri 2 只从 cwd 及其子目录发现 src-tauri）",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}
