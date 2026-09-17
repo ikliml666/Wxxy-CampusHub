@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["crates/campus-schedule"]
+
+[profile.release]
+lto = "thin"
