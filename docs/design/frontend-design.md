@@ -309,20 +309,18 @@
 4. M2.5 课表页（§5.1，用户点名重点功能）。
 5. 头像上传（裁切+压缩）在 M2 个人卡完成后插入实现。
 
-## 十一、shiguangschedule 复用评估（2026-09-17，分身实测 GitHub 仓库）
+## 十一、shiguangschedule 复用评估与 Rust 移植（2026-09-17 定稿）
 
-**结论**：该项目（拾光课程表，896★，活跃，2026-09 仍在更新）是 **Kotlin + Compose Multiplatform** 应用——**不存在组件/包级复用**，只有三块纯逻辑值得移植为 TypeScript；license **Apache-2.0 可闭源商用**（义务：附 LICENSE 副本、文件头注明参考与修改、不用其名号）。
+**结论**：该项目（拾光课程表，896★，活跃，v2.0.0）是 **Kotlin + Compose Multiplatform** 应用——**不存在组件/包级复用**，算法与数据模型**移植到 Rust**（协议核心 crate `crates/campus-schedule`，无 Tauri 依赖，桌面/安卓可共享；渲染仍由 React 消费几何结果）。license **Apache-2.0 可闭源商用**，合规三件套已就位：`crates/campus-schedule/NOTICE.md`（逐文件映射声明）+ `LICENSE-shiguangschedule.txt`（上游许可证副本）+ 根 `THIRD-PARTY-NOTICES.md`；被移植源文件头均标注来源与修改。
 
-**移植清单（算法级重写为 TS，成本低）**：
-- 周次计算三函数（`AppSettingsRepository.kt:138-217`）：开学日↔当前周互算，支持自定义周起始日（firstDayOfWeek）+ 总周数夹取——「第几周」「现在第几节课」全靠它。
-- 课程重叠分列算法（`WeeklyScheduleViewModel.kt:632-760` mergeCourses）：课程归一化 Float 区间 → 同日重叠分簇 → 区间图着色分列 → left/width 几何；配套坐标↔时间换算。
-- 数据模型字段设计：`weeks: number[]` 显式周次列表（**单双周不用标志位**，更通用）、`day`、`startSection/endSection`、`isCustomTime + customStartTime/customEndTime`、多课表 `courseTableId`、作息表与课表解耦（含按日期段自动切换的组合作息）。
-- 默认节次表常量（13 节）与网格样式常量集（`CourseTableRepository.kt` 末尾、`ScheduleGridStyle.kt:64-118`）→ 落成 CSS 变量。
-- ICS 导出模板（`IcsExportTool.kt:107-201`，每个 occurrence 独立 VEVENT）。
+**✅ 已移植（2026-09-17，12 个单元测试全通过）**：
+- `crates/campus-schedule/src/weeks.rs` — 周次计算三函数（开学日↔周次互算、自定义周起始日、越界夹取）；golden 测试锚定真实数据（2026-09-07 开学 → 2026-09-17 = 第 2 周，与门户一致）
+- `src/grid.rs` — `time_to_grid_scale` / `grid_scale_to_time` / `merge_courses`（归一化 clamp 修正 → 按日分组 → 重叠分簇（±0.01 容差）→ 贪心分列（区间图着色））；测试覆盖单列/两列/链式复用/非本周淡化/空节次表
+- `src/model.rs` — 数据模型（serde camelCase）：`Course`（含 **source 源隔离**与 `weeks` 显式列表）、`CourseTableConfig`、`TimeSlot`、**`CourseOverride`（自建调课叠加模型，上游缺口）**、`expand_week_mask`（正方周次位掩码展开）
+- `src/timeslots.rs` — 默认 13 节作息常量
+- `src/zhengfang.rs` — 正方课表响应解析器（本项目原创）：`kbList` → Course（节次 `jcs`/星期 `xqj`/位掩码 `oldzc`/教学班 `jxb_id`），坏数据跳过、课程名稳定配色
+- 合规：文件头标注「Adapted in part from shiguangschedule … Modified」；不用上游名号
 
-**不碰**：androidApp/**（小组件/通知/WebView 教务导入全是 Android 专属）、iosApp、desktopApp（12 行空壳）、Room/Koin/DataStore 依赖栈（我们走 Rust 命令 + SQLite/JSON）。
+**上游完整克隆**：`E:\ik\Documents\trae_projects\1\shiguangschedule`（工作区平级参考仓库，不进本项目 git）。
 
-**它没有、我们必须自建的**：
-1. **单次调课 override 模型**（它只有整日按周替换）——§5.1 第 4 条的调课通知自动调整核心。
-2. **教务接口直连请求层**（它是 WebView+JS 桥方案，不可移植）——我们走已验证的正方 REST 接口。
-3. WakeUp/CSV 等第三方格式解析（非本期范围）。
+**仍待建（M2.5 后续）**：调课通知 L1 规则解析引擎（消费 `CourseOverride` 模型）、自动更新 diff 快照逻辑、教师身份课表端点侦察、ICS 导出（模板已定位上游 `IcsExportTool.kt:107-201`）。

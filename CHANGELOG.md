@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-17 · 课表核心 Rust 移植（campus-schedule crate，M2.5 首个交付）
+
+- **模块**：Rust 协议核心（`crates/campus-schedule/`，纯逻辑无 Tauri 依赖，为安卓 path 依赖预留）
+- **摘要**：按用户指定将 shiguangschedule（拾光课程表，Apache-2.0）的算法与数据模型**移植到 Rust**（原计划 TypeScript，用户改定 Rust）：
+  - `model.rs`：Course/CourseTableConfig/TimeSlot（serde camelCase 对齐前端 IPC）+ **CourseOverride 调课叠加模型（自建，上游缺口）**+ CourseSource 导入/手动源隔离 + `expand_week_mask` 正方周次位掩码展开
+  - `weeks.rs`：周次计算三函数（Kotlin AppSettingsRepository.kt:138-224 → Rust/chrono），支持自定义周起始日
+  - `grid.rs`：time_to_grid_scale/grid_scale_to_time/merge_courses（Kotlin WeeklyScheduleViewModel.kt:324-754 → Rust），重叠分簇+贪心分列
+  - `timeslots.rs`：默认 13 节作息常量
+  - `zhengfang.rs`：正方课表响应解析器（本项目原创），坏数据跳过、课程名稳定配色
+- **验证**：cargo test **12/12 通过**——golden 锚定真实教务数据（开学日 2026-09-07 → 2026-09-17=第 2 周与门户一致）、位掩码 4095→1-12 周、分列（单列/两列/链式复用/非本周淡化）、正方样例解析
+- **合规（Apache-2.0）**：`crates/campus-schedule/NOTICE.md`（上游逐文件映射+修改说明）、上游 LICENSE 副本（LICENSE-shiguangschedule.txt）、根 `THIRD-PARTY-NOTICES.md`、被移植文件头「Adapted in part from … Modified」标注；不使用上游名号
+- **上游参考仓库**：完整克隆至工作区 `../shiguangschedule`（独立仓库，不进本项目 git）
+- **待办（M2.5 后续）**：调课通知 L1 规则解析引擎、自动更新 diff、教师课表端点、ICS 导出、Tauri 命令层接线
+
 ## 2026-09-17 · 首页 v2 定稿 + 课表功能立项（M2.5，用户拍板）
 
 - **模块**：PLAN.md / 设计文档（§4/§5/§5.1/§11）

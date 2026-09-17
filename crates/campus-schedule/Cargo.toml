@@ -1,0 +1,12 @@
+[package]
+name = "campus-schedule"
+version = "0.1.0"
+edition = "2021"
+description = "锡院助手课表领域核心：数据模型 / 周次计算 / 课程分列 / 正方教务课表解析"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+thiserror = "2"
