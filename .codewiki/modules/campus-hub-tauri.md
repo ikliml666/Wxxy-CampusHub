@@ -32,7 +32,7 @@ tags:
 
 `tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-45`。
 
-## 31 条命令面
+## 34 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -67,6 +67,9 @@ tags:
 | `update_course` | `course: Course` | `Course`（按 id 整条替换，id 不存在 err「课程不存在」；任意来源可编辑，M2.5 批次 2） | `timetable.rs:238` |
 | `delete_course` | `id: String` | 无（**级联清理**该课程挂载的 override；不存在 err「课程不存在」，M2.5 批次 2） | `timetable.rs:256` |
 | `export_ics` | — | `String`（展开式 VEVENT 文本，**不落盘**前端 Blob 下载；见下节，M2.5 批次 2） | `timetable.rs:378` |
+| `parse_notice` | `text: String` | `NoticeCandidate[]`（L1/L2 解析**不入库**，语义见 [[modules/campus-schedule\|课表核心]] notice 节；本地课表 + `current_week` 现算传入；M2.5 批次 3，命令数 31 → 34） | `timetable.rs` |
+| `apply_override` | `candidate: NoticeCandidate` | `CourseOverride`（校验 courseId 落在本地课程，缺失/已删 err「通知未匹配到本地课程」；字段级拷贝写 overrides，`autoApplied` = confidence==High；**同一 noticeId+courseId 重复采纳幂等覆盖**；M2.5 批次 3） | `timetable.rs` |
+| `revoke_notice` | `noticeId: String` | `u32`（按 `source_notice_id` 整批删除 override，返回条数，0 条幂等成功；M2.5 批次 3） | `timetable.rs` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
@@ -95,13 +98,14 @@ tags:
 - **`get_schedule_day_counts`**（遗留项新增）：月视图角标取数，区间倒挂防御同上；透传 bs-schedule `getCountBetweenTime`（**无分类参数，计数为当日全量**）。
 - **`open_app(url, isCas)`**：校验用**协议白名单** `campus_portal::is_http_url`（仅 http/https），而非 `open_url_in_browser` 的域名白名单——该 URL 来自校方应用目录（受信来源）、后端不抓取它（无 SSRF 面）、只在系统浏览器打开；实测 30 条目录数据中 16 条为非校园域，域名白名单会把学校自己的合法应用全部拦掉。打开动作复用官方 `tauri-plugin-opener` Rust API。**`isCas` 是契约保留字段，当前不影响打开策略**（`let _ = is_cas`）——可达性提示由前端按 `AppItem.access` 分级给出（webvpn 提示后仍打开 / unavailable 只提示不打开）。⚠️ WebVPN B 类包装未实现（实测网关对未登录请求一律回落、明文包装无法验证，会话打通 + 包装 + A 类 CAS 直达签发归 M4）。分工原则与数据分布见 [[learnings/portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工]]。
 
-## 课表命令与导入/ICS 链路（`commands/timetable.rs`，M2.5 批次 1+2）
+## 课表命令与导入/ICS/调课通知链路（`commands/timetable.rs`，M2.5 批次 1+2+3）
 
-课表命令不依赖 `portal_of` 模式：`get_timetable`/`export_ics`/手动课程三命令是**纯本地操作**（不取 State，直接 `state::data_dir()`）；只有 `import_timetable` 需要会话——锁内 clone `(client, tgt, portal)` 三件套后 drop guard 再 await。
+课表命令不依赖 `portal_of` 模式：`get_timetable`/`export_ics`/手动课程三命令/调课通知三命令是**纯本地操作**（不取 State，直接 `state::data_dir()`）；只有 `import_timetable` 需要会话——锁内 clone `(client, tgt, portal)` 三件套后 drop guard 再 await。
 
 - **`import_timetable` 链路**（`timetable.rs:75-150`）：门户学期信息（会话内已缓存）推导 `xnm`/`xqm`（冻结契约 §1.2 口径：`xnm`=`start_date` 前 4 位、`semester` `"1"→3/"2"→12`，**不用 `grade`**）→ `fetch_timetable_json`（901→TGT 静默重进在 campus-auth 内部；失败 Display 中文直接透出，`JwglNotLogin` =「教务会话已失效，请重新登录」）→ `parse_kb_response(json, DEFAULT_TABLE_ID)` → [[modules/campus-schedule|课表核心]] `diff_courses` 合并旧库 → 落库 → `ImportResult{added, changed, removed, total, changes}`（total = 合并后课程总数，含停开保留记录）。学期信息同时初始化/更新 `semester_start_date`（`"YYYYMMDD"`→`NaiveDate`）与 `semester_total_weeks`，**单字段解析失败保留旧值**（不因坏数据丢课表）。
 - **手动课程三命令**共用 `mutate_timetable`（load → 改 → save 骨架，`timetable.rs:165`）；无进程内互斥（前端交互串行，契约 §2.2 原子性由调用方保证）。`add_course_manual` 入参校验（课程名非空/星期 1-7/节次 start≤end/周次非空且 ≥1）后构造 `source=Manual` 课程，id=`manual-<纳秒时间戳>`（与导入 id `<table_id>-<jxb_id>` 前缀不同永不冲突，取舍见 [[decisions/timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]）。
 - **`export_ics`**（`build_ics`，`timetable.rs:299`）：展开式 VEVENT（不依赖 RRULE）——每门未停开课程 × 其每个教学周一个 VEVENT；日期 = `semester_start_date`（第 1 周周一锚点）+ `(周次-1)×7 + (星期-1)` 天；时间取 `campus_portal::block_time_slots`（本批次提升为 `pub` 并 re-export，与今日页同一事实来源），**大节号 = `(起始小节+1)/2`**，结束时刻取结束小节对应大节的 end_time；起始/结束大节任一超出 5 大节表 → 跳过该课程；TEXT 转义（`,` `;` `\` 换行）+ CRLF 行尾；floating local time（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释，取舍见同上 decision 文章）；缺 `semester_start_date` err「请先完成一次导入」。
+- **调课通知三命令**（M2.5 批次 3）：`parse_notice(text)` 本地课表 + `chrono::Local::now()` 现算 `current_week` 传入 `campus_schedule::parse_notice_text`（解析语义见 [[modules/campus-schedule|课表核心]]，取舍见 [[decisions/timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]），**不入库**；`apply_override(candidate)` 经 `candidate_to_override`（字段级拷贝 + `auto_applied`=High，纯函数与单测共用）写 overrides，`upsert_override` 以 noticeId+courseId 幂等覆盖、不同课程并存；`revoke_notice(noticeId)` 按 `source_notice_id` 整批删除返回条数。三者同样走 `mutate_timetable` 骨架、纯本地无会话。
 
 ## 登录重试状态机
 
@@ -158,4 +162,4 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）。`cargo test --workspace` 全量 **131 passed / 4 ignored**（2026-09-18 M2.5 批次 2 校验；campus-auth lib 18 + 集成 13、campus-hub 26（含 M2.5 批次 2 新增 8：ICS 展开/时间锚点/停开过滤/大节越界/转义与 CRLF/开学日解析/手动入参校验/转义函数）、campus-schedule 25（含 diff 模块 11：三分支/Manual 零触碰/退化匹配/复活/二轮不重复计数/等价 noop/乱序周次/周次文案）、campus-portal 49；4 个 ignored 为 cas_live/jwglxt_live/captcha 评测，待真机凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）。`cargo test --workspace` 全量 **146 passed / 4 ignored**（2026-09-18 M2.5 批次 3 校验；campus-auth lib 18 + 集成 13、campus-hub 29（批次 2 新增 8：ICS 展开/时间锚点/停开过滤/大节越界/转义与 CRLF/开学日解析/手动入参校验/转义函数；批次 3 新增 3：override 幂等覆盖/整批撤销/auto_applied 置信度）、campus-schedule 37（diff 11 + notice 12：高置信/缺要素/同名多门/0 命中书名号/停课/「本周」与区间/节次/星期/教室形态/类型关键词/noticeId 稳定）、campus-portal 49；4 个 ignored 为 cas_live/jwglxt_live/captcha 评测，待真机凭据）。

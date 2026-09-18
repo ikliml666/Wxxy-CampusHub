@@ -8,6 +8,7 @@ source_files:
   - crates/campus-schedule/src/timeslots.rs
   - crates/campus-schedule/src/zhengfang.rs
   - crates/campus-schedule/src/diff.rs
+  - crates/campus-schedule/src/notice.rs
   - crates/campus-schedule/src/lib.rs
   - crates/campus-schedule/Cargo.toml
   - crates/campus-schedule/NOTICE.md
@@ -79,6 +80,22 @@ tags:
 - **复活语义**：disabled 旧课再次匹配到 → `disabled=false` 并计入 changed（单测 `diff_revives_disabled_course`）。
 - 匹配成功时**整条采用 incoming 数据但 id 沿用旧库**（`diff.rs:160-165`）——调课 override 挂在 `course_id` 上，id 必须稳定（class_id 缺失退化匹配时 incoming 的 `<table_id>-<空 jxb_id>` id 可能不同，取舍见 [[decisions/timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]）。
 - `format_weeks`（`diff.rs:103`）：周次列表连续区间合并成紧凑文案（`1,2,3,7,8` → `1-3,7-8`）。
+
+## 调课通知 L1/L2 解析（notice.rs，M2.5 批次 3，本项目原创）
+
+`parse_notice_text(text, courses, current_week) -> Vec<NoticeCandidate>`（`notice.rs`）实现冻结契约 §2.5，纯函数、零新依赖（std 字符串处理，无 regex）；单候选产出与取舍见 [[decisions/timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]。
+
+- **NoticeCandidate**（契约 §2.3 冻结字段，camelCase）：`{noticeId, courseId?, courseName, changeType, weeks, newDay?, newStartSection?, newEndSection?, newPosition?, confidence: "high"|"low", reason, excerpt}`；`NoticeConfidence::{High, Low}` serde 小写。
+- **L1 提取**（数字锚定扫描 = `match_indices('周'/'节')` + `digits_before` 往左收 ASCII 数字，字节级安全因多字节字符各字节 ≥0x80）：
+  - 课程名：对本地课程名 contains 匹配；多名命中裁剪被长名包含的短名；0 命中回退书名号《X》提取填充 `courseName`；
+  - 周次：`3-4周` 区间优先 → 单周 `第3周`/`3周` → `本周`（需 `current_week` 锚点）；
+  - 星期：`周X` / `星期X` / `星期天`，1=周一…7=周日；
+  - 节次：`3-4节` 区间优先 → 单节 `第3节`（**强制「第」前缀**防「共16节课」误提）；
+  - 教室：`D4-207` 形态 token（`字母数字-数字`）优先 →「教室：/教室:」后兜底；
+  - 类型关键词：停课 > 补课 > 调课，无命中默认 Rescheduled（不影响置信）。
+- **箭头消歧**（`after_adjust_arrow`）：「由 A 调整到 B」的新值在 12 个箭头词之后——周次/星期/节次/教室四提取器 **tail 优先、全文回退**；旧值在前是调课通知的结构性特征（首个单测样例即暴露）。
+- **L2 置信**：reasons 空集 ⇔ High——课程唯一命中 && 周次/星期/节次齐全；降级原因逐项中文写入 `reason`（缺要素 / 同名多门 / 多名 / 0 命中 / 「本周」无锚点）。
+- **noticeId**：`notice_id_for` = `manual:<16 位十六进制>`（`DefaultHasher` 正文哈希，非密码学，去重与撤销键；M5 改公告 id）。
 
 ## Apache-2.0 合规三件套
 
