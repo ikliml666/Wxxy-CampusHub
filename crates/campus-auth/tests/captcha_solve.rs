@@ -3,7 +3,7 @@
 //! - `solve_synthetic_roundtrip`：程序合成彩色验证码 PNG，验证全链路（切分/强度归一化/
 //!   NCC/求值），无需网络与样本。
 //! - `build_templates`：读 `../../scripts/captcha-samples` + labels.json（70/30 划分，
-//!   类内取均值）写 `templates/kaptcha-templates.json`。
+//!   每类保留最多 `PER_CLASS_LIMIT` 张样本补丁）写 `templates/kaptcha-templates.json`。
 //! - `captcha_solve_eval`：同一划分下报告 正确/自信错误/拒绝 三分类（门槛 正确率 ≥98%
 //!   且 自信错误 =0——自信错误会消耗 CAS 连续错误计数，是红线）。
 //!
@@ -174,7 +174,7 @@ fn solve_synthetic_roundtrip() {
 
 // ---------- 依赖样本的测试（#[ignore]，主智能体运行） ----------
 
-/// 样本 + labels → 切分 → 每类取均值模板 → 写 templates/kaptcha-templates.json。
+/// 样本 + labels → 切分 → 每类留最多 PER_CLASS_LIMIT 张样本补丁作模板 → 写 json。
 /// labels.json / 样本目录缺失时打印说明并跳过（不 panic，等标注就位后重跑）。
 #[test]
 #[ignore]
