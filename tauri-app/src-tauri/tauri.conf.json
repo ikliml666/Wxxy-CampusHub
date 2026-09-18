@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc://localhost; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc://localhost; img-src 'self' data: https://*.cwxu.edu.cn http://*.cwxu.edu.cn; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'"
     }
   },
   "bundle": {

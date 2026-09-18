@@ -1,5 +1,25 @@
 # 更新日志
 
+## 2026-09-18 · M2 批次 2：资讯页 + 待办页数据接线
+
+- **模块**：`crates/campus-portal`（新增 article 模块）、`tauri-app/src-tauri`（6 新命令 + opener 插件 + CSP）、`tauri-app/frontend`（InfoPanel/TodoPanel 接真实数据 + TS 契约）、`.codewiki/`、`docs/`
+- **计划**：`docs/superpowers/plans/2026-09-18-m2-portal-pages.md`（实测接口全表 §1.2、栏目 id↔名称表、冻结契约 §2.1 批次 2——本条不重复抄表）
+- **`campus-portal` 新增 article 模块**（`article.rs`，官网静态页 → 安全 HTML 片段，纯函数 + 脱敏单测）：
+  - `is_allowed_info_url`：正文域名白名单（scheme 仅 http/https + host 精确后缀匹配 `cwxu.edu.cn` 及子域），单测覆盖 `cwxu.edu.cn.evil.com` / `cwxu.edu.cn@evil.com` / `ftp:` / `javascript:` / query 参数藏白名单域名等绕过形态（计划红线 3，防 SSRF/钓鱼）
+  - `extract_article`：博达 webplus 文章页提取（标题 `h2` 优先、`<title>` 兜底；容器 `div.v_news_content` 优先、`[id^=vsb_content]` 兜底），按**标签/属性白名单重建** HTML 片段——script/style/iframe/form 等危险标签连同子树整段剔除、`on*` 事件属性与 style/class 一律丢弃、src/href 相对地址转绝对且仅保留 http/https（图片额外放行 `data:image/`）；重建时文本/属性值重新转义（`&` 最先替换）
+  - `is_auth_wall`：判定正文页被官网鉴权开门页拦截（三依据：HTTP 非 2xx / 重定向最终 URL 命中 `/system/resource/code/auth/auth.htm` / 页面 `<title>` 精确为「系统提示」——解析 title 而非子串搜索，正文偶含该词不误判）
+- **`campus-portal` 扩展**：`parse.rs` 新增 4 个解析纯函数（`parse_info_columns` / `parse_info_list` / `parse_todo_tabs` / `parse_todo_list`）+ 实测 7 栏目常量 `KNOWN_COLUMNS`（订阅接口实测只返回 3 个，未订阅栏目按实测全量顺序垫底补全）+ 待办字段多候选键宽松映射 `todo_item_field`（真实字段形态未实测，见遗留）；`client.rs` 新增 5 个接口方法（资讯栏目 / 资讯列表 / 正文抓取 / 待办分栏 / 待办列表），`columnId`/`tabId` 拼接查询串前做输入校验。**正文抓取用裸 `http_client`，不带门户鉴权头**——正文页是公开静态页，JWT 只发门户同源，绝不随正文抓取泄漏到其他域名
+- **新增后端依赖**：`scraper` + `ego-tree`（HTML 解析与树遍历；手写 tokenizer 不可靠，弃）
+- **契约扩展 `InfoDetail { title, html: string|null, needsBrowser: boolean, url }`**（计划 §2.1 `InfoDetail{title,html}` 的兼容扩展），三分类结果：
+  - 正常：`needsBrowser=false` + 清洗后 HTML，前端内嵌渲染；
+  - `needsBrowser=true`（**不是错误态**）：正文受官网鉴权保护，前端显示「正文需在浏览器中查看」+「在浏览器打开原文」+「返回列表」，不显示错误/重试（站点侧拦截与网络无关，重试无效）；
+  - 真错误：网络/解析异常，错误态可重试。
+  - 根因（实机验证）：`content.jsp` 形态正文（通知公告 columnId 9 / 规章制度 5d2c45d23866497cb2bfe93e9f136bb2 两栏）无论带不带 Cookie/UA/Referer 都停在官网鉴权页，且无 `/info/` 替代形式（404）；其余五栏（校园要闻/校园快讯/教务处/学工处/团委）为 `/info/<栏目>/<id>.htm` 可正常抓取（jwc/xgc/tw 三站容器均为博达标准 `vsb_content*`/`v_news_content`）。完整教训见 `.codewiki/learnings/cwxu-official-site-content-extraction.md`
+- **tauri 接线**：新增 6 命令 `get_info_columns` / `get_info_list` / `get_info_detail` / `get_todo_tabs` / `get_todo_list` / `open_in_browser`（命令数 **14 → 20**）；`open_in_browser` 走官方 `tauri-plugin-opener`（Rust 侧调 API，不开放前端直接 invoke 插件命令，无需额外 capability），**白名单校验在可复用 helper `open_url_in_browser` 内部第一行**（复用 `is_allowed_info_url`，与正文抓取同一事实来源，批次 3 `open_app` 复用）；`lib.rs` 注册插件；`tauri.conf.json` CSP `img-src` 增加 `https/http://*.cwxu.edu.cn`（正文官网图片显示的必要配套，域名仍限校园官网）
+- **前端**：`InfoPanel.tsx`（7 栏 rail + 列表 + 内嵌正文 + 分页 + 四态；`needsBrowser` 分支无错误态；正文内 `<a>` 导航统一拦截，WebView 不随正文跳转外站；过期正文响应按 URL 比对丢弃防串台）；`TodoPanel.tsx`（三栏 rail + count 徽标 + 列表 + 空态 + 四态；接口实际返回 6 个 tab、前端按契约只展示 todo/done/apply，名称接口优先失败回落兜底）；`types.ts` 同步契约 7 接口；两页分页均按 `items.length == pageSize` 满页判断（服务端 `total`/`pageCount` 实测不可靠，不伪造页码）
+- **验证**：`cargo test --workspace` → **80 passed / 0 failed / 3 ignored**（`campus-portal` 27，批次 2 新增 14：白名单绕过形态、正文提取/清洗/兜底/错误路径、auth wall 三依据判定与正常页不误判、栏目兜底/列表过滤/待办多候选键解析）；`cargo check -p campus-hub` 通过；前端 `tsc --noEmit` 0 错误；`vite build` 通过；**真机**：资讯页 7 栏 rail、通知公告与校园要闻各 10 条真实列表（与门户一致）、分页可用；点开校园要闻一条 → 应用内正文渲染（标题/段落/图片正常）；点开通知公告一条 → 「正文需在浏览器中查看」+「在浏览器打开原文」（不再报错）；待办页三栏 + 空态（该账号三栏待办数确实均为 0）
+- **遗留**：待办列表「有数据」路径未真机验证（账号无数据，仅单测覆盖，多候选键映射待真机校准）；未订阅栏目的列表点击未实测；正文提取的实测覆盖 = `/info/` 三站 + auth 门识别，`content.jsp` 系栏目按设计降级（见 learnings）
+
 ## 2026-09-18 · M2 批次 1：门户数据接线基建 + 今日页真实数据
 
 - **模块**：`crates/campus-portal/`（新）、`crates/campus-auth`（两处最小改动）、`tauri-app/src-tauri`（新命令）、`tauri-app/frontend`（TodayPanel 接真实数据 + TS 契约）、`.codewiki/`、`docs/`

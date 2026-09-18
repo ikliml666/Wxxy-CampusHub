@@ -11,6 +11,7 @@ source_files:
   - crates/campus-auth/src/lib.rs
   - crates/campus-schedule/src/lib.rs
   - crates/campus-portal/src/lib.rs
+  - crates/campus-portal/src/article.rs
   - tauri-app/frontend/src/shared/tauriApi.ts
   - tauri-app/frontend/src/shared/types.ts
   - tauri-app/frontend/src/stores/authStore.ts
@@ -68,17 +69,17 @@ tags:
 
 ## 命令面与模块地图
 
-14 条命令注册于 `lib.rs:16-31`：登录/账号 8 条（`get_captcha` / `login` / `login_manual` / `login_saved` / `check_session` / `logout` / `list_accounts` / `remove_account`）+ 头像 5 条（`get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar` / `upload_official_avatar`——最后一条 2026-09-18 新增，把裁切后的头像经门户 `portraitChange` 上传回学校，协议细节见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）+ 门户数据 1 条（`get_portal_overview`，2026-09-18 M2 批次 1 新增，聚合学期/钱包/下一节课且子字段失败互不阻塞，协议细节见 [[modules/campus-portal|门户业务协议核心]]）。详见 [[modules/campus-hub-tauri|接线层 campus-hub-tauri]]。
+20 条命令注册于 `lib.rs:19-40`：登录/账号 8 条（`get_captcha` / `login` / `login_manual` / `login_saved` / `check_session` / `logout` / `list_accounts` / `remove_account`）+ 头像 5 条（`get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar` / `upload_official_avatar`——最后一条 2026-09-18 新增，把裁切后的头像经门户 `portraitChange` 上传回学校，协议细节见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）+ 门户数据 7 条（`get_portal_overview` 聚合学期/钱包/下一节课且子字段失败互不阻塞，批次 1；批次 2 追加资讯/待办 5 条 `get_info_columns` / `get_info_list` / `get_info_detail` / `get_todo_tabs` / `get_todo_list` 单接口透传 + `open_in_browser` 走官方 `tauri-plugin-opener`、白名单 helper 与正文抓取同源——协议细节见 [[modules/campus-portal|门户业务协议核心]]，`needsBrowser` 三分类背景见 [[learnings/cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级]]）。详见 [[modules/campus-hub-tauri|接线层 campus-hub-tauri]]。
 
 | 目录 | 职责 | 文章 |
 |---|---|---|
 | `crates/campus-auth/` | CAS 协议：textbook RSA、登录客户端、RecordingJar、验证码识别 | [[modules/campus-auth|CAS 协议核心]] |
 | `crates/campus-schedule/` | 课表模型、周次/网格算法、正方教务解析 | [[modules/campus-schedule|课表核心]] |
-| `crates/campus-portal/` | 门户业务协议：学期/钱包/周课表调用与解析、校本大节表 | [[modules/campus-portal|门户业务协议核心]] |
+| `crates/campus-portal/` | 门户业务协议：学期/钱包/周课表/资讯（含官网正文抓取与清洗）/待办调用与解析、校本大节表 | [[modules/campus-portal|门户业务协议核心]] |
 | `tauri-app/src-tauri/` | 命令面、AppState、DPAPI 存储 | [[modules/campus-hub-tauri|接线层]] |
 | `tauri-app/frontend/src/` | 外壳组件、账号系统与头像、Dock 导航、8 面板、域色 token | [[modules/frontend-shell|前端外壳]] |
 
-安全基线：CSP 收紧（`tauri.conf.json:26`，`connect-src 'self' ipc://localhost`）；capabilities 仅 `core:default`（`capabilities/default.json`）；密码只在内存中存续、立即 RSA 加密，日志用户名打码、密码绝不入日志（`commands/auth.rs:10-11,157-165`）；门户 csrf 密钥常量只存在于 campus-auth 源码内（`cas.rs:26`，明文不入 wiki/文档），头像上传日志只打码用户名、绝不打印 data URL（`profile.rs:219-262`）；门户网关 JWT 与邮箱 `loginUrl`（内含 authkey）只在 campus-portal 内存缓存中使用，不落盘、不记日志、不返回前端（[[modules/campus-portal|门户业务协议核心]]）；头像等非凭据明文落盘、凭据必 DPAPI（[[decisions/guest-mode-account-shell|游客优先决策]] D3）。
+安全基线：CSP 收紧（`tauri.conf.json:26`，`connect-src 'self' ipc://localhost`；M2 批次 2 起 `img-src` 额外放行 `https/http://*.cwxu.edu.cn` 供内嵌正文官网图片）；capabilities 仅 `core:default`（`capabilities/default.json`；opener 插件仅 Rust 侧调用，不开放前端 invoke）；密码只在内存中存续、立即 RSA 加密，日志用户名打码、密码绝不入日志（`commands/auth.rs:10-11,157-165`）；门户 csrf 密钥常量只存在于 campus-auth 源码内（`cas.rs:26`，明文不入 wiki/文档），头像上传日志只打码用户名、绝不打印 data URL（`profile.rs:219-262`）；门户网关 JWT 与邮箱 `loginUrl`（内含 authkey）只在 campus-portal 内存缓存中使用，不落盘、不记日志、不返回前端；**正文抓取与浏览器打开强制 `*.cwxu.edu.cn` 域名白名单**（`is_allowed_info_url` 单一事实来源，`is_allowed_info_url` 消费方见 [[learnings/cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级]]），且正文抓取用裸 HTTP client 不带门户鉴权头（JWT 只发门户同源）；头像等非凭据明文落盘、凭据必 DPAPI（[[decisions/guest-mode-account-shell|游客优先决策]] D3）。
 
 ## 与参考项目 Wxxy-CampusLogin 的关系
 

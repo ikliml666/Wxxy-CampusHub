@@ -5,7 +5,10 @@
 //!   —— 本模块三个接口全部属此信封；
 //! - 日程服务 `bs-schedule/*`（`code=="0"`）：M2 批次 3 再支持。
 
-use crate::{CourseBrief, PortalError, SemesterInfo, WalletSummary};
+use crate::{
+    CourseBrief, InfoColumn, InfoItem, InfoPage, PortalError, SemesterInfo, TodoItem, TodoPage,
+    TodoTab, WalletSummary,
+};
 use campus_schedule::TimeSlot;
 
 /// 门户统一信封校验：`meta.success==true` 时返回 `data` 引用，否则 Err（保留服务端 message）。
@@ -264,6 +267,198 @@ pub fn next_course_from_now(ws: &WeekSchedule) -> Option<CourseBrief> {
     next_course(&ws.grid, weekday, elapsed, &slots)
 }
 
+/// 实测全量资讯栏目 id ↔ 名称（2026-09-18 主智能体实机侦察，计划 §1.2）。
+///
+/// 依据：`queryUserSubscribeColumn` 只返回**当前账号订阅的栏目**（实测 3 个），
+/// 而资讯页栏目 rail 需要完整 7 栏——未订阅栏目与名称以此表兜底补全。
+/// 正文均在官网静态页（`*.cwxu.edu.cn`）。
+pub(crate) const KNOWN_COLUMNS: &[(&str, &str)] = &[
+    ("9", "通知公告"),
+    ("f382fddd843b4058a486a9375ecf422d", "校园要闻"),
+    ("a8bc1e5a9225475b9841b5a237c690df", "校园快讯"),
+    ("ea0a5b2158bf48b3afeb026477c626e4", "教务处"),
+    ("4f5a7ccbc5704a6690f0d3ac429c2201", "学工处"),
+    ("5d2c45d23866497cb2bfe93e9f136bb2", "规章制度"),
+    ("d4901da2e5df4db9b6b551df4d5b85dd", "团委"),
+];
+
+/// `titleLocale` → 中文名：实测为 JSON 字符串 `{"zh_CN":...,"en_US":...}`，
+/// 宽松兼容直接给对象/字符串的形态；zh_CN 缺失时取任意一个非空值。
+fn locale_zh(v: Option<&serde_json::Value>) -> Option<String> {
+    let obj: serde_json::Value = match v? {
+        serde_json::Value::String(s) => serde_json::from_str(s).ok()?,
+        other => other.clone(),
+    };
+    obj.get("zh_CN")
+        .and_then(jstr)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            obj.as_object()?
+                .values()
+                .find_map(jstr)
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// 分页字段宽松 u32（缺失/异常按 0；total/pageCount 实测不可靠，见 InfoPage）。
+fn jnum_u32(v: &serde_json::Value, key: &str) -> u32 {
+    v.get(key).and_then(jnum).unwrap_or(0.0).max(0.0) as u32
+}
+
+/// 解析 `api/uppinfo/userSetting/queryUserSubscribeColumn`（纯函数供离线单测）。
+///
+/// 输出 = 订阅项（按接口 sortNum 升序，名称取 `titleLocale.zh_CN`，解析失败
+/// 回落 [`KNOWN_COLUMNS`] 常量名）+ 未订阅项（按实测全量顺序垫底补全）。
+/// 未订阅项无接口 sortNum，用 1000+序号保序占位（实测订阅 sortNum 为个位数量级，
+/// 前端直接消费数组顺序，该值仅排序用）。
+pub fn parse_info_columns(body: &str) -> Result<Vec<InfoColumn>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("资讯栏目响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "资讯栏目")?;
+    let arr = d
+        .as_array()
+        .ok_or_else(|| PortalError::Parse("资讯栏目响应结构异常".to_string()))?;
+    let mut out: Vec<InfoColumn> = Vec::with_capacity(KNOWN_COLUMNS.len());
+    for item in arr {
+        let Some(id) = item
+            .get("columnId")
+            .and_then(jstr)
+            .filter(|s| !s.is_empty())
+        else {
+            continue; // 缺 id 的条目无意义，跳过
+        };
+        let known = KNOWN_COLUMNS.iter().find(|(kid, _)| *kid == id);
+        let name = locale_zh(item.get("titleLocale"))
+            .or_else(|| known.map(|(_, n)| (*n).to_string()))
+            .unwrap_or_else(|| "未知栏目".to_string());
+        let sort_num = jnum_u32(item, "sortNum");
+        out.push(InfoColumn { id, name, sort_num });
+    }
+    for (i, (id, name)) in KNOWN_COLUMNS.iter().enumerate() {
+        if !out.iter().any(|c| c.id == *id) {
+            out.push(InfoColumn {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                sort_num: 1000 + i as u32,
+            });
+        }
+    }
+    out.sort_by_key(|c| c.sort_num);
+    Ok(out)
+}
+
+/// 解析 `api/uppinfo/infoCenter/querySimpleInfoCenter`（纯函数供离线单测）。
+///
+/// ⚠️ 实测 `total`/`pageCount` 均不可靠（pageSize=1 时返回 0），原样透传；
+/// **前端分页以 items.length 与 pageSize 判断**。`infoId` 或 `extLink` 缺失的
+/// 条目跳过（无 id 无法标记已读、无 url 无法打开正文），其余字段缺失降级空串。
+pub fn parse_info_list(body: &str) -> Result<InfoPage, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("资讯列表响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "资讯列表")?;
+    let empty = Vec::new();
+    let list = d.get("list").and_then(|x| x.as_array()).unwrap_or(&empty);
+    let items = list
+        .iter()
+        .filter_map(|it| {
+            let id = it.get("infoId").and_then(jstr).filter(|s| !s.is_empty())?;
+            let url = it.get("extLink").and_then(jstr).filter(|s| !s.is_empty())?;
+            Some(InfoItem {
+                id,
+                title: it.get("infoTitle").and_then(jstr).unwrap_or_default(),
+                column_title: it.get("columnTitle").and_then(jstr).unwrap_or_default(),
+                publish_time: it.get("publishTime").and_then(jstr).unwrap_or_default(),
+                dept: it
+                    .get("publishDeptName")
+                    .and_then(jstr)
+                    .filter(|s| !s.is_empty()),
+                url,
+            })
+        })
+        .collect();
+    Ok(InfoPage {
+        page: jnum_u32(d, "pageNum"),
+        page_size: jnum_u32(d, "pageSize"),
+        page_count: jnum_u32(d, "pageCount"),
+        total: jnum_u32(d, "total"),
+        items,
+    })
+}
+
+/// 解析 `api/uppflow/affairCenter/queryTabItems?isCount=1`（纯函数供离线单测）。
+///
+/// 接口实际返回 6 个 tab（todo/done/apply/unread/read/focus），全量透传；
+/// 契约前端只展示 todo/done/apply 三栏。`selected`（筛选项定义）不在契约内，忽略。
+pub fn parse_todo_tabs(body: &str) -> Result<Vec<TodoTab>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("待办分栏响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "待办分栏")?;
+    let arr = d
+        .as_array()
+        .ok_or_else(|| PortalError::Parse("待办分栏响应结构异常".to_string()))?;
+    Ok(arr
+        .iter()
+        .filter_map(|t| {
+            let id = t.get("tabId").and_then(jstr).filter(|s| !s.is_empty())?;
+            Some(TodoTab {
+                id,
+                name: t.get("tabName").and_then(jstr).unwrap_or_default(),
+                desc: t.get("tabDesc").and_then(jstr).unwrap_or_default(),
+                count: jnum_u32(t, "count"),
+            })
+        })
+        .collect())
+}
+
+/// 待办条目字段宽松映射：按候选键序取第一个非空值。⚠️ 真实字段形态未实测
+/// （账号无待办数据，`queryFlowItems` 返回空数组），候选键为门户系统常见命名，
+/// 真机出现数据后需校准（见 `lib::TodoItem` 注释）。
+fn todo_item_field(obj: &serde_json::Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|k| obj.get(*k).and_then(jstr).filter(|s| !s.is_empty()))
+        .unwrap_or_default()
+}
+
+/// 解析 `api/uppflow/process/queryFlowItems`（纯函数供离线单测）。
+///
+/// 信封 `data` 内层又是 `data:[]` 条目数组（与列表页同构）；id 无法映射出的
+/// 条目跳过（前端列表需要稳定 key）。
+pub fn parse_todo_list(body: &str) -> Result<TodoPage, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("待办列表响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "待办列表")?;
+    let empty = Vec::new();
+    let list = d.get("data").and_then(|x| x.as_array()).unwrap_or(&empty);
+    let items = list
+        .iter()
+        .filter_map(|it| {
+            let id = todo_item_field(it, &["processId", "itemId", "id"]);
+            if id.is_empty() {
+                return None;
+            }
+            Some(TodoItem {
+                id,
+                title: todo_item_field(it, &["title", "processName", "itemName", "workName"]),
+                applicant: todo_item_field(
+                    it,
+                    &["applicant", "applyUserName", "creatorName", "senderName"],
+                ),
+                apply_time: todo_item_field(it, &["applyTime", "createTime", "sendTime"]),
+                source: todo_item_field(it, &["source", "appName", "deptName"]),
+                node: todo_item_field(it, &["node", "nodeName", "currentNode", "stepName"]),
+                urgency: todo_item_field(it, &["urgency", "urgencyName", "urgencyCode"]),
+            })
+        })
+        .collect();
+    Ok(TodoPage {
+        page: jnum_u32(d, "pageNum"),
+        page_size: jnum_u32(d, "pageSize"),
+        page_count: jnum_u32(d, "pageCount"),
+        total: jnum_u32(d, "total"),
+        items,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +686,178 @@ mod tests {
         // 直接验证薄包装在「本地周末」场景的防御不 panic（结果取决于运行日）
         let ws = parse_week_schedule(&week_schedule_fixture(5)).unwrap();
         let _ = next_course_from_now(&ws);
+    }
+
+    // ---------- parse_info_columns（fixture 全脱敏：仅栏目 id 与通用名称） ----------
+
+    /// 订阅接口形态：只含当前账号订阅的栏目（fixture 取 2 个 + 1 个
+    /// titleLocale 损坏的条目验证常量名兜底）。
+    const COLUMNS_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":[
+        {"columnId":"f382fddd843b4058a486a9375ecf422d","titleLocale":"{\"zh_CN\":\"校园要闻\",\"en_US\":\"Campus News\"}","sortNum":2,"columnType":1,"isRemind":1},
+        {"columnId":"9","titleLocale":"{\"zh_CN\":\"通知公告\"}","sortNum":1,"columnType":1,"isRemind":0},
+        {"columnId":"a8bc1e5a9225475b9841b5a237c690df","titleLocale":"broken","sortNum":3,"columnType":1,"isRemind":0}
+    ]}"#;
+
+    #[test]
+    fn info_columns_merge_subscribed_with_known_fallback() {
+        let cols = parse_info_columns(COLUMNS_FIXTURE).unwrap();
+        // 订阅 3 个 + 未订阅 4 个 = 实测全量 7 栏
+        assert_eq!(cols.len(), 7);
+        // 订阅项按 sortNum 升序在前；titleLocale 损坏的栏目回落常量名
+        assert_eq!(cols[0].id, "9");
+        assert_eq!(cols[0].name, "通知公告");
+        assert_eq!(cols[0].sort_num, 1);
+        assert_eq!(cols[1].name, "校园要闻");
+        assert_eq!(cols[2].name, "校园快讯"); // 常量名兜底
+        assert_eq!(cols[2].sort_num, 3);
+        // 未订阅项按实测全量顺序垫底（sortNum 1000+ 保序占位）
+        assert_eq!(cols[3].id, "ea0a5b2158bf48b3afeb026477c626e4");
+        assert_eq!(cols[3].name, "教务处");
+        assert_eq!(cols[6].name, "团委");
+        // KNOWN_COLUMNS 前 3 项已被订阅，团委在全量表中排第 7（索引 6）
+        assert_eq!(cols[6].sort_num, 1006);
+    }
+
+    #[test]
+    fn info_columns_error_paths() {
+        // data 非数组 / 信封失败 / 非法 JSON
+        assert!(parse_info_columns(r#"{"meta":{"success":true},"data":{}}"#).is_err());
+        assert!(parse_info_columns(r#"{"meta":{"success":false}}"#).is_err());
+        assert!(parse_info_columns("not json").is_err());
+        // 缺 columnId 的条目被跳过（不报错）
+        let cols = parse_info_columns(r#"{"meta":{"success":true},"data":[{"titleLocale":"{}"}]}"#)
+            .unwrap();
+        assert_eq!(cols.len(), 7); // 仅剩常量兜底
+        assert_eq!(cols[0].name, "通知公告");
+    }
+
+    // ---------- parse_info_list ----------
+
+    /// 列表形态复刻（字段与计划 §1.2 同构，内容全脱敏；total/pageCount=0
+    /// 复刻「pageSize=1 时分页字段不可靠」的实测形态）。
+    const INFO_LIST_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":{
+        "pageNum":1,"pageSize":10,"total":0,"pageCount":0,
+        "list":[
+            {"infoId":"9001","infoTitle":"示例通知标题一","extLink":"https://www.cwxu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1039&wbnewsid=9001","publishTime":"2026-09-01 10:00:00","columnTitle":"通知公告","publishDeptName":"示例部门","hitCount":123,"detailType":"link","top":0},
+            {"infoId":"9002","infoTitle":"示例通知标题二","extLink":"https://jwc.cwxu.edu.cn/info/1100/9002.htm","publishTime":"2026-09-02 11:00:00","columnTitle":"教务处","publishDeptName":null,"hitCount":null,"detailType":"link"},
+            {"infoId":"9003","infoTitle":"缺正文链接的条目"}
+        ]}}"#;
+
+    #[test]
+    fn info_list_maps_items_and_passes_unreliable_paging_through() {
+        let p = parse_info_list(INFO_LIST_FIXTURE).unwrap();
+        // total/pageCount 实测不可靠，原样透传（前端以 items.length 判断分页）
+        assert_eq!((p.page, p.page_size, p.page_count, p.total), (1, 10, 0, 0));
+        // 缺 extLink 的条目被跳过
+        assert_eq!(p.items.len(), 2);
+        let first = &p.items[0];
+        assert_eq!(first.id, "9001");
+        assert_eq!(first.title, "示例通知标题一");
+        assert_eq!(first.column_title, "通知公告");
+        assert_eq!(first.publish_time, "2026-09-01 10:00:00");
+        assert_eq!(first.dept.as_deref(), Some("示例部门"));
+        assert_eq!(
+            first.url,
+            "https://www.cwxu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1039&wbnewsid=9001"
+        );
+        // publishDeptName null → dept None
+        assert_eq!(p.items[1].dept, None);
+    }
+
+    #[test]
+    fn info_list_empty_and_error_paths() {
+        // 空列表（当前账号无订阅栏目数据时的实测形态）
+        let empty = parse_info_list(
+            r#"{"meta":{"success":true},"data":{"pageNum":1,"pageSize":10,"total":0,"pageCount":0,"list":[]}}"#,
+        )
+        .unwrap();
+        assert!(empty.items.is_empty());
+        // list 缺失 → 空列表不报错；信封失败 / 非法 JSON → Err
+        assert!(parse_info_list(r#"{"meta":{"success":true},"data":{}}"#)
+            .unwrap()
+            .items
+            .is_empty());
+        assert!(parse_info_list(r#"{"meta":{"success":false}}"#).is_err());
+        assert!(parse_info_list("not json").is_err());
+    }
+
+    // ---------- parse_todo_tabs ----------
+
+    /// 分栏形态（与实测同构：tabId/tabName/tabDesc/count/selected；值脱敏）。
+    const TODO_TABS_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":[
+        {"tabId":"todo","tabName":"我的待办","tabDesc":"待办的事务","count":2,"selected":[{"fieldId":"f1","fieldCode":"urgency","fieldName":"紧急程度"}]},
+        {"tabId":"done","tabName":"我的已办","tabDesc":"已完成的事务","count":0,"selected":[]},
+        {"tabId":"apply","tabName":"我的申请","tabDesc":"申请的事务","count":0,"selected":[]}
+    ]}"#;
+
+    #[test]
+    fn todo_tabs_map_id_name_desc_count() {
+        let tabs = parse_todo_tabs(TODO_TABS_FIXTURE).unwrap();
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[0].id, "todo");
+        assert_eq!(tabs[0].name, "我的待办");
+        assert_eq!(tabs[0].desc, "待办的事务");
+        assert_eq!(tabs[0].count, 2);
+        assert_eq!(tabs[1].count, 0);
+    }
+
+    #[test]
+    fn todo_tabs_error_paths() {
+        assert!(parse_todo_tabs(r#"{"meta":{"success":true},"data":{}}"#).is_err());
+        assert!(parse_todo_tabs(r#"{"meta":{"success":false}}"#).is_err());
+        assert!(parse_todo_tabs("not json").is_err());
+    }
+
+    // ---------- parse_todo_list ----------
+
+    /// 列表形态：信封 data 内层 `data:[]`；两条分别用主候选键与备选候选键
+    /// （真实条目字段未实测，见 todo_item_field 注释；内容全脱敏占位）。
+    const TODO_LIST_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":{
+        "pageNum":1,"pageSize":10,"pageCount":0,"total":0,
+        "data":[
+            {"processId":"p1","processName":"示例申请事项","applicant":"张三","applyTime":"2026-09-10 09:00:00","appName":"示例应用","nodeName":"学院审批","urgency":"一般"},
+            {"id":"p2","title":"备选键名条目","senderName":"李四","createTime":"2026-09-11 10:00:00","deptName":"示例部门","stepName":"待审核","urgencyCode":"0"},
+            {"title":"缺 id 的条目"}
+        ]}}"#;
+
+    #[test]
+    fn todo_list_maps_candidate_keys_and_skips_idless() {
+        let p = parse_todo_list(TODO_LIST_FIXTURE).unwrap();
+        assert_eq!((p.page, p.page_size), (1, 10));
+        // 缺 id 的条目跳过
+        assert_eq!(p.items.len(), 2);
+        let a = &p.items[0];
+        assert_eq!(a.id, "p1");
+        assert_eq!(a.title, "示例申请事项");
+        assert_eq!(a.applicant, "张三");
+        assert_eq!(a.apply_time, "2026-09-10 09:00:00");
+        assert_eq!(a.source, "示例应用");
+        assert_eq!(a.node, "学院审批");
+        assert_eq!(a.urgency, "一般");
+        let b = &p.items[1];
+        // 备选候选键（id/title/senderName/createTime/deptName/stepName/urgencyCode）
+        assert_eq!(b.id, "p2");
+        assert_eq!(b.title, "备选键名条目");
+        assert_eq!(b.applicant, "李四");
+        assert_eq!(b.source, "示例部门");
+        assert_eq!(b.node, "待审核");
+        assert_eq!(b.urgency, "0");
+    }
+
+    #[test]
+    fn todo_list_empty_and_error_paths() {
+        // 当前账号实测形态：三栏均空数组
+        let empty = parse_todo_list(
+            r#"{"meta":{"success":true},"data":{"pageNum":1,"pageSize":10,"pageCount":0,"total":0,"data":[]}}"#,
+        )
+        .unwrap();
+        assert!(empty.items.is_empty());
+        // data.data 缺失 → 空列表不报错；信封失败 / 非法 JSON → Err
+        assert!(parse_todo_list(r#"{"meta":{"success":true},"data":{}}"#)
+            .unwrap()
+            .items
+            .is_empty());
+        assert!(parse_todo_list(r#"{"meta":{"success":false}}"#).is_err());
+        assert!(parse_todo_list("not json").is_err());
     }
 }

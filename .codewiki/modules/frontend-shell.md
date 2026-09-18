@@ -43,7 +43,7 @@ tags:
 ## IPC 出口与契约类型（shared/）
 
 - `tauriApi.ts:8-17`：`invokeCommand<T>(cmd, args)` 是**唯一 IPC 出口**，invoke 抛错包装为 `{ success:false, message:String(e) }`，调用方只处理 CommandResult（契约详见 [[modules/campus-hub-tauri|接线层]] 与 [[_architecture|架构总览]]）。
-- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-55`：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
+- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:116` 起：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
 - `cn.ts:3-5`：clsx + tailwind-merge 的 `cn()`。
 
 ## authStore：登录态单一来源（zustand + persist）
@@ -111,7 +111,7 @@ tags:
 
 ## 面板：游客空态与数据接入中
 
-8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。TodayPanel 自 2026-09-18 M2 批次 1 起接真实数据（见下节），游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
+8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。已接真实数据的面板：TodayPanel（M2 批次 1，见下节）、InfoPanel 与 TodoPanel（M2 批次 2，见下两节）。TodayPanel 游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
 
 ## TodayPanel：今日页真实数据（M2 批次 1）
 
@@ -123,6 +123,22 @@ tags:
 - **出错**：总览命令失败 → 错误条 + **重试按钮**（`reloadTick` 自增触发 effect 重拉，`TodayPanel.tsx:105,119-128,201-218`），不白屏、不伪造数据。
 
 「下一节课」的大节起始时刻口径由后端 [[modules/campus-portal|门户业务协议核心]] 的校本大节表决定，前端不自算时间（教训见 [[learnings/portal-block-periods-and-school-timetable|门户大节语义与校本作息]]）。
+
+## InfoPanel：资讯页真实数据（M2 批次 2）
+
+三个独立 state 机各管一层（`InfoPanel.tsx:16-32`）：`ColumnsState`（栏目 rail：loading/ready/error）、`ListState`（列表四态）、`DetailState`（正文视图三态，`null` = 列表视图）。
+
+- **栏目 rail**：登录后取一次 `get_info_columns`（后端固定 7 栏），首个栏目自动选中（`InfoPanel.tsx:72-89`）；失败整条错误 + 重试、加载中骨架胶囊；`role="tablist"` 语义；切栏目回第 1 页。
+- **列表**：`get_info_list`（pageSize=10），条目行 = 栏目名（info 域色）+ 标题 + 部门（`sm:` 以上显示）+ 日期（`dateOf` 截取 `publishTime` 前 10 字符、不做时区换算，`InfoPanel.tsx:35-37`）；四态完整；**「下一页」按 `items.length == PAGE_SIZE` 满页判断**（服务端 total/pageCount 不可靠，`InfoPanel.tsx:144` 注释），不伪造页码。
+- **内嵌正文**：`fetchDetail` 打开即带条目标题渲染骨架（`InfoPanel.tsx:114-125`）；后端清洗 HTML 经 `dangerouslySetInnerHTML` 直接渲染，**前端不二次清洗**（`InfoPanel.tsx:281`）；正文容器 `onClick={stopLinkNav}` 统一拦截 `<a>` 导航——WebView 不随正文跳转外站（`InfoPanel.tsx:40-42,278`）；已切走（返回列表/打开另一条）后的过期响应按 URL 比对丢弃（`InfoPanel.tsx:119-120`）；「返回列表」只置 `detail=null`，列表状态保留。
+- **needsBrowser 分支**（`InfoPanel.tsx:249-271`）：显示「正文需在浏览器中查看 / 该栏目正文由学校官网鉴权保护，无法在应用内展示」+「在浏览器打开原文」（调 `open_in_browser`，失败内联文案）+「返回列表」——**无错误态/重试**（官网鉴权拦截与网络无关，重试无效）。
+- 正文排版 `ARTICLE_CLASS`（`InfoPanel.tsx:45-55`）：段落/标题/表格/列表/图片/引用的最小样式，全部走 token 与 `[_a]` 域色选择器；外链 `<a>` 语义保留但点击被拦截。
+
+## TodoPanel：待办页真实数据（M2 批次 2）
+
+- **三栏 rail**：契约冻结三栏 `TODO_TAB_IDS = ["todo", "done", "apply"]`（`TodoPanel.tsx:17`；接口实际返回 6 个 tab，unread/read/focus 不在契约内不展示）；名称接口优先、失败回落 `TODO_TAB_FALLBACK` 兜底文案不阻塞列表（`TodoPanel.tsx:18-22,88-89`）；`count > 0` 显示待办数徽标（`TodoPanel.tsx:129-131`）。
+- **列表**：`get_todo_list`（pageSize=10），标题 + 副行元信息 `metaLine`（申请人 · 申请时间 · 节点 · 紧急度，空段省略、全空回落 source 或 "—"，`TodoPanel.tsx:32-34,178-188`）；空态「暂无事项」（账号无待办时的常态）、错误可重试；分页同资讯页满页判断。
+- 分栏名称与待办数取 `get_todo_tabs`（增强信息），与列表取数解耦——分栏接口失败只影响 rail 文案与徽标，列表照常。
 
 ## DockNav：悬浮 Dock 导航（未改）
 

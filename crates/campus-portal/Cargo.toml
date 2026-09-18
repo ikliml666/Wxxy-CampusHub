@@ -21,3 +21,5 @@ serde_json = "1"
 # 「下一节课」取本地星期与 HH:MM（std/clock 特性，与 campus-schedule 对齐）
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 thiserror = "2"
+scraper = "0.27.0"
+ego-tree = "0.11"

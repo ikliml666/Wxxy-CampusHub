@@ -21,13 +21,14 @@ tags:
   - login
   - avatar
   - portal
+  - opener
 ---
 
 # 接线层（campus-hub src-tauri）
 
-`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:16-31`。
+`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-40`。
 
-## 14 条命令面
+## 20 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -45,6 +46,12 @@ tags:
 | `sync_official_avatar` | — | 同 AvatarData（无会话 → err「请先登录」） | `profile.rs:193-209` |
 | `upload_official_avatar` | `imageDataUrl: String` | 同 AvatarData（无会话 → err「请先登录」；data URL 非法/超 200KB → err；上传成功后重拉官方头像落盘，2026-09-18 新增） | `profile.rs:219-262` |
 | `get_portal_overview` | — | `PortalOverview{ semester, wallet, nextCourse, fetchedAt }`，三个子项均可 null（无会话 → err「请先登录」；2026-09-18 M2 批次 1 新增） | `portal.rs:23-79` |
+| `get_info_columns` | — | `InfoColumn[]`（后端固定 7 栏：订阅接口 + 实测全量兜底） | `portal.rs:86-97` |
+| `get_info_list` | `columnId, page, pageSize` | `InfoPage`（total/pageCount 不可靠原样透传，前端满页判断分页） | `portal.rs:101-115` |
+| `get_info_detail` | `url` | `InfoDetail{ title, html?, needsBrowser, url }` 三分类（正常 HTML / 鉴权门 `needsBrowser=true` 非错误 / 真错误；正文已由协议层白名单清洗，命令层不二次处理） | `portal.rs:119-131` |
+| `get_todo_tabs` | — | `TodoTab[]`（接口 6 tab 全量透传，前端按契约展示三个） | `portal.rs:135-146` |
+| `get_todo_list` | `tabId, page, pageSize` | `TodoPage`（tabId 白名单校验在协议层 `query_todo_list`） | `portal.rs:150-164` |
+| `open_in_browser` | `url` | 无（白名单强制 `*.cwxu.edu.cn`，非法域名 err「仅支持校园官网链接」；2026-09-18 M2 批次 2 新增） | `portal.rs:183-191` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
@@ -55,6 +62,14 @@ tags:
 - **子字段失败互不阻塞**：三个查询各自 `.ok()` 置 null，任一失败不影响其余（前端回落空态/"—"，不整页报错）；`nextCourse` 由 `next_course_from_now` 从周课表推算，无课/失败为 null（前端隐藏横幅）。
 - **无会话守卫**：锁内 clone `session.portal`（Arc 包装廉价，guard 在 await 前 drop）后取数，`None` → err「请先登录」（`ERR_NO_SESSION`，与 profile.rs 同口径）。
 - 敏感纪律：JWT 与邮箱 `loginUrl` 在 campus-portal 内部消化，本命令只透出钱包数字与课程简报，不含任何凭据字段（`portal.rs:1-6` 模块文档）。
+
+## 资讯/待办命令与浏览器打开（M2 批次 2，2026-09-18）
+
+六个新命令与 `get_portal_overview` 的聚合模式不同，全部**单接口透传**：统一经 `portal_of` helper（`portal.rs:79-82`，锁内 clone portal 后取数）+ 协议错误 `e.to_string()` 映射为中文 message，无会话 → err「请先登录」（`ERR_NO_SESSION`，与 profile.rs 同口径）。
+
+- **`open_in_browser`**：系统浏览器打开 URL，走官方 `tauri-plugin-opener` 的 Rust API（`lib.rs:16-18` 注册插件；只在 Rust 侧调用，**不开放前端直接 invoke 插件命令，无需额外 capability**）。白名单校验收敛在 `pub(crate) open_url_in_browser` helper 内部第一行（`portal.rs:172-179`，复用 [[modules/campus-portal|门户业务协议核心]] 的 `is_allowed_info_url`——**与正文抓取同一事实来源**），非法域名 err「仅支持校园官网链接」；**批次 3 `open_app` 直接复用该 helper**。
+- **`get_info_detail`**：透传协议层三分类（正常 HTML / `needsBrowser=true` 引导浏览器 / 真错误），`needsBrowser` 是正常返回非错误；正文已由 campus-portal 白名单清洗，命令层不做二次处理。背景见 [[learnings/cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级]]。
+- **CSP 配套**：`tauri.conf.json:26` 的 `img-src` 在 `'self' data:` 基础上增加 `https://*.cwxu.edu.cn http://*.cwxu.edu.cn`——内嵌正文官网图片显示的必要配套，域名仍限校园官网。
 
 ## 登录重试状态机
 
@@ -106,8 +121,8 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 最小权限
 
-`capabilities/default.json` 仅声明 `permissions: ["core:default"]`、仅 `main` 窗口——M0/M1 无文件系统/剪贴板/通知等插件需求，不给多余能力。CSP 收紧为 `connect-src 'self' ipc://localhost`、`img-src 'self' data:`（验证码 base64 图需要 data:）等（`tauri.conf.json:26`）。
+`capabilities/default.json` 仅声明 `permissions: ["core:default"]`、仅 `main` 窗口——不给多余能力。opener 插件（`tauri-plugin-opener = "2"`）只在 Rust 侧经 `OpenerExt` 调用（`portal.rs:176-178`），不开放前端直接 invoke 插件命令，故 capabilities 无需追加条目。CSP（`tauri.conf.json:26`）：`connect-src 'self' ipc://localhost`；`img-src 'self' data:` 之上，M2 批次 2 为内嵌正文官网图片增加 `https://*.cwxu.edu.cn http://*.cwxu.edu.cn`（域名仍限校园官网）。
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 66 passed / 3 ignored（2026-09-18 校验；campus-auth 26 + campus-hub 15 + campus-schedule 12 + campus-portal 13，另有 3 个 ignored 待真机样本/凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 **80 passed / 3 ignored**（2026-09-18 M2 批次 2 校验；campus-auth 26 + campus-hub 15 + campus-schedule 12 + campus-portal 27，另有 3 个 ignored 待真机样本/凭据）。

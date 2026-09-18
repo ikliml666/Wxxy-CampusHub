@@ -13,6 +13,9 @@ pub fn run() {
     let restored = infra::state::restore_session();
     tauri::Builder::default()
         .manage(AppState::new(restored))
+        // 系统浏览器/文件打开（open_in_browser 命令在 Rust 侧调用其 API，
+        // 不开放前端直接 invoke 插件命令，故无需额外 capability）
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::auth::get_captcha,
             commands::auth::login,
@@ -28,6 +31,12 @@ pub fn run() {
             commands::profile::sync_official_avatar,
             commands::profile::upload_official_avatar,
             commands::portal::get_portal_overview,
+            commands::portal::get_info_columns,
+            commands::portal::get_info_list,
+            commands::portal::get_info_detail,
+            commands::portal::get_todo_tabs,
+            commands::portal::get_todo_list,
+            commands::portal::open_in_browser,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

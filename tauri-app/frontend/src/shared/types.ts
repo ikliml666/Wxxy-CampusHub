@@ -40,6 +40,79 @@ export interface PortalOverview {
   fetchedAt: number;
 }
 
+// ---------- M2 批次 2：资讯页 / 待办页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
+
+/** 资讯栏目（后端 = 订阅接口 + 实测全量兜底，固定 7 栏）。 */
+export interface InfoColumn {
+  id: string;
+  name: string;
+  sortNum: number;
+}
+
+/** 资讯条目（仅契约字段；dept 服务端可能为 null）。 */
+export interface InfoItem {
+  id: string;
+  title: string;
+  columnTitle: string;
+  /** "YYYY-MM-DD HH:MM:SS" */
+  publishTime: string;
+  dept: string | null;
+  /** 官网正文页 URL（抓取经后端域名白名单校验） */
+  url: string;
+}
+
+/**
+ * 资讯分页。⚠️ total/pageCount 实测不可靠（pageSize=1 时返回 0）原样透传，
+ * **分页以 items.length == pageSize 判断可能有下一页**。
+ */
+export interface InfoPage {
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  total: number;
+  items: InfoItem[];
+}
+
+/**
+ * 资讯正文（计划契约的兼容扩展）。后端已完成白名单清洗，前端直接渲染、
+ * 不再二次清洗；`needsBrowser == true` 时正文受官网鉴权保护（html 为 null），
+ * 前端引导在浏览器中打开 `url`，**不显示错误态/重试**。
+ */
+export interface InfoDetail {
+  title: string;
+  html: string | null;
+  needsBrowser: boolean;
+  url: string;
+}
+
+/** 待办分栏（接口实际返回 6 个 tab；前端按契约只展示 todo/done/apply 三栏）。 */
+export interface TodoTab {
+  id: string;
+  name: string;
+  desc: string;
+  count: number;
+}
+
+/** 待办条目（字段形态未实测——账号无待办数据，后端按候选键映射，缺省空串）。 */
+export interface TodoItem {
+  id: string;
+  title: string;
+  applicant: string;
+  applyTime: string;
+  source: string;
+  node: string;
+  urgency: string;
+}
+
+/** 待办分页（分页字段口径同 InfoPage：total/pageCount 不可靠）。 */
+export interface TodoPage {
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  total: number;
+  items: TodoItem[];
+}
+
 // PanelId 冻结 8 项；M2.5 课表页届时追加 "timetable" 需同步改此处 + DOCK_ITEMS + persist 兼容
 export type PanelId =
   | "today"

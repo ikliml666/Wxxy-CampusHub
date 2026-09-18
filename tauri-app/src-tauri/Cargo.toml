@@ -21,3 +21,4 @@ base64 = "0.22"
 dirs = "6"
 campus-auth = { path = "../../crates/campus-auth" }
 campus-portal = { path = "../../crates/campus-portal" }
+tauri-plugin-opener = "2"

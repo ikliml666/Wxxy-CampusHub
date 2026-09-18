@@ -11,6 +11,7 @@
 
 - [[learnings\cas-sso-plaintext-redirect|CAS SSO 回跳的三处坑：重定向中断、明文落点、探测误判]]
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
+- [[learnings\cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级设计（content.jsp 系不可抓）]]
 - [[learnings\subagent-batch-image-labeling|批量图片标注不可靠：改结构化拼图 + 客观特征交叉校验]]
 - [[learnings\kaptcha-arithmetic-five-roots|算术验证码识别：从 2.9% 到 100% 的五个根因]]
 - [[learnings\portal-block-periods-and-school-timetable|门户大节语义与校本作息（14:50 误报教训）]]

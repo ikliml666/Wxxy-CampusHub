@@ -467,3 +467,51 @@
 - **校本大节表**（收敛在 `campus-portal::block_time_slots()`）：大节1 08:00-09:40（反推，未实测）、**大节2 10:10-11:50 与大节3 13:45-15:25（实测，锚点为学校日程服务 `bs-schedule` 的 `Default-class` 事件）**、大节4 15:35-17:15（推算）、大节5 18:30-20:10（未实测）。
 - **结论**：`campus-schedule::default_time_slots()` 上游默认 13 节表（下午 14:00 起）**与本校不符，仅作上游默认保留**；校本口径一律走 `block_time_slots()`。真机曾把大节4 误显示为 14:50（错按默认表第 7 节），已修正为 15:35，教训与「日程服务课表数据不完整、不能当唯一事实源」详见 `.codewiki/learnings/portal-block-periods-and-school-timetable.md`。
 
+## 附录 F · 2026-09-18 M2 批次 2：资讯与待办页
+
+**范围**：M2 批次 2（资讯页 + 待办页数据接线）。接口全表、栏目 id↔名称表、冻结契约见计划文档 `docs/superpowers/plans/2026-09-18-m2-portal-pages.md` §1.2 与 §2.1，本附录不重复抄表；官网正文两类 URL 形态与鉴权门的技术结论见 `.codewiki/learnings/cwxu-official-site-content-extraction.md`。
+
+### F1 最终形态
+
+**资讯页**（已登录；游客态保留「登录后查看校园资讯」空态）：
+
+- **栏目 rail**：后端固定返回 7 栏（订阅接口 + 实测全量兜底，顺序由后端排定），胶囊 tab 激活态用 info 域色；栏目加载中显示骨架胶囊、失败整条错误 + 重试；首个栏目自动选中，切栏目回第 1 页。
+- **列表**：条目行 = 栏目名（info 域色）+ 标题 + 部门（宽屏显示）+ 发布日期（`publishTime` 截取日期，不做时区换算）；四态完整（骨架 / 有数据 / 空「该栏目暂无资讯」/ 出错可重试）。
+- **内嵌正文**：点条目覆盖列表进入正文视图，返回后列表状态保留；打开即显示条目标题 + 骨架；正文为**后端清洗 HTML 直接渲染**（前端不二次清洗），外层套标题 + 段落/表格/列表/图片/引用的最小排版样式；**正文内 `<a>` 导航统一拦截**（WebView 不随正文跳转外站）；已切走后的过期响应按 URL 比对丢弃，防串台。
+- **分页**：上一页 / 下一页 + 页码；「下一页」按 `items.length == pageSize` 满页判断（服务端 `total`/`pageCount` 实测不可靠，不伪造页码）。
+
+**待办页**（已登录）：
+
+- **三栏 rail**：我的待办 / 我的已办 / 我的申请（契约冻结三栏；接口实际返回 6 个 tab，unread/read/focus 不在契约内不展示）；名称接口优先、失败回落兜底文案不阻塞列表；`count > 0` 显示待办数徽标。
+- **列表**：标题 + 副行元信息（申请人 · 申请时间 · 节点 · 紧急度，空段省略，全空回落来源或 "—"）；空态「暂无事项」（该账号当前常态）、错误可重试；分页同资讯页满页判断。
+
+### F2 `InfoDetail` 三分类契约
+
+`InfoDetail { title, html: string|null, needsBrowser: boolean, url }`（计划 §2.1 `InfoDetail{title,html}` 的兼容扩展）：
+
+| 结果 | 后端 | 前端表现 |
+|---|---|---|
+| 正常正文 | `needsBrowser=false` + 白名单清洗后 HTML | 内嵌渲染（标题 + 正文） |
+| 官网鉴权保护 | `needsBrowser=true`，`html=null`，**正常返回非错误** | 「正文需在浏览器中查看 / 该栏目正文由学校官网鉴权保护，无法在应用内展示」+「在浏览器打开原文」+「返回列表」；**无错误态/重试**（站点侧拦截与网络无关，重试无效） |
+| 真错误 | Err（可读中文 message） | 错误态 + 重试 |
+
+`needsBrowser` 的打开动作走 `open_in_browser` 命令（官方 `tauri-plugin-opener`；后端强制 `*.cwxu.edu.cn` 域名白名单，与正文抓取同一事实来源）。
+
+### F3 官网鉴权页导致的两类栏目差异与降级设计
+
+官网正文页 URL 有两种形态，**抓取能力不同**（2026-09-18 实机 curl 验证）：
+
+| 栏目 | 正文 URL 形态 | 抓取能力 |
+|---|---|---|
+| 校园要闻 / 校园快讯 / 教务处 / 学工处 / 团委（5 栏） | `www|jwc|xgc|tw.cwxu.edu.cn/info/<栏目>/<id>.htm` | 可正常抓取（容器为博达标准 `vsb_content*` / `v_news_content`） |
+| 通知公告（columnId 9）/ 规章制度（5d2c45d23866497cb2bfe93e9f136bb2）（2 栏） | `www|xgc.cwxu.edu.cn/content.jsp?...wbnewsid=<id>` | **被官网鉴权开门页拦截**：无论带不带 Cookie/UA/Referer 都停在 `/system/resource/code/auth/auth.htm`（标题「系统提示」），且无 `/info/` 替代形式（404） |
+
+**降级设计**：后端 `is_auth_wall` 三依据判定（HTTP 非 2xx / 重定向最终 URL 命中 auth.htm / `<title>` 精确「系统提示」）命中时返回 `needsBrowser=true` **正常返回**——对用户表述为「正文需在浏览器中查看 · 该栏目正文由学校官网鉴权保护」，引导浏览器打开原文；**不进错误态**（这不是故障，是站点行为）。正文抓取用裸 HTTP client 不带门户鉴权头（JWT 只发门户同源，绝不随正文抓取发往其他域名）。
+
+### F4 数据纪律
+
+- 前端只吃后端清洗过的 HTML 片段（域名白名单 + 标签/属性白名单在 `campus-portal::article` 完成），不二次清洗；CSP `img-src` 放行 `https://*.cwxu.edu.cn http://*.cwxu.edu.cn` 供正文官网图片显示，域名仍限校园官网。
+- 分页不信服务端 `total`/`pageCount`（实测 pageSize=1 时返回 0），一律满页判断，不伪造页码。
+- 待办条目字段按多候选键宽松映射（账号无真实数据未校准），真机出现数据后需校准——见计划文档遗留项。
+- 正文抓取与浏览器打开共用 `is_allowed_info_url` 白名单（计划红线 3），`open_url_in_browser` helper 批次 3 `open_app` 复用。
+
