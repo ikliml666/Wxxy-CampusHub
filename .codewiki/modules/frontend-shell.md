@@ -50,9 +50,10 @@ tags:
 `stores/authStore.ts`：
 
 - **三态模型** `AuthStatus = "unknown" | "guest" | "authed"`（`authStore.ts:9`）：unknown = 启动探测中、guest = 未登录、authed = 已登录。所有登录态消费方（AccountMenu、面板空态、AvatarDialog）只读 `status`，不再各自探测。
-- **字段**：`username` / `displayName`（身份）、`avatarBase64` / `avatarSource`（头像，`"local" | "official" | null`）、`accounts`（已保存账号列表）。persist 键 `campushub-auth`，`partialize` **只持久化 username+displayName**（`authStore.ts:220-223`）——重启后先显示上次身份，`check_session` 兜底纠正；头像与账号列表由命令面拉取，凭据与 DPAPI 密文永不进 localStorage。
-- **游客不展示账号头像**：`refreshAvatar` 在 `status !== "authed"` 时直接清空 `avatarBase64/avatarSource`（`authStore.ts:120-124`）——本地与官方头像都属账号资产，退出后回落「锡」占位。
-- **动作**：`checkSession`（非阻塞探测，落定后顺带 `refreshAccounts` + `refreshAvatar`，`authStore.ts:96-113`）；`login` / `loginManual` / `loginSaved` 三入口成功后统一 set authed + 刷新账号与头像，且**首次登录且本地无头像时后台补一次官方头像**（失败静默，`authStore.ts:148,181`）；`logout` 本地清空五字段（`authStore.ts:186-195`）；头像三动作 `uploadAvatar/syncOfficialAvatar/clearAvatar` 经 `applyAvatar` 统一收口（成功且带 data 才覆盖，`authStore.ts:72-83`）；`removeAccount` 成功后刷新列表（`authStore.ts:214-218`）。
+- **字段**：`username` / `displayName`（身份）、`avatarBase64` / `avatarSource`（头像，`"local" | "official" | null`）、`accounts`（已保存账号列表）。persist 键 `campushub-auth`，`partialize` **只持久化 username+displayName**（`authStore.ts:232-235`）——重启后先显示上次身份，`check_session` 兜底纠正；头像与账号列表由命令面拉取，凭据与 DPAPI 密文永不进 localStorage。
+- **游客不展示账号头像**：`refreshAvatar` 在 `status !== "authed"` 时直接清空 `avatarBase64/avatarSource`（`authStore.ts:121-127`）——本地与官方头像都属账号资产，退出后回落「锡」占位。
+- **动作**：`checkSession`（非阻塞探测，落定后顺带 `refreshAccounts` + `refreshAvatar`，`authStore.ts:97-115`）；`login` / `loginManual` / `loginSaved` 三入口成功后统一 set authed + 刷新账号与头像，且**首次登录且本地无头像时后台补一次官方头像**（失败静默，`authStore.ts:149,182`）；`logout` 本地清空五字段（`authStore.ts:187-196`）；头像四动作 `uploadAvatar/uploadOfficialAvatar/syncOfficialAvatar/clearAvatar` 经 `applyAvatar` 统一收口（成功且带 data 才覆盖，`authStore.ts:73-84,198-222`）；`removeAccount` 成功后刷新列表（`authStore.ts:224-230`）。
+- **`uploadOfficialAvatar(imageDataUrl)`**（2026-09-18 新增，`authStore.ts:66,206-212`）：调后端 `upload_official_avatar` 把裁切后的头像上传回学校系统；返回的 `AvatarData` 即服务端回读的最新头像，`applyAvatar` 直接落 store——学校与本机头像一次动作同步更新。
 - **untagged 双形态收窄**：`isLoginOk`（`"username" in data`）/ `isCaptchaPayload`（`"uid" in data`）类型守卫对应 Rust 侧 `LoginResultData` untagged（`authStore.ts:36-43`）。
 
 ## uiStore：界面态（面板路由 / 主题 / 弹层开关）
@@ -93,7 +94,13 @@ tags:
 **三态优先级：本地 > 官方 > 首字默认**（后端裁决见 [[modules/campus-hub-tauri|接线层]] profile 一节）。
 
 - `components/Avatar.tsx`：四档尺寸 sm/md/lg/xl（`Avatar.tsx:3-8`）；有 `src` 渲染 `<img>`，无 src 渲染品牌渐变（`linear-gradient(140deg, brand, info)`）+ 姓名首字、空则「锡」占位（`Avatar.tsx:34-50`）。
-- `components/AvatarDialog.tsx`：受 `uiStore.avatarDialogOpen` 控制。上传管线 `fileToPreview`（`AvatarDialog.tsx:21-46`）：拖拽/选择 → `createImageBitmap`（EXIF 方向修正）→ Canvas 中心裁方 → 缩放 256×256 → 扫描 alpha 通道，有透明出 PNG 否则 JPEG q0.9 → 预览显示「原 X → Y」体积对比（`AvatarDialog.tsx:204-206`）。体积守卫：base64 > 512KB 时内联报错「图片过大」并禁用保存（`MAX_BASE64` `AvatarDialog.tsx:13,109,241-245`，与后端 `AVATAR_MAX_B64` 对齐）。「同步学校头像」与「移除本地头像」按钮仅 authed 可见（`AvatarDialog.tsx:261-281`）。
+- `components/AvatarDialog.tsx`（2026-09-18 重写）：受 `uiStore.avatarDialogOpen` 控制，选图 → `react-easy-crop` 1:1 取景（拖拽/滚轮/滑杆缩放，另有圆/方形状切换与重置）→ Canvas 导出。**必须** `import Cropper, { type Area } from "react-easy-crop"` 并 `import "react-easy-crop/react-easy-crop.css"`（`AvatarDialog.tsx:1-3`），漏掉 css 裁切器无样式。选图管线 `handleFile`（`AvatarDialog.tsx:221-242`）：objectURL + `img.decode()`，旧的由 revoke effect 释放（`AvatarDialog.tsx:176-178`）。
+- **两条保存路径**（与后端阈值对齐，详见 [[modules/campus-hub-tauri|接线层]] 与 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）：
+  - `仅保存到本机`（`handleSaveLocal` `AvatarDialog.tsx:245-264`）→ `renderLocal`（`AvatarDialog.tsx:77-95`）：边长 `min(LOCAL_MAX_SIDE=1024, 裁切边长)` 不放大，有 alpha 出 PNG、否则 JPEG q0.92，PNG 超 `LOCAL_MAX_BYTES=2MB` 回退白底 JPEG → `set_avatar`。
+  - `保存并上传学校`（`handleSaveSchool` `AvatarDialog.tsx:266-289`，仅 authed）→ `findSchoolImage`（`AvatarDialog.tsx:97-114`）：尺寸阶梯 `SIZE_LADDER=[1024…320]` 外层 × 质量阶梯 `QUALITY_LADDER=[0.95…0.6]` 内层取第一个 ≤`SCHOOL_MAX_BYTES=200KB` 的组合（保留最大尺寸，源分辨率不足 clamp 不放大）→ `uploadOfficialAvatar(dataUrl)` 成功后**同一份图再写本机**并提示「已上传学校 · WxH · N KB」，1.2 秒后自动关闭。白底只在 JPEG 路径铺（`drawCrop` `AvatarDialog.tsx:27`，防透明区转 JPEG 发黑）。
+- **体积预估与落盘同源**：裁切变化后防抖 250ms 用 `renderLocal`/`findSchoolImage` 真实重编码（`AvatarDialog.tsx:191-215`），保存时以同一函数重算——预估与落盘必然一致（真机实测预估 139 KB ≈ 落盘 141385 字节）。
+- **Hook 顺序约束**：`onCropComplete` 的 `useCallback` 必须在 `if (!open) return null;`（`AvatarDialog.tsx:219`）之前声明——写在之后会因 `open` 变化改变 Hook 数量，React 19 直接卸载整个根节点（打开弹窗即白屏），详见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]] 第 5 节。
+- 「同步学校头像」与「移除本地头像」按钮仅 authed 可见（`AvatarDialog.tsx:545-566`）；「保存并上传学校」对游客禁用并以 tooltip「登录后可上传到学校」提示（`AvatarDialog.tsx:507`）。
 
 ## 共享组件：PanelHeader / EmptyState / Surface
 

@@ -63,6 +63,7 @@ interface AuthState {
   loginSaved: (username: string) => Promise<CommandResult<unknown>>;
   logout: () => Promise<void>;
   uploadAvatar: (base64: string) => Promise<CommandResult<unknown>>;
+  uploadOfficialAvatar: (imageDataUrl: string) => Promise<CommandResult<unknown>>;
   syncOfficialAvatar: () => Promise<CommandResult<unknown>>;
   clearAvatar: () => Promise<CommandResult<unknown>>;
   removeAccount: (username: string) => Promise<CommandResult<unknown>>;
@@ -197,6 +198,15 @@ export const useAuthStore = create<AuthState>()(
       uploadAvatar: async (base64) => {
         const r = await invokeCommand<AvatarPayload>("set_avatar", {
           imageBase64: base64,
+        });
+        return applyAvatar(r, set);
+      },
+
+      // 学校上传：传完整 data URL（data:image/jpeg;base64,…），成功后返回的
+      // AvatarData 即服务端最新头像，applyAvatar 直接落 store。
+      uploadOfficialAvatar: async (imageDataUrl) => {
+        const r = await invokeCommand<AvatarPayload>("upload_official_avatar", {
+          imageDataUrl,
         });
         return applyAvatar(r, set);
       },

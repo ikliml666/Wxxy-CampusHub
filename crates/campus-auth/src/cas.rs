@@ -8,6 +8,7 @@
 use crate::error::CampusAuthError;
 use crate::jar::RecordingJar;
 use crate::rsa::cas_token_header;
+use md5::{Digest, Md5};
 use serde::Deserialize;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -20,6 +21,9 @@ pub const JWGL_SERVICE: &str = "https://jwgl.cwxu.edu.cn/sso/lyiotlogin";
 
 /// 门户探测端点（首页）。
 const PORTAL_PROBE: &str = "https://my.cwxu.edu.cn/";
+
+/// 门户网关 csrf 密钥（2026-09-18 实机取证：门户 app bundle 内常量 `GATEWAY_KEY:"lianyi2019"`）。
+const GATEWAY_KEY: &str = "lianyi2019";
 
 /// 真实 Chrome UA（cas.js 同款）。
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -58,6 +62,12 @@ pub struct PortalProfile {
     pub name: String,
     /// 院系/专业（`data.departmentName`），缺失/空为 None。
     pub department: Option<String>,
+    /// 学号（`data.userId`），缺失为 None（portraitChange 鉴权头 loginUserId/loginUserName 用）。
+    pub user_id: Option<String>,
+    /// 组织 id（`data.orgId`），缺失为 None（学生实测为 `"-1"`）。
+    pub org_id: Option<String>,
+    /// 网关 JWT（`data.tokenId`，**无 Bearer 前缀**），缺失为 None（portraitChange 鉴权头 Authorization 用）。
+    pub token_id: Option<String>,
 }
 
 /// CAS 登录失败（错误码全集与映射以 REPORT.md 为准）。
@@ -291,6 +301,67 @@ impl CasClient {
             .await?;
         extract_user_profile(&body)
     }
+
+    /// POST 门户 `/api/authc/users/portraitChange` 上传头像（2026-09-18 实机取证）。
+    ///
+    /// - `data_url`：完整 data URL（`data:image/jpeg;base64,…`）。服务端**原样存储**、
+    ///   不做压缩，体积守卫须由调用方完成（本方法只校验前缀形态）。
+    /// - 请求头（除会话 Cookie 外全部必需）：`Authorization` = tryLoginUserInfo 的
+    ///   `data.tokenId`（JWT，无 Bearer 前缀）、`loginUserId`/`loginUserName` = `data.userId`
+    ///   （学号，门户前端同款）、`loginUserOrgId` = `data.orgId`（学生为 `"-1"`，缺失同值兜底）、
+    ///   `csrfTimestamp` = 当前毫秒、`csrfToken` = [`csrf_token`]，另有 Content-Type /
+    ///   X-Requested-With / Accept 与门户前端一致。
+    /// - 每次调用现取一次 [`Self::portal_user_profile`]（JWT 随取随用最新）并现算 csrf；
+    ///   复用 [`Self::http`] 与 jar（不新建 client）。
+    pub async fn portal_change_portrait(&self, data_url: &str) -> Result<(), CampusAuthError> {
+        if !data_url.starts_with("data:image/") {
+            return Err(CampusAuthError::Parse(
+                "头像数据 URL 非法（须以 data:image/ 开头）".to_string(),
+            ));
+        }
+        let base = PORTAL_PROBE.trim_end_matches('/');
+        let profile = self.portal_user_profile().await?;
+        // ponytail: meta.success=false 属业务失败而非解析失败，CampusAuthError 暂无
+        // Unknown 变体，以 Parse 透传服务端原文；error.rs 增加 Unknown 后在此分流。
+        let token_id = profile.token_id.clone().ok_or_else(|| {
+            CampusAuthError::Parse(
+                "tryLoginUserInfo 未返回 tokenId，无法上传头像（请重新登录）".to_string(),
+            )
+        })?;
+        let user_id = profile.user_id.clone().ok_or_else(|| {
+            CampusAuthError::Parse(
+                "tryLoginUserInfo 未返回 userId，无法上传头像（请重新登录）".to_string(),
+            )
+        })?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| CampusAuthError::Parse(format!("系统时间异常: {e}")))?
+            .as_millis();
+        let resp = self
+            .http
+            .post(format!("{base}/api/authc/users/portraitChange"))
+            .header("Authorization", token_id)
+            .header("loginUserId", &user_id)
+            .header("loginUserName", &user_id)
+            .header(
+                "loginUserOrgId",
+                profile.org_id.as_deref().unwrap_or("-1"),
+            )
+            .header("csrfTimestamp", now_ms.to_string())
+            .header("csrfToken", csrf_token(now_ms))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
+            .body(serde_json::json!({ "displayPhoto": data_url }).to_string())
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(CampusAuthError::Parse(format!("portraitChange HTTP {status}")));
+        }
+        parse_portrait_change_response(&text)
+    }
 }
 
 /// 从 getLoginInfo 响应提取 `data.headPortrait` 裸 base64（纯函数供离线单测）。
@@ -321,9 +392,11 @@ pub fn extract_head_portrait(body: &str) -> Result<String, CampusAuthError> {
 
 /// 从 tryLoginUserInfo 响应提取用户资料（纯函数供离线单测）。
 ///
-/// 实测形态：`{"meta":...,"data":{"userId":"...","userName":"张三","departmentName":"…","email":"…"}}`。
+/// 实测形态：`{"meta":...,"data":{"userId":"...","userName":"张三","departmentName":"…",
+/// "email":"…","orgId":"-1","tokenId":"<JWT>"}}`。
 /// `userName` 缺失 / null / 空串（trim 后）→ [`CampusAuthError::Parse`]（上层据此回退学号）；
-/// `departmentName` 缺失 / null / 空串 → `None`。姓名与院系不进日志（敏感纪律）。
+/// `departmentName` / `userId` / `orgId` / `tokenId` 缺失 / null / 空串 → `None`。
+/// 姓名与院系不进日志（敏感纪律）。
 pub fn extract_user_profile(body: &str) -> Result<PortalProfile, CampusAuthError> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| CampusAuthError::Parse(format!("tryLoginUserInfo 响应解析失败: {e}")))?;
@@ -337,13 +410,63 @@ pub fn extract_user_profile(body: &str) -> Result<PortalProfile, CampusAuthError
         .filter(|n| !n.is_empty())
         .ok_or_else(|| CampusAuthError::Parse("tryLoginUserInfo 缺少 userName".to_string()))?
         .to_string();
-    let department = data
-        .get("departmentName")
-        .and_then(|n| n.as_str())
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .map(str::to_string);
-    Ok(PortalProfile { name, department })
+    // 与 userName 同构的可选字符串字段：缺失 / null / 空串一律 None
+    let opt_str = |key: &str| {
+        data.get(key)
+            .and_then(|n| n.as_str())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+    };
+    Ok(PortalProfile {
+        name,
+        department: opt_str("departmentName"),
+        user_id: opt_str("userId"),
+        org_id: opt_str("orgId"),
+        token_id: opt_str("tokenId"),
+    })
+}
+
+/// 门户网关 csrfToken（纯函数供离线单测，含金标向量）。
+///
+/// `md5("timestamp=<ts_ms>,key=<GATEWAY_KEY>")` 小写 hex——2026-09-18 实机取证：
+/// 密钥来自门户 app bundle 常量 `GATEWAY_KEY:"lianyi2019"`，门户前端每次请求现算。
+pub fn csrf_token(ts_ms: u128) -> String {
+    let digest = Md5::digest(format!("timestamp={ts_ms},key={GATEWAY_KEY}").as_bytes());
+    to_hex(digest.as_slice())
+}
+
+/// 字节序列 → 小写 hex（md5 摘要 16 字节 → 32 字符；3 行够用，不为此引 hex crate）。
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// 解析 portraitChange 响应（纯函数供离线单测）。
+///
+/// 实测成功形态：`{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":true}`。
+/// `meta.success` 非 true → [`CampusAuthError::Parse`]（message 服务端原文，缺失给固定文案）；
+/// 非法 JSON → Parse。HTTP 非 2xx 由调用方先行拦截，不经此函数。
+pub fn parse_portrait_change_response(body: &str) -> Result<(), CampusAuthError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CampusAuthError::Parse(format!("portraitChange 响应解析失败: {e}")))?;
+    if v.get("meta")
+        .and_then(|m| m.get("success"))
+        .and_then(|s| s.as_bool())
+        == Some(true)
+    {
+        return Ok(());
+    }
+    let msg = v
+        .get("meta")
+        .and_then(|m| m.get("message"))
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or("上传头像失败（服务端未返回原因）");
+    Err(CampusAuthError::Parse(msg.to_string()))
 }
 
 /// 构造 CAS 登录请求体（application/x-www-form-urlencoded），纯函数供离线单测。
@@ -501,25 +624,37 @@ mod tests {
 
     // ---------- extract_user_profile ----------
 
-    /// 实测响应形态：userName（真实姓名）+ departmentName（院系/专业）齐全。
+    /// 实测响应形态：userName（真实姓名）+ departmentName（院系/专业）+ userId/orgId/tokenId
+    /// 齐全（上传鉴权头来源；占位值非真实数据）。
     #[test]
     fn user_profile_full() {
-        let body = r#"{"meta":{"code":0},"data":{"userId":"2023001","userName":"张三","departmentName":"示例学院示例专业","email":"x@cwxu.edu.cn","userType":"student"}}"#;
+        let body = r#"{"meta":{"code":0},"data":{"userId":"2023001","userName":"张三","departmentName":"示例学院示例专业","orgId":"-1","tokenId":"jwt-placeholder-token","email":"x@cwxu.edu.cn","userType":"student"}}"#;
         let p = extract_user_profile(body).unwrap();
         assert_eq!(p.name, "张三");
         assert_eq!(p.department.as_deref(), Some("示例学院示例专业"));
+        assert_eq!(p.user_id.as_deref(), Some("2023001"));
+        assert_eq!(p.org_id.as_deref(), Some("-1"));
+        assert_eq!(p.token_id.as_deref(), Some("jwt-placeholder-token"));
     }
 
-    /// departmentName 缺失 / null / 空串 → None，不影响 name。
+    /// departmentName 缺失 / null / 空串 → None，不影响 name；orgId/tokenId 缺失 /
+    /// null / 空串同样 → None（上传时由调用方按缺 tokenId 拦截）。
     #[test]
     fn user_profile_department_optional() {
         let p = extract_user_profile(r#"{"data":{"userName":"张三"}}"#).unwrap();
         assert_eq!(p.name, "张三");
         assert!(p.department.is_none());
-        let p = extract_user_profile(r#"{"data":{"userName":"张三","departmentName":null}}"#).unwrap();
+        assert!(p.user_id.is_none());
+        assert!(p.org_id.is_none());
+        assert!(p.token_id.is_none());
+        let p = extract_user_profile(r#"{"data":{"userName":"张三","departmentName":null,"orgId":null,"tokenId":null}}"#).unwrap();
         assert!(p.department.is_none());
-        let p = extract_user_profile(r#"{"data":{"userName":"张三","departmentName":""}}"#).unwrap();
+        assert!(p.org_id.is_none());
+        assert!(p.token_id.is_none());
+        let p = extract_user_profile(r#"{"data":{"userName":"张三","departmentName":"","orgId":"","tokenId":""}}"#).unwrap();
         assert!(p.department.is_none());
+        assert!(p.org_id.is_none());
+        assert!(p.token_id.is_none());
     }
 
     /// userName 缺失 / null / 空串 → Parse 错误（上层回退学号）。
@@ -537,5 +672,67 @@ mod tests {
     fn user_profile_invalid_json() {
         assert!(extract_user_profile("not json").is_err());
         assert!(extract_user_profile("").is_err());
+    }
+
+    // ---------- csrf_token ----------
+
+    /// 金标向量（2026-09-18 实机取证）：md5("timestamp=1789705884524,key=lianyi2019")
+    /// == "f523769fc014de2a561b4a81a0cf4c7d"。
+    #[test]
+    fn csrf_token_golden_vector() {
+        assert_eq!(csrf_token(1789705884524), "f523769fc014de2a561b4a81a0cf4c7d");
+    }
+
+    /// 不同 ts 输出均为 32 位小写 hex，且互不相同（防呆）。
+    #[test]
+    fn csrf_token_lowercase_hex_varies() {
+        for ts in [0u128, 1, 2, 1234567890, u128::MAX] {
+            let t = csrf_token(ts);
+            assert_eq!(t.len(), 32);
+            assert!(
+                t.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "非小写 hex: {t}"
+            );
+        }
+        assert_ne!(csrf_token(1), csrf_token(2));
+    }
+
+    // ---------- parse_portrait_change_response ----------
+
+    /// 实测成功形态：meta.success=true + data=true → Ok。
+    #[test]
+    fn portrait_change_success() {
+        assert!(parse_portrait_change_response(
+            r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":true}"#
+        )
+        .is_ok());
+    }
+
+    /// meta.success=false → Parse 错误，message 保留服务端原文（上层直接展示）。
+    #[test]
+    fn portrait_change_failure_keeps_server_message() {
+        let err = parse_portrait_change_response(
+            r#"{"meta":{"success":false,"statusCode":500,"message":"token 已过期"},"data":null}"#,
+        )
+        .unwrap_err();
+        match err {
+            CampusAuthError::Parse(m) => assert_eq!(m, "token 已过期"),
+            other => panic!("应为 Parse 错误: {other:?}"),
+        }
+    }
+
+    /// 非法 JSON / 缺 meta / message 缺失 → Parse 错误（后者给固定文案）。
+    #[test]
+    fn portrait_change_invalid_or_missing_meta() {
+        assert!(parse_portrait_change_response("not json").is_err());
+        assert!(parse_portrait_change_response(r#"{"data":true}"#).is_err());
+        let err = parse_portrait_change_response(r#"{"meta":{"success":false}}"#).unwrap_err();
+        match err {
+            CampusAuthError::Parse(m) => {
+                assert!(m.contains("服务端未返回原因"));
+            }
+            other => panic!("应为 Parse 错误: {other:?}"),
+        }
     }
 }

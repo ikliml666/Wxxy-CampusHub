@@ -65,7 +65,7 @@ tags:
 
 ## 命令面与模块地图
 
-12 条命令注册于 `lib.rs:16-29`：登录/账号 8 条（`get_captcha` / `login` / `login_manual` / `login_saved` / `check_session` / `logout` / `list_accounts` / `remove_account`）+ 头像 4 条（`get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar`）。详见 [[modules/campus-hub-tauri|接线层 campus-hub-tauri]]。
+13 条命令注册于 `lib.rs:16-30`：登录/账号 8 条（`get_captcha` / `login` / `login_manual` / `login_saved` / `check_session` / `logout` / `list_accounts` / `remove_account`）+ 头像 5 条（`get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar` / `upload_official_avatar`——最后一条 2026-09-18 新增，把裁切后的头像经门户 `portraitChange` 上传回学校，协议细节见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）。详见 [[modules/campus-hub-tauri|接线层 campus-hub-tauri]]。
 
 | 目录 | 职责 | 文章 |
 |---|---|---|
@@ -74,7 +74,7 @@ tags:
 | `tauri-app/src-tauri/` | 命令面、AppState、DPAPI 存储 | [[modules/campus-hub-tauri|接线层]] |
 | `tauri-app/frontend/src/` | 外壳组件、账号系统与头像、Dock 导航、8 面板、域色 token | [[modules/frontend-shell|前端外壳]] |
 
-安全基线：CSP 收紧（`tauri.conf.json:26`，`connect-src 'self' ipc://localhost`）；capabilities 仅 `core:default`（`capabilities/default.json`）；密码只在内存中存续、立即 RSA 加密，日志用户名打码、密码绝不入日志（`commands/auth.rs:10-11,157-165`）；头像等非凭据明文落盘、凭据必 DPAPI（[[decisions/guest-mode-account-shell|游客优先决策]] D3）。
+安全基线：CSP 收紧（`tauri.conf.json:26`，`connect-src 'self' ipc://localhost`）；capabilities 仅 `core:default`（`capabilities/default.json`）；密码只在内存中存续、立即 RSA 加密，日志用户名打码、密码绝不入日志（`commands/auth.rs:10-11,157-165`）；门户 csrf 密钥常量只存在于 campus-auth 源码内（`cas.rs:26`，明文不入 wiki/文档），头像上传日志只打码用户名、绝不打印 data URL（`profile.rs:219-262`）；头像等非凭据明文落盘、凭据必 DPAPI（[[decisions/guest-mode-account-shell|游客优先决策]] D3）。
 
 ## 与参考项目 Wxxy-CampusLogin 的关系
 

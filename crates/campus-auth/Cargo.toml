@@ -9,6 +9,8 @@ license = "Apache-2.0"
 num-bigint-dig = "0.8"
 num-traits = "0.2"
 thiserror = "2"
+# 门户网关 csrfToken 计算（md5，RustCrypto 纯算法小 crate，无网络/系统依赖）
+md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

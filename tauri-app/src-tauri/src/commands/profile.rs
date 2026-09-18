@@ -1,12 +1,14 @@
-//! 头像存取与官方头像同步命令（IPC 契约见计划 §四 冻结契约）。
+//! 头像存取与官方头像同步/上传命令（IPC 契约见计划 §四 冻结契约）。
 //!
-//! - 四命令统一返回 [`AvatarData`]：`{ imageBase64: string|null, source: "local"|"official"|null }`；
+//! - 五命令统一返回 [`AvatarData`]：`{ imageBase64: string|null, source: "local"|"official"|null }`；
 //!   裸 base64（不带 `data:` 前缀），前端自行拼 data URI（与 `CaptchaData.pngBase64` 同风格）。
 //! - 落盘 `%APPDATA%/campushub/profile.json`：`{ localBase64?, officialBase64?, officialFetchedAt? }`。
 //!   头像非凭据，明文 base64 落盘即可，不走 DPAPI。
 //! - 生效优先级：本地 > 官方 > 无；`clear_avatar` 只清本地，官方保留。
 //! - 官方头像经 [`CasClient::portal_login_info`] 拉取（会话 jar 内请求）；
 //!   无会话 → 约定错误「请先登录」。
+//! - `upload_official_avatar` 经 [`CasClient::portal_change_portrait`] 上传回学校：
+//!   服务端原样存储不压缩，200KB 体积守卫在本端做（官方客户端同款口径）。
 
 use super::auth::{session_client, CommandResult};
 use crate::infra::state::{self, AppState};
@@ -17,9 +19,12 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
-/// 单图 base64 上限 512KB（冻结契约：超限 err「头像文件过大（上限 512KB）」）。
-const AVATAR_MAX_B64: usize = 512 * 1024;
-/// 无会话时同步官方头像的约定文案（前端据此引导登录）。
+/// 本机单图 base64 上限 2MB（超限 err「本机头像过大（上限 2MB）」）。
+const AVATAR_MAX_B64: usize = 2 * 1024 * 1024;
+/// 学校官方头像上限：剥离 data URL 前缀后的裸 base64 长度 200KB
+/// （官方客户端 size/1024<=200 同款口径；服务端原样存储，守卫必须由本端做）。
+const OFFICIAL_AVATAR_MAX_B64: usize = 200 * 1024;
+/// 无会话时同步/上传官方头像的约定文案（前端据此引导登录）。
 const ERR_NO_SESSION: &str = "请先登录";
 
 /// get/set/clear/sync 四命令统一返回形状（键恒在、值可 null，与冻结形状一致）。
@@ -95,7 +100,25 @@ fn validate_avatar_b64(b64: &str) -> Result<(), String> {
         return Err("头像数据为空".to_string());
     }
     if b64.len() > AVATAR_MAX_B64 {
-        return Err(format!("头像文件过大（上限 {}KB）", AVATAR_MAX_B64 / 1024));
+        return Err(format!("本机头像过大（上限 {}MB）", AVATAR_MAX_B64 / 1024 / 1024));
+    }
+    Ok(())
+}
+
+/// 上传学校的 data URL 校验（纯函数供单测）：须以 `data:image/` 开头、
+/// 剥离首个 `,` 之前的前缀后裸 base64 非空且 ≤ [`OFFICIAL_AVATAR_MAX_B64`]。
+fn validate_official_data_url(data_url: &str) -> Result<(), String> {
+    if !data_url.starts_with("data:image/") {
+        return Err("头像数据 URL 非法".to_string());
+    }
+    let Some((_, bare)) = data_url.split_once(',') else {
+        return Err("头像数据 URL 非法".to_string());
+    };
+    if bare.is_empty() {
+        return Err("头像数据为空".to_string());
+    }
+    if bare.len() > OFFICIAL_AVATAR_MAX_B64 {
+        return Err("学校头像上限 200KB，请调小尺寸或质量".to_string());
     }
     Ok(())
 }
@@ -133,7 +156,7 @@ fn require_session_client(
     client.ok_or_else(|| CommandResult::err(ERR_NO_SESSION))
 }
 
-// ---------- 命令面（4 条，invoke 名与计划 §四 冻结契约逐字对齐） ----------
+// ---------- 命令面（5 条，invoke 名与计划 §四 冻结契约逐字对齐） ----------
 
 /// 读取当前生效头像（本地 > 官方；都无则 imageBase64/source 为 null）。
 #[tauri::command]
@@ -142,7 +165,7 @@ pub fn get_avatar() -> Result<CommandResult<AvatarData>, String> {
     Ok(CommandResult::ok(current_avatar(&read_profile(&dir))))
 }
 
-/// 写入本地头像（覆盖）。空串 / 超过 512KB → err。
+/// 写入本地头像（覆盖）。空串 / 超过 2MB → err。
 #[tauri::command]
 pub fn set_avatar(image_base64: String) -> Result<CommandResult<AvatarData>, String> {
     if let Err(msg) = validate_avatar_b64(&image_base64) {
@@ -183,6 +206,66 @@ pub async fn sync_official_avatar(
             Err(e) => Ok(CommandResult::err(&e)),
         },
         Err(e) => Ok(CommandResult::err(&format!("获取官方头像失败: {e}"))),
+    }
+}
+
+/// 上传头像回学校（portraitChange）并重拉官方头像落盘。
+///
+/// - 无会话 → err「请先登录」；data URL 非法 / 裸 base64 超 200KB → err（冻结文案）；
+///   服务端 `meta.success=false` → err（message 原文）。
+/// - 成功后重新 `portal_login_info` 拉官方头像落盘（`officialBase64`），返回最新
+///   [`AvatarData`]——服务端原样存储，以服务端回读为准。
+/// - 日志只记结果与打码用户名，**绝不记 data_url 内容**（体积可达数百 KB）。
+#[tauri::command]
+pub async fn upload_official_avatar(
+    state: State<'_, AppState>,
+    image_data_url: String,
+) -> Result<CommandResult<AvatarData>, String> {
+    let dir = state::data_dir()?;
+    // 锁纪律：session_client 锁内 clone 出 client，drop guard 后才发网络请求。
+    let client = match require_session_client(session_client(&state).await) {
+        Ok(c) => c,
+        Err(res) => return Ok(res),
+    };
+    if let Err(msg) = validate_official_data_url(&image_data_url) {
+        return Ok(CommandResult::err(&msg));
+    }
+    // 打码用户名供日志（锁内 clone，纪律同上；与 auth.rs::mask_username 同款，跨模块
+    // 最小复制、不为此扩可见性）。
+    let masked_user = {
+        let guard = state.session.lock().await;
+        guard
+            .as_ref()
+            .map(|s| mask_username(&s.username))
+            .unwrap_or_default()
+    };
+    if let Err(e) = client.portal_change_portrait(&image_data_url).await {
+        log::warn!("上传学校头像失败: user={masked_user} err={e}");
+        return Ok(CommandResult::err(&e.to_string()));
+    }
+    match client.portal_login_info().await {
+        Ok(b64) => match store_official_avatar(&dir, &b64) {
+            Ok(data) => {
+                log::info!("上传学校头像成功: user={masked_user}");
+                Ok(CommandResult::ok(data))
+            }
+            Err(e) => Ok(CommandResult::err(&e)),
+        },
+        Err(e) => Ok(CommandResult::err(&format!("上传成功但获取官方头像失败: {e}"))),
+    }
+}
+
+/// 用户名打码（日志脱敏）：保留前 2 位 + 末位，其余以 *** 掩盖
+/// （与 auth.rs::mask_username 同款实现）。
+fn mask_username(username: &str) -> String {
+    let chars: Vec<char> = username.chars().collect();
+    match chars.len() {
+        0 | 1 | 2 => "***".to_string(),
+        n => format!(
+            "{}***{}",
+            chars[..2].iter().collect::<String>(),
+            chars[n - 1]
+        ),
     }
 }
 
@@ -248,18 +331,47 @@ mod tests {
         assert_eq!(current_avatar(&file).source, None);
     }
 
-    /// set_avatar 校验：空串拒绝、超 512KB 拒绝（冻结文案）、正常通过。
+    /// set_avatar 校验：空串拒绝、超 2MB 拒绝（冻结文案）、恰好 2MB 通过。
     #[test]
     fn avatar_validation_rejects_empty_and_oversize() {
         assert_eq!(validate_avatar_b64("   ").unwrap_err(), "头像数据为空");
-        let oversized = "A".repeat(512 * 1024 + 1);
+        let oversized = "A".repeat(2 * 1024 * 1024 + 1);
         assert_eq!(
             validate_avatar_b64(&oversized).unwrap_err(),
-            "头像文件过大（上限 512KB）"
+            "本机头像过大（上限 2MB）"
         );
-        // 恰好 512KB 通过
-        assert_eq!(validate_avatar_b64(&"A".repeat(512 * 1024)), Ok(()));
+        // 恰好 2MB 通过
+        assert_eq!(validate_avatar_b64(&"A".repeat(2 * 1024 * 1024)), Ok(()));
         assert_eq!(validate_avatar_b64("aGVsbG8="), Ok(()));
+    }
+
+    /// 上传学校 data URL 校验：非法前缀 / 残缺 URL / 空 base64 拒绝；
+    /// 恰好 200KB 通过（守卫按剥离前缀后的裸长度）、超 200KB 冻结文案拒绝。
+    #[test]
+    fn official_data_url_validation() {
+        assert_eq!(
+            validate_official_data_url("iVBORw0KGgo=").unwrap_err(),
+            "头像数据 URL 非法"
+        );
+        assert_eq!(
+            validate_official_data_url("data:text/plain;base64,AAAA").unwrap_err(),
+            "头像数据 URL 非法"
+        );
+        assert_eq!(
+            validate_official_data_url("data:image/png;base64").unwrap_err(),
+            "头像数据 URL 非法"
+        );
+        assert_eq!(
+            validate_official_data_url("data:image/png;base64,").unwrap_err(),
+            "头像数据为空"
+        );
+        let ok_url = format!("data:image/jpeg;base64,{}", "A".repeat(200 * 1024));
+        assert_eq!(validate_official_data_url(&ok_url), Ok(()));
+        let oversized = format!("data:image/jpeg;base64,{}", "A".repeat(200 * 1024 + 1));
+        assert_eq!(
+            validate_official_data_url(&oversized).unwrap_err(),
+            "学校头像上限 200KB，请调小尺寸或质量"
+        );
     }
 
     /// 无会话同步的文案契约：success=false + message=「请先登录」（前端据此引导登录）。

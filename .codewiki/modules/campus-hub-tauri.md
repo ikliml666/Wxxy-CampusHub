@@ -23,9 +23,9 @@ tags:
 
 # 接线层（campus-hub src-tauri）
 
-`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，全部注册于 `lib.rs:16-29`。
+`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，全部注册于 `lib.rs:16-30`。
 
-## 12 条命令面
+## 13 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -37,12 +37,13 @@ tags:
 | `logout` | — | 无（`CommandResult::empty()`） | `auth.rs` |
 | `list_accounts` | — | `{ accounts: [{ username, lastLogin, displayName? }] }`（密码绝不出现在返回里） | `auth.rs:479-494` |
 | `remove_account` | `username: String` | 无（复用 `store::remove_account`，错误原文中文透传，`auth.rs:498-504`） | `auth.rs:498-504` |
-| `get_avatar` | — | `{ imageBase64: string\|null, source: "local"\|"official"\|null }` | `profile.rs:140-143` |
-| `set_avatar` | `imageBase64: String` | 同 AvatarData（空串/超 512KB → err） | `profile.rs:147-156` |
-| `clear_avatar` | — | 同 AvatarData（只清本地，官方保留） | `profile.rs:160-166` |
-| `sync_official_avatar` | — | 同 AvatarData（无会话 → err「请先登录」） | `profile.rs:171-187` |
+| `get_avatar` | — | `{ imageBase64: string\|null, source: "local"\|"official"\|null }` | `profile.rs:162-167` |
+| `set_avatar` | `imageBase64: String` | 同 AvatarData（空串/超 2MB → err） | `profile.rs:169-180` |
+| `clear_avatar` | — | 同 AvatarData（只清本地，官方保留） | `profile.rs:182-191` |
+| `sync_official_avatar` | — | 同 AvatarData（无会话 → err「请先登录」） | `profile.rs:193-209` |
+| `upload_official_avatar` | `imageDataUrl: String` | 同 AvatarData（无会话 → err「请先登录」；data URL 非法/超 200KB → err；上传成功后重拉官方头像落盘，2026-09-18 新增） | `profile.rs:219-262` |
 
-约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像四命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:26-31`）。
+约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
 ## 登录重试状态机
 
@@ -77,24 +78,25 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 |---|---|---|
 | `session.json` | `{ username, cookies: [{ name, valueB64(DPAPI) }] }`（`state.rs:44-57`） | `persist_session`（`state.rs:60-80`）；读 `load_session`（单个 cookie 解密失败跳过，`state.rs:83-96`）；删 `clear_session` |
 | `accounts.json` | `{ accounts: [{ username, passwordB64(DPAPI), lastLogin(epoch 毫秒串), displayName? }] }`（`store.rs:13-29`） | `save_account`（同 username upsert 覆盖，`store.rs:43-62`）、`remove_account`（不存在报错，`store.rs:81-89`） |
-| `profile.json` | `{ localBase64?, officialBase64?, officialFetchedAt? }`（camelCase，字段缺省即不存在，`profile.rs:34-44`）——**明文 base64，不走 DPAPI** | `store_local_avatar` / `clear_local_avatar` / `store_official_avatar`（`profile.rs:104-126`）；读 `read_profile`（文件缺失/损坏按空档处理，`profile.rs:57-62`） |
+| `profile.json` | `{ localBase64?, officialBase64?, officialFetchedAt? }`（camelCase，字段缺省即不存在，`profile.rs:41-52`）——**明文 base64，不走 DPAPI** | `store_local_avatar` / `clear_local_avatar` / `store_official_avatar`（`profile.rs:127-153`）；读 `read_profile`（文件缺失/损坏按空档处理，`profile.rs:62-67`） |
 
 启动回填 `restore_session()`（`state.rs:105-114`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填；文件缺失/损坏/cookies 空 → None。落盘内容不含明文凭据有单测断言（`state.rs:141-143`）。
 
-## 头像存取与官方同步（`commands/profile.rs`）
+## 头像存取、官方同步与上传学校（`commands/profile.rs`）
 
-头像四命令全部只做接线与本地存取，协议拉取复用 `CasClient::portal_login_info`（见 [[modules/campus-auth|CAS 协议核心]]「门户资料接口」）：
+头像命令全部只做接线与本地存取，协议拉取/上传复用 `CasClient` 的门户资料接口（见 [[modules/campus-auth|CAS 协议核心]]「门户资料接口」）：
 
-- **生效优先级：本地 > 官方 > 无**，纯函数 `current_avatar` 统一裁决（`profile.rs:73-90`）；`clear_avatar` 只清本地、官方保留（回落展示，`profile.rs:112-117`）。
+- **生效优先级：本地 > 官方 > 无**，纯函数 `current_avatar` 统一裁决（`profile.rs:78-97`）；`clear_avatar` 只清本地、官方保留（回落展示，`profile.rs:182-191`）。
 - **落盘即明文**：头像不是凭据，base64 明文写 `profile.json`，不经 DPAPI（`profile.rs:5-6` 注释；取舍见 [[decisions/guest-mode-account-shell|游客优先与账号外壳决策]]）。
-- **体积守卫**：`set_avatar` 空串/超 `AVATAR_MAX_B64=512KB` 拒绝，冻结文案「头像文件过大（上限 512KB）」（`profile.rs:21,93-101`）；前端 AvatarDialog 同阈值预检内联报错。
-- **`sync_official_avatar`**：无会话 → 约定错误文案「请先登录」（`ERR_NO_SESSION`，前端据此引导登录，`profile.rs:23,130-134`）；有会话 → 锁纪律 `session_client` clone 出 client 后发请求，成功落盘 `officialBase64 + officialFetchedAt`，网络/解析失败不落盘、不清已有头像（`profile.rs:171-187`）。
-- 单测覆盖优先级轮转（官方 → 本地覆盖 → 清本地回落官方 → 全空双 null）、超限拒绝、无会话文案契约（`profile.rs:191-277`）。
+- **本机体积守卫**：`set_avatar` 空串/超 `AVATAR_MAX_B64=2MB` 拒绝，冻结文案「本机头像过大（上限 2MB）」（`profile.rs:23,98-105`；2026-09-18 由 512KB 放宽到 2MB，前端裁切器按同阈值预检）。
+- **`sync_official_avatar`**：无会话 → 约定错误文案「请先登录」（`ERR_NO_SESSION`，前端据此引导登录，`profile.rs:28,195-199`）；有会话 → 锁纪律 `session_client` clone 出 client 后发请求，成功落盘 `officialBase64 + officialFetchedAt`，网络/解析失败不落盘、不清已有头像（`profile.rs:193-209`）。
+- **`upload_official_avatar(imageDataUrl)`**（2026-09-18 新增，`profile.rs:219-262`）：把裁切后的头像上传回学校系统。链路：无会话直接 err「请先登录」→ `validate_official_data_url` 校验（须 `data:image/` 开头、剥前缀后裸 base64 ≤ `OFFICIAL_AVATAR_MAX_B64=200KB`，`profile.rs:26,108-122`——服务端**原样存储不压缩**，守卫只能本端做）→ `CasClient::portal_change_portrait` 上传（内部现取 JWT/ids 并现算 csrf，见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）→ 成功后重新 `portal_login_info` 拉官方头像落盘 → 返回最新 `AvatarData`（以服务端回读为准）。日志只打码用户名（`profile.rs:264-273`，与 `auth.rs::mask_username` 同款），**绝不打印 data URL**（体积可达数百 KB）。
+- 单测覆盖优先级轮转（官方 → 本地覆盖 → 清本地回落官方 → 全空双 null）、2MB/200KB 校验与冻结文案、data URL 非法形态、无会话文案契约（`profile.rs:275-389`）。
 
 ## 最小权限
 
 `capabilities/default.json` 仅声明 `permissions: ["core:default"]`、仅 `main` 窗口——M0/M1 无文件系统/剪贴板/通知等插件需求，不给多余能力。CSP 收紧为 `connect-src 'self' ipc://localhost`、`img-src 'self' data:`（验证码 base64 图需要 data:）等（`tauri.conf.json:26`）。
 
-## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:191-277`）
+## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、体积校验、无会话文案契约。`cargo test --workspace` 全量 47 passed（本次新增头像/账号/门户解析单测前为 35）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 53 passed（2026-09-18 校验；campus-auth 26 + campus-hub 15 + campus-schedule 12，另有 3 个 ignored 待真机样本/凭据）。

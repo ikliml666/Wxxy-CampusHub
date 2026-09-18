@@ -1,5 +1,21 @@
 # 更新日志
 
+## 2026-09-18 · 头像裁切器 + 上传回学校（执行上一轮延后项）
+
+- **模块**：`tauri-app/frontend`（`AvatarDialog` 重写、`authStore`、依赖）、`tauri-app/src-tauri`（头像命令与体积守卫）、`crates/campus-auth`（门户上传协议）、`.codewiki/`、`docs/`
+- **起因**：执行上一轮明确延后的两项（react-easy-crop 拖拽缩放裁切器、头像上传回学校）；用户选定「两项都做」并追加三条约束——200KB 限制下尽量保留高分辨率、增加「只改本机不上传」选项、本机头像上限可放宽
+- **门户上传协议（实测取证，两次真机上传）**：`POST /api/authc/users/portraitChange`；JWT 放 `Authorization`（**无 `Bearer` 前缀**，值取 `tryLoginUserInfo.data.tokenId`）+ `loginUserId`/`loginUserName`/`loginUserOrgId` + `X-Requested-With`；`csrfToken = md5("timestamp=<毫秒>,key=<门户前端常量>")`（小写十六进制）；成功判据 `meta.success`，失败保留服务端 message；**服务端按上传内容原样存储**（不再压缩），故 200KB 内的分辨率取舍全部由客户端决定；官方原图 `headPortrait` 实测仅 123×123
+- **`crates/campus-auth`**：新增 `csrf_token()`（+ 内部 `to_hex`）、`portal_change_portrait()`（现拉媒体资料取 JWT/ids → 现算 csrf → 上传 → 校验 `meta.success`）、`parse_portrait_change_response()`；补 `md-5` 依赖；新增 csrf 金标向量与 portrait 解析/失败回显等单测（密钥常量只存源码，文档与 wiki 不写明文值）
+- **`tauri-app/src-tauri`**：新增命令 `upload_official_avatar`（未登录→「请先登录」；`validate_official_data_url` 守卫 `data:image/` 前缀与 200KB 上限，超限文案「学校头像上限 200KB，请调小尺寸或质量」；成功后回读 `getLoginInfo` 落盘最新官方头像并返回）；`AVATAR_MAX_B64` 512KB→**2MB**（文案「本机头像过大（上限 2MB）」）；日志只打码用户名，**绝不记录 data URL**；命令数 12→13
+- **`AvatarDialog` 重写（两条保存路径）**：`react-easy-crop@^6.2.3` 接入 1:1 裁切（拖拽取景 + 滚轮/滑杆缩放 + 圆形/方形切换 + 重置/换一张）
+  - **仅保存到本机**：边长 `min(1024, 裁切边长)` 不放大，有透明通道出 PNG、否则 JPEG q0.92，PNG 超 2MB 回退白底 JPEG；上限放宽到 2MB
+  - **保存并上传学校**：尺寸阶梯 `[1024…320]` × 质量阶梯 `[0.95…0.6]` 取第一个 ≤200KB 组合，源分辨率不足时 clamp 不放大（推高分辨率即用户第一条约束的实现方式）；成功后同时写本机并提示「已上传学校 · WxH · N KB」
+  - 两条路径的体积预估与落盘**同源同函数**（250ms 防抖重编码），界面数字与实际字节一致
+- **缺陷修复（P0，打开弹窗即白屏）**：裁切回调 `useCallback` 原先写在 `if (!open) return null;` 之后，`open` 变化导致 Hook 数量变化，React 19 直接卸载根节点（本仓无 error boundary）；已把 Hook 提到提前 return 之前。另补 `react-easy-crop/react-easy-crop.css` 导入（缺它裁切器无样式）
+- **验证**：`campus-auth` 单测 **26 passed / 3 ignored / 0 failed**（含 `csrf_token_golden_vector`）；`tsc --noEmit` 0 错误；`vite build` 通过；**真机双路径实测**——本机保存后 `profile.json.localBase64` = 141385 字节 PNG 900×900（与界面预估「约 139 KB」吻合）、右上角与首页头像同步更新；上传学校后 `getLoginInfo.headPortrait` 由 PNG 123×123 / 28657 字节 → JPEG 123×123 / 4852 字节、`officialFetchedAt` 刷新，证明「会话→JWT/ids→csrf→上传→回读」整链路真实生效（本轮以「用户当前学校头像重新上传」作为测试载荷，视觉效果不变）
+- **数据与隐私**：本轮验收截图**不入库**（画面含账号真实肖像，避免写入 git 历史），临时文件已移出仓库至 `%TEMP%/campushub-avatar-verify/`；⚠️ 另需注意上一轮已入库的 `docs/verify/ui2-*.png` 中同样含该肖像，是否清理由用户决定
+- **未做**：未登录守卫（「请先登录」分支）未做真机演练（需登出 + 真实验证码重登，成本高于收益；逻辑为单行状态判断）；M2 门户数据接线仍按上一轮结论待用户确认后再启动
+
 ## 2026-09-18 · 外壳视觉重设计 + 游客模式 + 右上角账号系统与头像
 
 - **模块**：`tauri-app/frontend`（设计系统/壳/8 面板/账号与头像 UI）、`tauri-app/src-tauri`（头像与账号命令、登录显示名）、`crates/campus-auth`（门户资料接口）、`docs/`（计划/设计文档/验收截图）
