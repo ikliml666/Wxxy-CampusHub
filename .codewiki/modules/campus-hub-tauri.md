@@ -5,6 +5,7 @@ source_files:
   - tauri-app/src-tauri/src/lib.rs
   - tauri-app/src-tauri/src/commands/auth.rs
   - tauri-app/src-tauri/src/commands/profile.rs
+  - tauri-app/src-tauri/src/commands/portal.rs
   - tauri-app/src-tauri/src/commands/mod.rs
   - tauri-app/src-tauri/src/infra/state.rs
   - tauri-app/src-tauri/src/infra/mod.rs
@@ -19,13 +20,14 @@ tags:
   - session
   - login
   - avatar
+  - portal
 ---
 
 # 接线层（campus-hub src-tauri）
 
-`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，全部注册于 `lib.rs:16-30`。
+`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:16-31`。
 
-## 13 条命令面
+## 14 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -42,8 +44,17 @@ tags:
 | `clear_avatar` | — | 同 AvatarData（只清本地，官方保留） | `profile.rs:182-191` |
 | `sync_official_avatar` | — | 同 AvatarData（无会话 → err「请先登录」） | `profile.rs:193-209` |
 | `upload_official_avatar` | `imageDataUrl: String` | 同 AvatarData（无会话 → err「请先登录」；data URL 非法/超 200KB → err；上传成功后重拉官方头像落盘，2026-09-18 新增） | `profile.rs:219-262` |
+| `get_portal_overview` | — | `PortalOverview{ semester, wallet, nextCourse, fetchedAt }`，三个子项均可 null（无会话 → err「请先登录」；2026-09-18 M2 批次 1 新增） | `portal.rs:23-79` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
+
+## 门户总览命令（`commands/portal.rs`，M2 批次 1）
+
+`get_portal_overview`（`portal.rs:44-79`）聚合 [[modules/campus-portal|门户业务协议核心]] 的三个接口（学期 / 钱包卡 / 本周课表），协议细节全部下沉 campus-portal，本命令只做接线：
+
+- **子字段失败互不阻塞**：三个查询各自 `.ok()` 置 null，任一失败不影响其余（前端回落空态/"—"，不整页报错）；`nextCourse` 由 `next_course_from_now` 从周课表推算，无课/失败为 null（前端隐藏横幅）。
+- **无会话守卫**：锁内 clone `session.portal`（Arc 包装廉价，guard 在 await 前 drop）后取数，`None` → err「请先登录」（`ERR_NO_SESSION`，与 profile.rs 同口径）。
+- 敏感纪律：JWT 与邮箱 `loginUrl` 在 campus-portal 内部消化，本命令只透出钱包数字与课程简报，不含任何凭据字段（`portal.rs:1-6` 模块文档）。
 
 ## 登录重试状态机
 
@@ -80,7 +91,7 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 | `accounts.json` | `{ accounts: [{ username, passwordB64(DPAPI), lastLogin(epoch 毫秒串), displayName? }] }`（`store.rs:13-29`） | `save_account`（同 username upsert 覆盖，`store.rs:43-62`）、`remove_account`（不存在报错，`store.rs:81-89`） |
 | `profile.json` | `{ localBase64?, officialBase64?, officialFetchedAt? }`（camelCase，字段缺省即不存在，`profile.rs:41-52`）——**明文 base64，不走 DPAPI** | `store_local_avatar` / `clear_local_avatar` / `store_official_avatar`（`profile.rs:127-153`）；读 `read_profile`（文件缺失/损坏按空档处理，`profile.rs:62-67`） |
 
-启动回填 `restore_session()`（`state.rs:105-114`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填；文件缺失/损坏/cookies 空 → None。落盘内容不含明文凭据有单测断言（`state.rs:141-143`）。
+启动回填 `restore_session()`（`state.rs:107-122`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填；文件缺失/损坏/cookies 空 → None。落盘内容不含明文凭据有单测断言（`state.rs:141-143`）。`CasSession` 自 2026-09-18 起挂 `portal: PortalClient`（`state.rs:16-21`，M2 批次 1）——`finish_login`（`auth.rs:341-345`）与 `restore_session`（`state.rs:117-121`）两处构造均 `PortalClient::new(client.clone())` 共享同一 jar，缓存生命周期 = 会话生命周期（详见 [[modules/campus-portal|门户业务协议核心]]）。
 
 ## 头像存取、官方同步与上传学校（`commands/profile.rs`）
 
@@ -99,4 +110,4 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 53 passed（2026-09-18 校验；campus-auth 26 + campus-hub 15 + campus-schedule 12，另有 3 个 ignored 待真机样本/凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 66 passed / 3 ignored（2026-09-18 校验；campus-auth 26 + campus-hub 15 + campus-schedule 12 + campus-portal 13，另有 3 个 ignored 待真机样本/凭据）。

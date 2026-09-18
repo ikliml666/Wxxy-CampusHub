@@ -19,8 +19,8 @@ pub const PORTAL_SERVICE: &str = "https://my.cwxu.edu.cn/shiro-cas";
 pub const WEBVPN_SERVICE: &str = "https://webvpn.cwxu.edu.cn/login?cas_login=true";
 pub const JWGL_SERVICE: &str = "https://jwgl.cwxu.edu.cn/sso/lyiotlogin";
 
-/// 门户探测端点（首页）。
-const PORTAL_PROBE: &str = "https://my.cwxu.edu.cn/";
+/// 门户探测端点（首页）；门户业务接口的 base 由它派生（portal crate 复用）。
+pub const PORTAL_PROBE: &str = "https://my.cwxu.edu.cn/";
 
 /// 门户网关 csrf 密钥（2026-09-18 实机取证：门户 app bundle 内常量 `GATEWAY_KEY:"lianyi2019"`）。
 const GATEWAY_KEY: &str = "lianyi2019";
@@ -127,6 +127,12 @@ impl CasClient {
     /// 会话 Jar 句柄（check_session / 持久化用）。
     pub fn jar(&self) -> Arc<RecordingJar> {
         self.jar.clone()
+    }
+
+    /// 共享本会话 Cookie jar 的 HTTP client 句柄（门户业务接口复用登录会话用；
+    /// reqwest::Client 为 Arc 包装，clone 与原实例共享 jar）。
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     /// GET {CAS_BASE}/kaptcha → {kaptchaType, uid, content}。

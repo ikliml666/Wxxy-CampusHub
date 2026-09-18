@@ -267,6 +267,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "campus-auth",
+ "campus-portal",
  "dirs",
  "log",
  "serde",
@@ -274,6 +275,19 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+]
+
+[[package]]
+name = "campus-portal"
+version = "0.1.0"
+dependencies = [
+ "campus-auth",
+ "campus-schedule",
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

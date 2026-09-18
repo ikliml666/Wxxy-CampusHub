@@ -1,0 +1,23 @@
+[package]
+name = "campus-portal"
+version = "0.1.0"
+edition = "2021"
+description = "锡院助手门户业务协议核心：统一请求头 / 学期与钱包卡与周课表接口调用与解析（无 Tauri 依赖）"
+license = "Apache-2.0"
+
+[dependencies]
+# 复用 CAS 会话（CasClient 内含挂载 Cookie jar 的 reqwest::Client）与 csrf_token / PORTAL_PROBE
+campus-auth = { path = "../campus-auth" }
+# 节次时间表与周次换算复用课表领域核心（默认 13 节作息常量）
+campus-schedule = { path = "../campus-schedule" }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "cookies",
+    "charset",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 「下一节课」取本地星期与 HH:MM（std/clock 特性，与 campus-schedule 对齐）
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+thiserror = "2"

@@ -338,9 +338,11 @@ async fn finish_login(
         log::warn!("会话持久化失败: {e}");
     }
     // 锁纪律：同步赋值，guard 在语句末 drop，此后无 await。
+    let portal = campus_portal::PortalClient::new(client.clone());
     *state.session.lock().await = Some(CasSession {
         client,
         username: username.to_string(),
+        portal,
     });
     log::info!("登录成功: user={}", mask_username(username));
     Ok(CommandResult::ok(LoginResultData::LoggedIn(LoginData {

@@ -13,6 +13,7 @@
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
 - [[learnings\subagent-batch-image-labeling|批量图片标注不可靠：改结构化拼图 + 客观特征交叉校验]]
 - [[learnings\kaptcha-arithmetic-five-roots|算术验证码识别：从 2.9% 到 100% 的五个根因]]
+- [[learnings\portal-block-periods-and-school-timetable|门户大节语义与校本作息（14:50 误报教训）]]
 - [[learnings\portal-avatar-upload-protocol|门户头像上传协议与裁切器踩坑]]
 ## Module
 
@@ -20,3 +21,4 @@
 - [[modules\frontend-shell|前端外壳（frontend-shell）]]
 - [[modules\campus-hub-tauri|接线层（campus-hub src-tauri）]]
 - [[modules\campus-schedule|课表核心（campus-schedule）]]
+- [[modules\campus-portal|门户业务协议核心（campus-portal）]]

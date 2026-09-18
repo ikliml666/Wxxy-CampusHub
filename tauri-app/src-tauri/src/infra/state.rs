@@ -6,6 +6,7 @@
 
 use crate::account::crypto;
 use campus_auth::cas::CasClient;
+use campus_portal::PortalClient;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,9 @@ use tokio::sync::Mutex;
 pub struct CasSession {
     pub client: CasClient,
     pub username: String,
+    /// 门户业务客户端（复用 client 的会话 Cookie jar；含 JWT 内存缓存，
+    /// 缓存生命周期跟随本会话，登录/登出/重启恢复时随会话重建或丢弃）。
+    pub portal: PortalClient,
 }
 
 pub struct AppState {
@@ -110,7 +114,12 @@ pub fn restore_session() -> Option<CasSession> {
     }
     let client = CasClient::new().ok()?;
     client.jar().restore(&cookies);
-    Some(CasSession { client, username })
+    let portal = PortalClient::new(client.clone());
+    Some(CasSession {
+        client,
+        username,
+        portal,
+    })
 }
 
 #[cfg(all(test, target_os = "windows"))]

@@ -32,6 +32,7 @@ tags:
   - navigation
   - login
   - avatar
+  - portal
   - gsap
 ---
 
@@ -42,7 +43,7 @@ tags:
 ## IPC 出口与契约类型（shared/）
 
 - `tauriApi.ts:8-17`：`invokeCommand<T>(cmd, args)` 是**唯一 IPC 出口**，invoke 抛错包装为 `{ success:false, message:String(e) }`，调用方只处理 CommandResult（契约详见 [[modules/campus-hub-tauri|接线层]] 与 [[_architecture|架构总览]]）。
-- `types.ts:1`：`CommandResult<T>`；`types.ts:4-12`：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
+- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-55`：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
 - `cn.ts:3-5`：clsx + tailwind-merge 的 `cn()`。
 
 ## authStore：登录态单一来源（zustand + persist）
@@ -110,7 +111,18 @@ tags:
 
 ## 面板：游客空态与数据接入中
 
-8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。TodayPanel 另有游客可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:102-116`）与分时段问候、钱包三卡、下一节课横幅、快捷动作（游客点已落地项先登录，未落地项禁用 + tooltip，`TodayPanel.tsx:150-163`）。
+8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。TodayPanel 自 2026-09-18 M2 批次 1 起接真实数据（见下节），游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
+
+## TodayPanel：今日页真实数据（M2 批次 1）
+
+登录态下经 `invokeCommand` 调 `get_portal_overview` 单命令取数（`TodayPanel.tsx:104-128`），`OverviewState` 表达 UI 四态（`TodayPanel.tsx:36-40`；游客不发起取数、直接进 ready 空数据）：
+
+- **加载中**：钱包三卡与横幅位显示骨架（`phase:"loading"`，`TodayPanel.tsx:176` 起）。
+- **有数据**：钱包三卡真实数字（一卡通余额 / 未读邮件 / 在借图书），**单项接口失败该卡回落 "—"**（子字段可 null，`TodayPanel.tsx:131-132`）；「下一节课」横幅（课程 + 教室 + 大节起始时刻）仅 `nextCourse` 非 null 时渲染，无课/取失败整条隐藏。
+- **空**：ready + 子字段 null（含游客态占位 `TodayPanel.tsx:115`）。
+- **出错**：总览命令失败 → 错误条 + **重试按钮**（`reloadTick` 自增触发 effect 重拉，`TodayPanel.tsx:105,119-128,201-218`），不白屏、不伪造数据。
+
+「下一节课」的大节起始时刻口径由后端 [[modules/campus-portal|门户业务协议核心]] 的校本大节表决定，前端不自算时间（教训见 [[learnings/portal-block-periods-and-school-timetable|门户大节语义与校本作息]]）。
 
 ## DockNav：悬浮 Dock 导航（未改）
 

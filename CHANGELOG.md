@@ -1,5 +1,21 @@
 # 更新日志
 
+## 2026-09-18 · M2 批次 1：门户数据接线基建 + 今日页真实数据
+
+- **模块**：`crates/campus-portal/`（新）、`crates/campus-auth`（两处最小改动）、`tauri-app/src-tauri`（新命令）、`tauri-app/frontend`（TodayPanel 接真实数据 + TS 契约）、`.codewiki/`、`docs/`
+- **计划**：`docs/superpowers/plans/2026-09-18-m2-portal-pages.md`（实测接口全表 §1.2、校本作息与大节语义 §1.3、冻结契约 §2.1——本条不重复抄表）
+- **新 crate `campus-portal`**（协议单点第四员，与 `campus-auth` 平级、不依赖 tauri，安卓可复用）：
+  - `client.rs`：`PortalClient` 内部持 `CasClient`（clone 共享 Cookie jar，不重建会话）；统一请求头 helper 按门户前端同款组注入（`Authorization` JWT 无 `Bearer` 前缀、`loginUserId`/`loginUserName`、`loginUserOrgId`、`appid: ly-upp`、`csrfTimestamp`/`csrfToken` 现算、`X-Requested-With`、`Accept`；计划约定 POST 另加 `Content-Type`，本批三接口均为 GET）；JWT 与资料存 `Arc<Mutex<Option<AuthHead>>>` **按会话内存缓存**（`AuthHead` 不派生 Debug、无日志、不落盘，guard 在 await 前 drop 不跨 await 持锁）；csrf 直接复用 `campus_auth::cas::csrf_token`，门户 base 复用 `PORTAL_PROBE` 不设第二事实来源
+  - `parse.rs`：解析全部纯函数——`parse_semester_info` / `parse_wallet_summary`（钱包卡 `data.data` 是内嵌 JSON 字符串需二次 parse；`loginUrl` **结构体不定义该字段**、直接丢弃）/ `parse_week_schedule`；校本大节表 `block_time_slots()`；`course_from_cell` / `elapsed_slot_count` / `next_course` / `next_course_from_now`（跨天与周末守卫）
+  - `lib.rs`：`PortalError`（`NotLogin("请先登录")` / `Http` / `Parse`）+ DTO（`SemesterInfo` / `WalletSummary` / `CourseBrief`）
+- **`campus-auth` 最小改动两处**：新增 `http_client()` getter（供 campus-portal 复用同一 client/jar）；`PORTAL_PROBE` 提升为 pub（门户 base 单一事实来源）
+- **tauri 接线**：新增命令 `get_portal_overview`（`commands/portal.rs`，聚合 DTO `PortalOverview{semester, wallet, nextCourse, fetchedAt}`，**子字段失败互不阻塞**、失败项为 null 前端回落空态）；`lib.rs` 注册（命令数 **13 → 14**）；`infra/state.rs` 的 `CasSession` 挂 `portal: PortalClient`，`restore_session` 与会话重建时构造（缓存生命周期 = 会话生命周期，登出即整体丢弃）
+- **前端 TodayPanel 接真实数据**：四态（首次加载骨架 / 有数据 / 空 / 出错可重试，游客不取数）；钱包三卡真实数字、单项取失败回落 "—"；「下一节课」横幅无课/取失败隐藏；**不伪造数据**；`types.ts` 新增 `SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview` 4 个 TS 契约接口
+- **校本作息与大节语义（实测发现，M2.5 课表页同用）**：门户课表矩阵 `queryAWeekSchedule.resultsJsonArr` 为 7 行 × 10 列，**行 = 星期、10 列 = 5 大节 × 2 小节**，一门课占相邻两列（列对 (1,2)=大节1 … (9,10)=大节5），大节 = 100 分钟。校本大节时间：大节1 08:00（未实测，反推）、**大节2 10:10、大节3 13:45（实测）**、大节4 15:35（推算）、大节5 18:30（未实测）；实测锚点是学校自身日程服务 `bs-schedule` 的 `Default-class` 事件（15 条跨 4 周）。**真机修正**：早期实现按 `campus-schedule::default_time_slots()` 上游默认 13 节表把大节4 显示成 14:50（其第 7 节恰为 14:50），真机验收改为 **15:35**；`campus-schedule` 上游默认表**故意未改**（被金标测试钉住，校本化留待 M2.5），校本口径收敛在 `campus-portal::block_time_slots()`
+- **安全纪律**：网关 JWT 与邮箱 `loginUrl`（内含 authkey，等同凭据）只在内存中使用——缓存不落盘、`AuthHead` 无 Debug 派生、全程无日志输出；钱包卡解析对 `loginUrl` 以「结构体不定义该字段」方式直接丢弃，绝不进日志/文档/前端
+- **验证**：`cargo test --workspace` → **66 passed / 0 failed / 3 ignored**（其中 `campus-portal` 新增 13 个，含回归用例 `next_course_maps_column_pair_to_block_start` 钉「列对→大节起始时刻」口径）；前端 `tsc --noEmit` 0 错误；`vite build` 通过；**真机**：今日页一卡通余额 **102.51**、未读邮件 **1**、在借图书 **8 本**（与门户首页三卡逐项一致），「下一节课 **15:35** · 信息安全 · C5科教中心313」
+- **遗留**：大节 1/4/5 时间未实测（M2.5 校本化作息时校准）；日程服务课表数据不完整（缺某门课），课表以门户矩阵为准、日程服务仅用于锚定作息（教训已入 `.codewiki/learnings/`）；慧新E校实时直连按计划 §1.4 列为批次 4（可选，待用户拍板）
+
 ## 2026-09-18 · 头像裁切器 + 上传回学校（执行上一轮延后项）
 
 - **模块**：`tauri-app/frontend`（`AvatarDialog` 重写、`authStore`、依赖）、`tauri-app/src-tauri`（头像命令与体积守卫）、`crates/campus-auth`（门户上传协议）、`.codewiki/`、`docs/`

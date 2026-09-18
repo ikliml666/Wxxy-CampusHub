@@ -4,11 +4,13 @@ type: architecture
 source_files:
   - tauri-app/src-tauri/src/lib.rs
   - tauri-app/src-tauri/src/commands/auth.rs
+  - tauri-app/src-tauri/src/commands/portal.rs
   - tauri-app/src-tauri/src/infra/state.rs
   - tauri-app/src-tauri/src/account/crypto.rs
   - tauri-app/src-tauri/src/account/store.rs
   - crates/campus-auth/src/lib.rs
   - crates/campus-schedule/src/lib.rs
+  - crates/campus-portal/src/lib.rs
   - tauri-app/frontend/src/shared/tauriApi.ts
   - tauri-app/frontend/src/shared/types.ts
   - tauri-app/frontend/src/stores/authStore.ts
@@ -18,6 +20,7 @@ tags:
   - tauri
   - ipc
   - session
+  - portal
 ---
 
 # 系统架构总览
@@ -34,10 +37,10 @@ tags:
 │    命令面 / AppState / DPAPI 持久化；不含协议逻辑
 │         │  直接函数调用
 └─ crates/（协议单点，无 Tauri 依赖）
-     campus-auth：CAS 登录协议  campus-schedule：课表领域核心
+     campus-auth：CAS 登录协议  campus-schedule：课表领域核心  campus-portal：门户业务协议
 ```
 
-- **协议单点**：`crates/campus-auth/src/lib.rs:1` 明示「无 Tauri 依赖，安卓可复用」；`crates/campus-schedule` 同理仅依赖 serde/chrono/thiserror（各自 Cargo.toml）。安卓端届时以 Cargo path 依赖引用这两个 crate（`PLAN.md:15`），协议只写一份。
+- **协议单点**：`crates/campus-auth/src/lib.rs:1` 明示「无 Tauri 依赖，安卓可复用」；`crates/campus-schedule` 同理仅依赖 serde/chrono/thiserror（各自 Cargo.toml）；`crates/campus-portal`（2026-09-18 M2 批次 1 新增）复用 campus-auth 的已登录 `CasClient`（clone 共享 Cookie jar），门户业务接口调用与解析全在此（[[modules/campus-portal|门户业务协议核心]]）。安卓端届时以 Cargo path 依赖引用这三个 crate（`PLAN.md:15`），协议只写一份。
 - **平台外壳**：`tauri-app/src-tauri/src/lib.rs:2` 明示「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」。
 - **前端**：不感知协议细节，只消费 [[modules/campus-hub-tauri|接线层]] 的命令面 DTO。
 
@@ -65,16 +68,17 @@ tags:
 
 ## 命令面与模块地图
 
-13 条命令注册于 `lib.rs:16-30`：登录/账号 8 条（`get_captcha` / `login` / `login_manual` / `login_saved` / `check_session` / `logout` / `list_accounts` / `remove_account`）+ 头像 5 条（`get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar` / `upload_official_avatar`——最后一条 2026-09-18 新增，把裁切后的头像经门户 `portraitChange` 上传回学校，协议细节见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）。详见 [[modules/campus-hub-tauri|接线层 campus-hub-tauri]]。
+14 条命令注册于 `lib.rs:16-31`：登录/账号 8 条（`get_captcha` / `login` / `login_manual` / `login_saved` / `check_session` / `logout` / `list_accounts` / `remove_account`）+ 头像 5 条（`get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar` / `upload_official_avatar`——最后一条 2026-09-18 新增，把裁切后的头像经门户 `portraitChange` 上传回学校，协议细节见 [[learnings/portal-avatar-upload-protocol|门户头像上传协议]]）+ 门户数据 1 条（`get_portal_overview`，2026-09-18 M2 批次 1 新增，聚合学期/钱包/下一节课且子字段失败互不阻塞，协议细节见 [[modules/campus-portal|门户业务协议核心]]）。详见 [[modules/campus-hub-tauri|接线层 campus-hub-tauri]]。
 
 | 目录 | 职责 | 文章 |
 |---|---|---|
 | `crates/campus-auth/` | CAS 协议：textbook RSA、登录客户端、RecordingJar、验证码识别 | [[modules/campus-auth|CAS 协议核心]] |
 | `crates/campus-schedule/` | 课表模型、周次/网格算法、正方教务解析 | [[modules/campus-schedule|课表核心]] |
+| `crates/campus-portal/` | 门户业务协议：学期/钱包/周课表调用与解析、校本大节表 | [[modules/campus-portal|门户业务协议核心]] |
 | `tauri-app/src-tauri/` | 命令面、AppState、DPAPI 存储 | [[modules/campus-hub-tauri|接线层]] |
 | `tauri-app/frontend/src/` | 外壳组件、账号系统与头像、Dock 导航、8 面板、域色 token | [[modules/frontend-shell|前端外壳]] |
 
-安全基线：CSP 收紧（`tauri.conf.json:26`，`connect-src 'self' ipc://localhost`）；capabilities 仅 `core:default`（`capabilities/default.json`）；密码只在内存中存续、立即 RSA 加密，日志用户名打码、密码绝不入日志（`commands/auth.rs:10-11,157-165`）；门户 csrf 密钥常量只存在于 campus-auth 源码内（`cas.rs:26`，明文不入 wiki/文档），头像上传日志只打码用户名、绝不打印 data URL（`profile.rs:219-262`）；头像等非凭据明文落盘、凭据必 DPAPI（[[decisions/guest-mode-account-shell|游客优先决策]] D3）。
+安全基线：CSP 收紧（`tauri.conf.json:26`，`connect-src 'self' ipc://localhost`）；capabilities 仅 `core:default`（`capabilities/default.json`）；密码只在内存中存续、立即 RSA 加密，日志用户名打码、密码绝不入日志（`commands/auth.rs:10-11,157-165`）；门户 csrf 密钥常量只存在于 campus-auth 源码内（`cas.rs:26`，明文不入 wiki/文档），头像上传日志只打码用户名、绝不打印 data URL（`profile.rs:219-262`）；门户网关 JWT 与邮箱 `loginUrl`（内含 authkey）只在 campus-portal 内存缓存中使用，不落盘、不记日志、不返回前端（[[modules/campus-portal|门户业务协议核心]]）；头像等非凭据明文落盘、凭据必 DPAPI（[[decisions/guest-mode-account-shell|游客优先决策]] D3）。
 
 ## 与参考项目 Wxxy-CampusLogin 的关系
 
