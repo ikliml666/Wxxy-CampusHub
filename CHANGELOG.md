@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 批次 3：调课通知 L1/L2 解析与 override 命令
+
+- **模块**：`crates/campus-schedule`（新增 `notice.rs` 解析内核模块）、`tauri-app/src-tauri`（3 新命令 **31 → 34**，`commands/timetable.rs` 扩展）、`.codewiki/`
+- **依据**：计划 `docs/superpowers/plans/2026-09-18-m2.5-timetable.md`（L1/L2 冻结语义 §2.5、命令面 §2.3——本条不重复抄契约）
+- **`notice.rs` 纯函数内核**（`parse_notice_text(text, courses, current_week) -> Vec<NoticeCandidate>`，全部 std 字符串处理，**零新依赖**——workspace 原无 regex）：
+  - **L1 提取**：课程名 = 对本地课程名做 contains 匹配（`《信息安全》` 书名号形态天然命中子串；多名命中时裁剪被长名包含的短名——文本含「信息安全实验」必含「信息安全」）；周次 `第3周` / `3-4周`（区间优先，避免把「4」拆成单周）/ `本周`（需 `current_week` 锚点，None = 无法确定）；星期 `周一…周日` / `星期一…星期日` / `星期天`（「周二至周四」区间取第一个，降级场景由用户确认）；节次 `3-4节` / `第3节`（**单节强制「第」前缀**，避免「共16节课」「3节连上」节次数误提）；教室 `D4-207` 形态 token（`字母数字-数字`）优先、「教室：/教室:」后内容兜底；类型关键词 停课>补课>调课（无关键词默认 Rescheduled，不影响置信）。
+  - **新旧时间消歧**：调课通知「由周一3-4节调整到周四5-6节」的新时间在箭头词（调整到/调至/改到/换到/更换为…12 个）之后——周次/星期/节次/教室四提取器一律 **tail 优先、全文回退**（新时间缺表述时旧表述仍可命中）。
+  - **L2 置信**：课程唯一命中且周次/星期/节次齐全 → `high`（reasons 为空 ⇔ High）；缺任一要素 / 同名多门 / 多名 / 0 命中 → `low`，`reason` 中文写明每项降级原因（「；」连接）。
+  - **`noticeId`** = `manual:<16 位十六进制>`（`DefaultHasher` 对正文哈希，同进程/同版本确定；**非密码学哈希，仅作去重与撤销键**，M5 接公告流时改用公告 id）。
+- **3 条命令**（`commands/timetable.rs`；本地操作无需登录，沿用 `mutate_timetable` 骨架，无进程内互斥）：`parse_notice(text)` 读本地课表 + `current_week`（`chrono::Local::now()` + `campus_schedule::current_week`）解析、**不入库**；`apply_override(candidate)` 校验 courseId 落在本地课程（缺失/已删 → 业务失败「通知未匹配到本地课程」）→ 字段级拷贝写 `overrides`（**同一 noticeId+courseId 重复采纳幂等覆盖**，`auto_applied` = confidence==High）；`revoke_notice(noticeId)` 按 `source_notice_id` 整批删除返回条数（0 条幂等成功）。转换抽纯函数 `candidate_to_override`（命令与单测共用）。
+- **语义裁决**：停课通知解析出的星期/节次**原样保留**进 override（model.rs `new_day` 注释同步更新——「停哪一次」需要 day 定位，一周多节次的课程只停指定那次；契约未细化该点，见 `.codewiki/decisions/timetable-notice-l1l2.md`）。
+- **验证**：`cargo test --workspace` → **146 passed / 0 failed / 4 ignored**（本批新增 15：campus-schedule 25→37（notice 12——高置信/低置信缺要素/同名多门/0 命中书名号/停课/「本周」与区间/节次形态/星期形态/教室形态/类型关键词/noticeId 稳定），campus-hub 26→29（override 幂等覆盖/整批撤销/auto_applied 置信度 3 个））；`tsc --noEmit` 0 错误。模拟通知端到端由单测覆盖（真实文本 → 候选全字段断言）；live 粘贴解析由主智能体验收时跑。
+- **遗留**：① 单次解析只产出 1 个候选——教务通知多条调整混排（「A 调至 X；B 停课」）需用户分次粘贴；② 「周二至周四」区间表述取第一个星期（可能非用户本意，Low 场景由用户确认）；③ 教室 token 形态（`字母数字-数字`）之外的教室名（如「C5科教中心313」）仅「教室：」兜底可提取。
+
 ## 2026-09-18 · M2.5 批次 2：课表自动对比更新 + 手动课程 + ICS 导出
 
 - **模块**：`crates/campus-schedule`（新增 `diff.rs` 导入 diff 纯函数模块）、`crates/campus-portal`（`block_time_slots()` 提升 `pub` 并 re-export）、`tauri-app/src-tauri`（5 新命令 **26 → 31**，`commands/timetable.rs` 扩展）、`tauri-app/src-tauri/Cargo.toml`（补 `chrono` 依赖）、`.codewiki/`
@@ -9,7 +23,15 @@
 - **手动课程三命令**（本地操作、无需登录）：`add_course_manual(input)`（`source=Manual`、colorIndex 由入参、id=`manual-<纳秒>` 与导入 id `<table_id>-<jxb_id>` 前缀不同永不冲突；入参校验：课程名/星期 1-7/节次/周次 ≥1）；`update_course(course)` 按 id 整条替换（任意来源可编辑）；`delete_course(id)` 级联清理该课程挂载的 override。三者共用 `mutate_timetable`（load→改→save）骨架；无进程内互斥（前端交互串行，契约 §2.2 原子性由调用方保证）。
 - **`export_ics` 命令**：返回展开式 VEVENT 文本（不落盘，前端 Blob 下载）。每门未停开课程 × 其每个教学周各一个 VEVENT（不依赖 RRULE）；日期 = `semester_start_date` + `(周次-1)×7 + (星期-1)` 天；时间取校本大节作息——`campus_portal::block_time_slots()` 本批次提升 `pub`（与今日页同一事实来源，未复制常量、49 个既有测试全过），**大节号 = `(起始小节+1)/2`**、结束时刻取结束小节对应大节 end_time（`3-4节` → 10:10-11:50）；大节越界跳过不伪造；TEXT 转义 + CRLF；**floating local time**（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释）；缺 `semester_start_date` 报「请先完成一次导入」。
 - **验证**：`cargo test --workspace` → **131 passed / 0 failed / 4 ignored**（本批新增 19：campus-schedule 14→25（diff 11 个）、campus-hub 18→26（ICS/导入辅助 8 个））；`tsc --noEmit` 0 错误。live（真实账号导入 8 门课）由主智能体验收时跑。
-- **遗留**：① M2.5 批次 1 无 CHANGELOG 条目（其内容见提交 e155f98 的 commit message）；② `Semester` 暑期 `"3"` 未映射（契约口径仅 1/2，未知序号报错）；③ ICS 未做 RFC 5545 行折叠（字段均为短文本，实测远低于 75 字节）。
+- **遗留**：① M2.5 批次 1 无 CHANGELOG 条目（其内容见提交 e155f98 的 commit message，已于批次 3 时补录为下方独立条目）；② `Semester` 暑期 `"3"` 未映射（契约口径仅 1/2，未知序号报错）；③ ICS 未做 RFC 5545 行折叠（字段均为短文本，实测远低于 75 字节）。
+
+## 2026-09-18 · M2.5 批次 1：教务课表拉取 + TGT 持久化 + 本地课表存储（补录，原内容见提交 e155f98 commit message）
+
+- **模块**：`crates/campus-auth`（`jwglxt.rs` 课表拉取、`error.rs`）、`crates/campus-schedule`（`model.rs`）、`tauri-app/src-tauri`（1 新命令 **25 → 26**，`infra/timetable.rs` 新建）
+- **教务拉取（campus-auth）**：`fetch_timetable_json(tgt, xnm, xqm)` 先直接 POST `kbcx/xskbcx_cxXsKb.html?gnmkdm=N2151`（XRW+CT 头组，body 仅 xnm/xqm），**901（教务会话失效）且有 TGT 时经 `jwglxt_sso` 静默重进后重试一次**，重进失败/仍 901 归一为 `JwglNotLogin`；`tgt=None` 直接 `JwglNotLogin`。响应判定抽纯函数 `interpret_kbcx_response`（901→JwglNotLogin、200 JSON 原文透传解析交上层、200 登录页 HTML 与其他状态码→Parse），离线单测 4 个；`error.rs` 新增 `JwglNotLogin` 变体；含教务 SSO 侦察前置产出（`sso_ticket`/`jwglxt_sso`、live 测试）。
+- **TGT 持久化**：`SessionRecord` 加 `tgtB64`（**DPAPI 密文**，serde default 兼容旧格式）；`persist_session`/`load_session`（返回 `StoredSession`）/`restore_session` 同步；`CasSession` 加 `tgt` 字段并在恢复时回填；`finish_login` 公共路径统一落盘 TGT（`login_saved` 免密重登同享）。单测覆盖 TGT roundtrip、落盘无明文断言、旧格式兼容。
+- **课表存储与模型**：`campus-schedule model.rs` 的 `Course` 加 `disabled`（停开标记，serde default）；新增 `Timetable{config, courses, overrides, updated_at}`（camelCase）。`infra/timetable.rs` 新建：`timetable.json` 明文读写（非凭据，与 profile.json 同级），**缺失/损坏回空课表不报错**（课表页首屏不白屏，坏文件保留现场）。`commands/timetable.rs` 新增 `get_timetable`（无入参纯本地读取），`lib.rs` 注册（命令数 25→26）。
+- **验证**：`cargo test --workspace` → **113 passed / 0 failed / 4 ignored（含 live）**；`tsc --noEmit` 0 错误；CodeWiki 4 篇更新 + index/meta 同步（18 篇 up to date）。live（登录后拉取返回 8 条并落库、未登录返回「请先登录」）由主智能体验收。
 
 ## 2026-09-18 · M2 遗留项：日程月视图/会议并入与应用可达性元数据
 

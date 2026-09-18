@@ -118,7 +118,8 @@ pub struct CourseOverride {
     pub weeks: Vec<u32>,
     /// 调整类型：调课 / 停课 / 补课（变体名序列化为 snake_case，见 OverrideKind）
     pub change_type: OverrideKind,
-    /// 调整后的星期几（停课时为 None）
+    /// 调整后的星期几（调课/补课 = 新时间；停课 = 被停那次的星期，供前端定位「停哪一次」，
+    /// 通知未提及时为 None）
     pub new_day: Option<u8>,
     pub new_start_section: Option<u8>,
     pub new_end_section: Option<u8>,

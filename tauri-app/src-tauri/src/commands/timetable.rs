@@ -1,4 +1,5 @@
-//! 课表命令面（M2.5：批次 1 本地读取；批次 2 导入对比 / 手动增删改 / ICS 导出）。
+//! 课表命令面（M2.5：批次 1 本地读取；批次 2 导入对比 / 手动增删改 / ICS 导出；
+//! 批次 3 调课通知 L1/L2 解析与 override 命令）。
 //!
 //! - [`get_timetable`]：纯本地读取（无网络、无需登录态），缺失/损坏 → 空课表。
 //! - [`import_timetable`]：需登录。门户学期信息推导 `xnm`/`xqm`（冻结契约 §1.2：
@@ -10,6 +11,10 @@
 //! - [`export_ics`]：展开式 VEVENT 文本（**不落盘**，前端 Blob 下载）。时间取
 //!   校本大节作息 `campus_portal::block_time_slots`（与今日页同一事实来源），
 //!   日期由 `semester_start_date` + 周次 + 星期推出。
+//! - [`parse_notice`] / [`apply_override`] / [`revoke_notice`]（批次 3）：解析
+//!   纯函数在 campus_schedule::notice（契约 §2.5），本层只做接线——本地课表 +
+//!   当前周传入、候选采纳写 overrides（noticeId+courseId 幂等覆盖）、按
+//!   noticeId 整批撤销。
 //!
 //! 统一口径：业务失败一律 `Ok(CommandResult::err(中文消息))`（`Err(String)` 仅限
 //! IPC 框架层）；敏感纪律——本模块不输出任何 cookie/TGT/凭据字段。
@@ -18,8 +23,8 @@ use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use crate::infra::{state, timetable};
 use campus_portal::block_time_slots;
-use campus_schedule::model::{Course, Timetable};
-use campus_schedule::{diff_courses, parse_kb_response, Semester};
+use campus_schedule::model::{Course, CourseOverride, Timetable};
+use campus_schedule::{current_week, diff_courses, parse_kb_response, parse_notice_text, Semester, NoticeConfidence};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -172,14 +177,19 @@ fn mutate_timetable<T>(
     Ok(out)
 }
 
-/// 手动课程 id：`manual-<纳秒时间戳>`。与导入课程 `<table_id>-<jxb_id>` 前缀
-/// 不同（永不冲突）；创建后即固定，且 Manual 不参与 diff，id 天然稳定。
-fn new_manual_id() -> String {
+/// 本地实体 id：`<前缀>-<纳秒时间戳>`（手动课程 `manual-` / 调课叠加 `ov-`）。
+/// 与导入课程 `<table_id>-<jxb_id>` 前缀不同（永不冲突）；创建后即固定，
+/// 且两者都不参与导入 diff，id 天然稳定。
+fn fresh_id(prefix: &str) -> String {
     let n = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("manual-{n}")
+    format!("{prefix}-{n}")
+}
+
+fn new_manual_id() -> String {
+    fresh_id("manual")
 }
 
 fn validate_manual_input(input: &ManualCourseInput) -> Result<(), String> {
@@ -384,6 +394,89 @@ pub async fn export_ics() -> Result<CommandResult<String>, String> {
     }
 }
 
+// ---------------- M2.5 批次 3：调课通知解析与 override ----------------
+
+/// L1/L2 解析（冻结契约 §2.5）：读本地课表 + 当前教学周，**不入库**；
+/// 无课程/无学期锚点时 current_week=None，候选自然降级 Low。
+#[tauri::command]
+pub async fn parse_notice(
+    text: String,
+) -> Result<CommandResult<Vec<campus_schedule::NoticeCandidate>>, String> {
+    let dir = state::data_dir()?;
+    let tt = timetable::load_timetable(&dir);
+    let today = chrono::Local::now().date_naive();
+    let cw = current_week(today, &tt.config);
+    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
+}
+
+/// 同一 `noticeId + courseId` 重复采纳幂等：先移除旧叠加再写入（覆盖而非堆叠）。
+fn upsert_override(tt: &mut Timetable, ov: CourseOverride) {
+    tt.overrides
+        .retain(|o| !(o.source_notice_id == ov.source_notice_id && o.course_id == ov.course_id));
+    tt.overrides.push(ov);
+}
+
+/// 撤销某条通知产生的全部 override，返回删除条数（0 条也幂等成功）。
+fn revoke_by_notice(tt: &mut Timetable, notice_id: &str) -> u32 {
+    let before = tt.overrides.len();
+    tt.overrides
+        .retain(|o| o.source_notice_id != notice_id);
+    (before - tt.overrides.len()) as u32
+}
+
+/// 候选 → 叠加记录（契约 §2.3：autoApplied 区分高置信自动应用与低置信人工采纳；
+/// 字段级拷贝——停课通知的星期/节次也保留，供前端定位「停哪一次」，见 model 注释）。
+fn candidate_to_override(candidate: &campus_schedule::NoticeCandidate, course_id: &str) -> CourseOverride {
+    CourseOverride {
+        id: fresh_id("ov"),
+        course_id: course_id.to_string(),
+        weeks: candidate.weeks.clone(),
+        change_type: candidate.change_type,
+        new_day: candidate.new_day,
+        new_start_section: candidate.new_start_section,
+        new_end_section: candidate.new_end_section,
+        new_position: candidate.new_position.clone(),
+        source_notice_id: candidate.notice_id.clone(),
+        auto_applied: candidate.confidence == NoticeConfidence::High,
+    }
+}
+
+/// 采纳候选为调课叠加（高置信自动应用也走这条，`autoApplied` 区分来源）。
+/// 候选未落到本地课程（courseId 缺失或课程已删）→ 业务失败。
+#[tauri::command]
+pub async fn apply_override(
+    candidate: campus_schedule::NoticeCandidate,
+) -> Result<CommandResult<CourseOverride>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        let Some(course) = tt
+            .courses
+            .iter()
+            .find(|c| Some(&c.id) == candidate.course_id.as_ref())
+        else {
+            return Err(
+                "通知未匹配到本地课程（courseId 缺失或课程已删除），无法应用".to_string()
+            );
+        };
+        let ov = candidate_to_override(&candidate, &course.id);
+        upsert_override(tt, ov.clone());
+        Ok(ov)
+    }) {
+        Ok(ov) => Ok(CommandResult::ok(ov)),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+/// 撤销通知：删除该 noticeId 产生的全部 override，返回删除条数。
+#[tauri::command]
+pub async fn revoke_notice(notice_id: String) -> Result<CommandResult<u32>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| Ok(revoke_by_notice(tt, &notice_id))) {
+        Ok(n) => Ok(CommandResult::ok(n)),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +644,74 @@ mod tests {
     fn ics_escape_covers_all_specials() {
         assert_eq!(ics_escape("a\\b;c,d\ne"), "a\\\\b\\;c\\,d\\ne");
         assert_eq!(ics_escape("正常文本"), "正常文本");
+    }
+
+    // ---------------- 批次 3：override 幂等与撤销 ----------------
+
+    use campus_schedule::model::OverrideKind;
+
+    fn override_of(notice: &str, course: &str) -> CourseOverride {
+        CourseOverride {
+            id: fresh_id("ov"),
+            course_id: course.into(),
+            weeks: vec![3],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(4),
+            new_start_section: Some(3),
+            new_end_section: Some(4),
+            new_position: Some("D4-305".into()),
+            source_notice_id: notice.into(),
+            auto_applied: false,
+        }
+    }
+
+    /// 同一 noticeId+courseId 重复采纳 → 覆盖（1 条），不堆叠；不同课程同通知可并存。
+    #[test]
+    fn upsert_override_idempotent_per_notice_and_course() {
+        let mut tt = fixture();
+        upsert_override(&mut tt, override_of("manual:aaa", "default-a"));
+        upsert_override(&mut tt, override_of("manual:aaa", "default-a"));
+        assert_eq!(tt.overrides.len(), 1, "重复采纳应覆盖而非堆叠");
+        upsert_override(&mut tt, override_of("manual:aaa", "default-b"));
+        assert_eq!(tt.overrides.len(), 2, "同一通知不同课程应并存");
+        upsert_override(&mut tt, override_of("manual:bbb", "default-a"));
+        assert_eq!(tt.overrides.len(), 3, "不同通知互不影响");
+    }
+
+    /// revoke 按 noticeId 整批删除并返回条数；未知 noticeId 返回 0。
+    #[test]
+    fn revoke_notice_removes_all_by_notice_id() {
+        let mut tt = fixture();
+        upsert_override(&mut tt, override_of("manual:aaa", "default-a"));
+        upsert_override(&mut tt, override_of("manual:aaa", "default-b"));
+        upsert_override(&mut tt, override_of("manual:bbb", "default-a"));
+        assert_eq!(revoke_by_notice(&mut tt, "manual:aaa"), 2);
+        assert_eq!(tt.overrides.len(), 1);
+        assert_eq!(revoke_by_notice(&mut tt, "manual:aaa"), 0, "重复撤销幂等");
+        assert_eq!(revoke_by_notice(&mut tt, "manual:none"), 0);
+        assert_eq!(tt.overrides[0].source_notice_id, "manual:bbb");
+    }
+
+    /// 高置信候选 → auto_applied=true；低置信 → false（契约 §2.3 的 autoApplied 区分）。
+    #[test]
+    fn auto_applied_follows_confidence() {
+        let tt = fixture();
+        let courses = tt.courses.clone();
+        let high = &parse_notice_text("第5周周四3-4节 信息安全 调整到 D4-305", &courses, Some(2))[0];
+        let low = &parse_notice_text("第5周 信息安全 调整到 D4-305", &courses, Some(2))[0];
+        assert_eq!(high.confidence, NoticeConfidence::High);
+        assert_eq!(low.confidence, NoticeConfidence::Low);
+        let mut tt = tt;
+        upsert_override(
+            &mut tt,
+            candidate_to_override(high, high.course_id.as_deref().unwrap()),
+        );
+        upsert_override(&mut tt, candidate_to_override(low, "default-a"));
+        assert!(tt.overrides[0].auto_applied);
+        assert!(!tt.overrides[1].auto_applied);
+        // 字段级拷贝：noticeId 进 source_notice_id，时间字段原样
+        assert_eq!(tt.overrides[0].source_notice_id, high.notice_id);
+        assert_eq!(tt.overrides[0].new_day, high.new_day);
+        assert_eq!(tt.overrides[0].new_position, high.new_position);
     }
 }

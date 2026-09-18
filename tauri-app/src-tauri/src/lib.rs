@@ -48,6 +48,9 @@ pub fn run() {
             commands::timetable::update_course,
             commands::timetable::delete_course,
             commands::timetable::export_ics,
+            commands::timetable::parse_notice,
+            commands::timetable::apply_override,
+            commands::timetable::revoke_notice,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

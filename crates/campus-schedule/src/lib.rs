@@ -12,12 +12,14 @@
 //! - [`timeslots`]：默认 13 节作息常量
 //! - [`zhengfang`]：正方教务课表响应解析（周次位掩码展开）
 //! - [`diff`]：导入自动对比更新（本地课表 ↔ 教务最新课表，冻结契约 §2.4）
+//! - [`notice`]：调课通知 L1/L2 解析（冻结契约 §2.5，产出 NoticeCandidate）
 //!
 //! 算法与数据模型移植自 shiguangschedule（Apache-2.0），见 NOTICE.md。
 
 pub mod diff;
 pub mod grid;
 pub mod model;
+pub mod notice;
 pub mod timeslots;
 pub mod weeks;
 pub mod zhengfang;
@@ -29,6 +31,7 @@ pub use model::{
     expand_week_mask, Course, CourseOverride, CourseSource, CourseTableConfig, OverrideKind,
     TimeSlot, Timetable,
 };
+pub use notice::{notice_id_for, parse_notice_text, NoticeCandidate, NoticeConfidence};
 pub use timeslots::default_time_slots;
 pub use weeks::{current_week, semester_start_from_week, week_index_at_date};
 pub use zhengfang::{parse_kb_response, query_body, Semester, ZhengfangError};
