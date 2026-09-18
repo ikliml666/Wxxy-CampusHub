@@ -14,6 +14,7 @@
 
 - [[learnings\cas-sso-plaintext-redirect|CAS SSO 回跳的三处坑：重定向中断、明文落点、探测误判]]
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
+- [[learnings\tauri-webview-ui-verification|Tauri/WebView2 真机 UI 验收：vite 供旧模块与点击注入失效的可用替代路径]]
 - [[learnings\meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]
 - [[learnings\cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级设计（content.jsp 系不可抓）]]
 - [[learnings\portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工（受保护资源与两种白名单）]]

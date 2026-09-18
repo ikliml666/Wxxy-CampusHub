@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 收尾：真机验收（导入 8 门课 / 调课自动生效 / 手动课程零变动 / ICS）
+
+- **模块**：验收与文档（无产品代码净改动）；`.codewiki/learnings/tauri-webview-ui-verification.md` 新增
+- **真机验收（真实账号 + 真机 Tauri 窗口，2026-09-18 晚）**：
+  1. **教务导入**：`导入完成：新增 8 · 更新 0 · 停开 0 · 共 8 门`；顶栏「第 2 周 / 共 19 周」（学期与教学周来自门户学期信息）；周网格按后端下发的 5 大节作息（08:00/10:10/13:45/15:35/18:30）渲染，每块带【导】角标，今日列高亮；块位置与节次一致（如「信息安全 周二 5-6 节」落大节 3 = 13:45，`ceil(5/2)=3`）
+  2. **自动对比更新幂等**：再次导入 → `新增 0 · 更新 0 · 停开 0`，课程集合不变
+  3. **手动课程零触碰**（PLAN 验收项）：手动添加一门后二次导入仍原样保留（列表标「手动」），未被停开、未被覆盖
+  4. **调课通知自动调整**（PLAN 验收项）：粘贴「第5周周四3-4节 信息隐藏与取证技术 调整到 D4-305」→ `conf=high`（reason 为空）→ 采纳后第 5 周出现【调】角标新时段块 + 原时段「已调出」虚线占位，「已生效调整」列表可整批撤销
+  5. **ICS 导出**：`export_ics` 返回 **29788 字符 / 129 个 VEVENT**
+  6. **TGT 持久化**：登录后 `session.json` 出现 DPAPI 密文 `tgtB64`，教务会话失效时可静默重 SSO（无 TGT 时报「教务会话已失效，请重新登录」）
+- **验收手段说明（重要，供后续接手者）**：本机 ZCode 长期占据前台（`GetForegroundWindow()` 为 ZCode），坐标点击被别窗接收、UIA `InvokePattern`/AXPress 在 WebView2 上只设焦点不派发 DOM click（Dock 面板切换等少数按钮例外），**鼠标交互无法注入 Tauri 窗口**。故本轮改用「临时验收代码（面板挂载时自动跑一次动作序列）+ 结果落库回读」取真机证据：临时块经 `git checkout` 完全移除（**未进任何提交**），验收产物（2 门假课程 + 1 条 override）已从 `%APPDATA%/campushub/timetable.json` 清理，含产物的备份仅留在 `%TEMP%/campushub-m25-verify/`。**「鼠标点击 → 命令」这一段未经真机点验**，仅有源码级证据（dev server 下发的模块中确认存在 `onClick: doImport`）。详细方法与判据见 CodeWiki 学习条目。
+- **验证**：`cargo test --workspace` → **148 passed / 0 failed / 4 ignored**；真实账号 live `jwglxt_sso_kbcx_live` ok；`tsc --noEmit` 0 错误
+- **遗留**：① 详情浮层定位、Dock 9 项视觉、深色模式色板对比度未逐项点验（受注入限制）；② ICS 的浏览器下载行为未点验（命令返回已在真机序列中走到）
+
 ## 2026-09-18 · M2.5 批次 4：课表页 UI（周视图 / 详情浮层 / 手动课程 / 调课待确认 / ICS 导出）
 
 - **模块**：`tauri-app/src-tauri`（`get_timetable` 出参按契约修订改为 `TimetableView`）、`tauri-app/frontend`（`PanelId` 8→9 项、`TimetablePanel.tsx` 新建、`types.ts` 课表契约 12 接口、DockNav/AppShell/uiStore/index.css 接线）、`docs/`（计划 §2.3 TimetableView 修订落档）、`.codewiki/`
