@@ -32,7 +32,7 @@ tags:
   - **source 来源隔离**（`model.rs:19-26,57`）：`CourseSource::{Import, Manual}`——自动更新与调课解析只作用于 `Import` 课程，手动添加的课程永不触碰，为「自动更新只作用于导入课程」提供数据基础。`class_id`（正方 `jxb_id`）是自动更新 diff 的匹配键之一（`model.rs:61-63`）。
   - **disabled 停开标记**（`model.rs:64-68`，M2.5 批次 1 新增，`#[serde(default)]`）：自动更新发现课程在教务最新课表中消失时置 `true`（**不删记录**，保留其挂载的调课 override 可回滚）；`Manual` 课程**永不置位**（冻结契约 §2.4）。旧 JSON 无该字段缺省 false（serde 单测 `model.rs` `course_disabled_defaults_false_and_roundtrips`）。
   - 自定义时间：`is_custom_time = true` 时忽略节次、用 `custom_start_time/custom_end_time`（`model.rs:46-50`）。
-- **CourseTableConfig**（`model.rs:66-88`）：`semester_start_date` 是周次计算锚点；默认 20 总周、一周从周一起（`model.rs:83-88`）。
+- **CourseTableConfig**（`model.rs:66-96`）：`semester_start_date` 是周次计算锚点；默认 20 总周、一周从周一起（`model.rs:83-88`）；`slots: Option<Vec<TimeSlot>>`（`model.rs:89-95`，M2.5 收尾轮新增，`#[serde(default)]` 旧文件缺省 None）——自定义作息，None/空 = 内置校本大节表，有值 = 唯一事实源（取值单点与校验见 [[decisions/timetable-editable-slots|作息时间表可编辑]]）。
 - **TimeSlot**（`model.rs:91-101`）：节次 → "HH:MM" 时间段。
 - **CourseOverride 调课叠加**（`model.rs:114-139`，自建模型、上游无）：叠加在导入课程之上、原数据保留可回滚；`OverrideKind::{Rescheduled, Cancelled, Extra}`（调课/停课/补课）；`source_notice_id` 是撤销与去重键（撤销某条通知 = 删除其匹配的全部 override）；`auto_applied` 区分高置信自动应用与低置信待确认。
 - **Timetable 本地课表**（`model.rs:142-162`，M2.5 批次 1 新增）：`{ config: CourseTableConfig, courses, overrides, updated_at }`，即 `%APPDATA%/campushub/timetable.json` 的顶层结构（持久化与 IPC 透出见 [[modules/campus-hub-tauri|接线层]]）；序列化 camelCase（`updatedAt`），`courses`/`overrides`/`updated_at` 带 serde 缺省（旧文件/手工删节可读，单测 `timetable_serde_defaults_and_camel_case`）。

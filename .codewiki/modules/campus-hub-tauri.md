@@ -61,7 +61,7 @@ tags:
 | `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；**M2 遗留项起 codes 含 `Default-Meeting` 时并入会议卡日程**——失败空贡献不影响课表，失败时 stderr 有 `[meeting-diag]` 打点） | `portal.rs:229-261` |
 | `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25） | `portal.rs:264-281` |
 | `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略——可达性提示由前端按 `AppItem.access` 分级给出） | `portal.rs:284-301` |
-| `get_timetable` | — | `TimetableView{ timetable, slots, currentWeek, today }`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；`slots` = 校本大节作息 `campus_portal::block_time_slots()` **下发给前端做时间标签唯一事实源**、`currentWeek` = `weeks::current_week`（无开学日/今天越出学期为 null）、`today` = "YYYY-MM-DD"；组装纯函数 `build_timetable_view` 可单测。批次 1 原返回裸 `Timetable`，2026-09-18 批次 4 前修订（契约 §2.3），命令数 25 → 26） | `timetable.rs:36-71` |
+| `get_timetable` | — | `TimetableView{ timetable, slots, currentWeek, today }`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；`slots` = `effective_slots(config)`（`config.slots` 自定义优先、回落内置 `campus_portal::block_time_slots()`，收尾轮单点化）**下发给前端做时间标签唯一事实源**、`currentWeek` = `weeks::current_week`（无开学日/今天越出学期为 null）、`today` = "YYYY-MM-DD"；组装纯函数 `build_timetable_view` 可单测。批次 1 原返回裸 `Timetable`，2026-09-18 批次 4 前修订（契约 §2.3），命令数 25 → 26） | `timetable.rs:36-71` |
 | `import_timetable` | — | `ImportResult{ added, changed, removed, total, changes }`（链路见下节；M2.5 批次 2 新增，命令数 26 → 27） | `timetable.rs:75` |
 | `add_course_manual` | `input: ManualCourseInput{ name, teacher, position, day, startSection, endSection, weeks, colorIndex, remark? }` | `Course`（source=Manual、id=`manual-<纳秒>`；入参校验：课程名/星期/节次/周次，M2.5 批次 2） | `timetable.rs:203` |
 | `update_course` | `course: Course` | `Course`（按 id 整条替换，id 不存在 err「课程不存在」；任意来源可编辑，M2.5 批次 2） | `timetable.rs:238` |
@@ -70,6 +70,7 @@ tags:
 | `parse_notice` | `text: String` | `NoticeCandidate[]`（L1/L2 解析**不入库**，语义见 [[modules/campus-schedule\|课表核心]] notice 节；本地课表 + `current_week` 现算传入；M2.5 批次 3，命令数 31 → 34） | `timetable.rs` |
 | `apply_override` | `candidate: NoticeCandidate` | `CourseOverride`（校验 courseId 落在本地课程，缺失/已删 err「通知未匹配到本地课程」；字段级拷贝写 overrides，`autoApplied` = confidence==High；**同一 noticeId+courseId 重复采纳幂等覆盖**；M2.5 批次 3） | `timetable.rs` |
 | `revoke_notice` | `noticeId: String` | `u32`（按 `source_notice_id` 整批删除 override，返回条数，0 条幂等成功；M2.5 批次 3） | `timetable.rs` |
+| `save_time_slots` | `slots: Option<Vec<TimeSlot>>` | `TimetableView`（保存自定义作息/`null` 恢复内置；校验：≥1 条、≤20、number 正整数严格递增、HH:MM 且 end>start；返回刷新视图免二次拉取。M2.5 收尾轮 2026-09-18 新增，命令数 34 → 35；取舍见 [[decisions/timetable-editable-slots\|作息时间表可编辑]]） | `timetable.rs` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
@@ -100,11 +101,11 @@ tags:
 
 ## 课表命令与导入/ICS/调课通知链路（`commands/timetable.rs`，M2.5 批次 1+2+3）
 
-课表命令不依赖 `portal_of` 模式：`get_timetable`/`export_ics`/手动课程三命令/调课通知三命令是**纯本地操作**（不取 State，直接 `state::data_dir()`）；只有 `import_timetable` 需要会话——锁内 clone `(client, tgt, portal)` 三件套后 drop guard 再 await。
+课表命令不依赖 `portal_of` 模式：`get_timetable`/`export_ics`/手动课程三命令/调课通知三命令/`save_time_slots` 是**纯本地操作**（不取 State，直接 `state::data_dir()`）；只有 `import_timetable` 需要会话——锁内 clone `(client, tgt, portal)` 三件套后 drop guard 再 await。
 
 - **`import_timetable` 链路**（`timetable.rs:75-150`）：门户学期信息（会话内已缓存）推导 `xnm`/`xqm`（冻结契约 §1.2 口径：`xnm`=`start_date` 前 4 位、`semester` `"1"→3/"2"→12`，**不用 `grade`**）→ `fetch_timetable_json`（901→TGT 静默重进在 campus-auth 内部；失败 Display 中文直接透出，`JwglNotLogin` =「教务会话已失效，请重新登录」）→ `parse_kb_response(json, DEFAULT_TABLE_ID)` → [[modules/campus-schedule|课表核心]] `diff_courses` 合并旧库 → 落库 → `ImportResult{added, changed, removed, total, changes}`（total = 合并后课程总数，含停开保留记录）。学期信息同时初始化/更新 `semester_start_date`（`"YYYYMMDD"`→`NaiveDate`）与 `semester_total_weeks`，**单字段解析失败保留旧值**（不因坏数据丢课表）。
 - **手动课程三命令**共用 `mutate_timetable`（load → 改 → save 骨架，`timetable.rs:165`）；无进程内互斥（前端交互串行，契约 §2.2 原子性由调用方保证）。`add_course_manual` 入参校验（课程名非空/星期 1-7/节次 start≤end/周次非空且 ≥1）后构造 `source=Manual` 课程，id=`manual-<纳秒时间戳>`（与导入 id `<table_id>-<jxb_id>` 前缀不同永不冲突，取舍见 [[decisions/timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]）。
-- **`export_ics`**（`build_ics`，`timetable.rs:299`）：展开式 VEVENT（不依赖 RRULE）——每门未停开课程 × 其每个教学周一个 VEVENT；日期 = `semester_start_date`（第 1 周周一锚点）+ `(周次-1)×7 + (星期-1)` 天；时间取 `campus_portal::block_time_slots`（本批次提升为 `pub` 并 re-export，与今日页同一事实来源），**大节号 = `(起始小节+1)/2`**，结束时刻取结束小节对应大节的 end_time；起始/结束大节任一超出 5 大节表 → 跳过该课程；TEXT 转义（`,` `;` `\` 换行）+ CRLF 行尾；floating local time（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释，取舍见同上 decision 文章）；缺 `semester_start_date` err「请先完成一次导入」。
+- **`export_ics`**（`build_ics`，`timetable.rs:299`）：展开式 VEVENT（不依赖 RRULE）——每门未停开课程 × 其每个教学周一个 VEVENT；日期 = `semester_start_date`（第 1 周周一锚点）+ `(周次-1)×7 + (星期-1)` 天；时间取 `effective_slots(config)`（M2.5 收尾轮单点化：`config.slots` 自定义优先、回落 `campus_portal::block_time_slots`，与 `TimetableView.slots` 同源，见 [[decisions/timetable-editable-slots|作息时间表可编辑]]），**大节号 = `(起始小节+1)/2`**，结束时刻取结束小节对应大节的 end_time；起始/结束大节任一超出 5 大节表 → 跳过该课程；TEXT 转义（`,` `;` `\` 换行）+ CRLF 行尾；floating local time（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释，取舍见同上 decision 文章）；缺 `semester_start_date` err「请先完成一次导入」。
 - **调课通知三命令**（M2.5 批次 3）：`parse_notice(text)` 本地课表 + `chrono::Local::now()` 现算 `current_week` 传入 `campus_schedule::parse_notice_text`（解析语义见 [[modules/campus-schedule|课表核心]]，取舍见 [[decisions/timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]），**不入库**；`apply_override(candidate)` 经 `candidate_to_override`（字段级拷贝 + `auto_applied`=High，纯函数与单测共用）写 overrides，`upsert_override` 以 noticeId+courseId 幂等覆盖、不同课程并存；`revoke_notice(noticeId)` 按 `source_notice_id` 整批删除返回条数。三者同样走 `mutate_timetable` 骨架、纯本地无会话。
 
 ## 登录重试状态机

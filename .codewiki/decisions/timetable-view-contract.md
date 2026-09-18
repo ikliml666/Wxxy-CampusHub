@@ -39,6 +39,11 @@ tags:
   不是色板下标——前端取色一律 `% COURSE_PALETTE.length`，与手动课程的 0..=7 下标统一。
 - 导入课程 `remark` 装的是「课程性质·考核方式」（`kcxz·khfsmc`），不是备注——
   详情浮层按 `source` 区分标签（导入=「性质 · 考核」，手动=「备注」）。
+- **slots 取值口径收尾轮修订**（2026-09-18）：`slots` 不再恒等于内置
+  `block_time_slots()`，改为 `effective_slots(config)`——`config.slots` 自定义优先、
+  `None`/空回落内置，且网格行/ICS/ceil 映射三处共用同一函数（取舍与校验规则见
+  [[decisions/timetable-editable-slots|作息时间表可编辑]]）；自定义作息行数不固定，
+  前端按 `slots.len()` 渲染。
 
 ## 渲染语义分工（前端 `buildWeekBlocks`）
 
@@ -47,3 +52,8 @@ override 叠加不改原记录，视图层负责合成：停课（cancelled）�
 原位渲染新教室；补课（extra）→ 新增实体块。同一课多条 override 逆序取最后一条
 （后采纳覆盖先采纳，与后端 `upsert_override` 幂等语义呼应）。同日重叠分列是后端
 `grid::merge_courses` 贪心占道语义的轻量前端重写（不在 IPC 面，勿重复实现）。
+
+**停课两档口径（冻结契约 §2.5.1，2026-09-18 收尾轮定）**：`new_day` 有值 = 只停
+「该周 · 星期 d」那一次（该课当天有排课才渲染占位，本周其他星期的同课不受影响）；
+`new_day = None` = 通知没提星期 → 该课在 `weeks` 列出的周次内**整周全停**（该周该课
+所有原时段渲染虚线「已停」）。解析侧 `notice.rs` 保持「提星期才填 `new_day`」不变。

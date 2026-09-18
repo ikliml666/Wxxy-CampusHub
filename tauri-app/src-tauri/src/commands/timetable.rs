@@ -15,6 +15,9 @@
 //!   纯函数在 campus_schedule::notice（契约 §2.5），本层只做接线——本地课表 +
 //!   当前周传入、候选采纳写 overrides（noticeId+courseId 幂等覆盖）、按
 //!   noticeId 整批撤销。
+//! - [`save_time_slots`]（2026-09-18 收尾轮）：保存/清空自定义作息；
+//!   [`effective_slots`] 是生效作息的单点取值（`config.slots` 优先、回落内置
+//!   校本大节表），`build_timetable_view` 与 `build_ics` 共用。
 //!
 //! 统一口径：业务失败一律 `Ok(CommandResult::err(中文消息))`（`Err(String)` 仅限
 //! IPC 框架层）；敏感纪律——本模块不输出任何 cookie/TGT/凭据字段。
@@ -46,11 +49,23 @@ pub struct TimetableView {
     pub today: String,
 }
 
+/// 生效作息的**单点取值**（冻结契约 §2.3 slots 取值口径，2026-09-18 收尾轮修订）：
+/// `config.slots` 有值且非空 → 用户自定义作息（唯一事实源）；`None`/空 → 回落
+/// 内置校本大节表 [`campus_portal::block_time_slots`]。
+/// 网格行（[`TimetableView::slots`]）、ICS 展开、大节号→时间查找必须全部经本函数
+/// 取值，不得一处分发一处硬编码。
+fn effective_slots(config: &campus_schedule::model::CourseTableConfig) -> Vec<TimeSlot> {
+    match config.slots.as_deref() {
+        Some(custom) if !custom.is_empty() => custom.to_vec(),
+        _ => block_time_slots(),
+    }
+}
+
 /// 纯函数组装（便于单测）：周次口径与 [`parse_notice`] 一致
 /// （`campus_schedule::current_week`）。
 fn build_timetable_view(tt: Timetable, today: chrono::NaiveDate) -> TimetableView {
     TimetableView {
-        slots: block_time_slots(),
+        slots: effective_slots(&tt.config),
         current_week: current_week(today, &tt.config),
         today: today.format("%Y-%m-%d").to_string(),
         timetable: tt,
@@ -337,7 +352,8 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
     let Some(start_date) = tt.config.semester_start_date else {
         return Err("尚未导入课表（缺少学期开学日期），请先完成一次导入".to_string());
     };
-    let slots = block_time_slots();
+    // 作息单点取值（契约 §2.3）：自定义优先，回落内置——与 TimetableView.slots 同源
+    let slots = effective_slots(&tt.config);
     let dtstamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let mut lines: Vec<String> = vec![
         "BEGIN:VCALENDAR".into(),
@@ -504,6 +520,92 @@ pub async fn revoke_notice(notice_id: String) -> Result<CommandResult<u32>, Stri
     }
 }
 
+// ---------------- 作息时间表编辑（冻结契约 §2.3，2026-09-18 收尾轮追加） ----------------
+
+/// 自定义作息条数上限（防误填：正常学校大节不会超过这个量级）。
+const MAX_TIME_SLOTS: usize = 20;
+
+/// `"HH:MM"` → 分钟数（0..=1439）；格式非法返回 None。
+fn parse_hm(s: &str) -> Option<u32> {
+    let (h, m) = s.split_once(':')?;
+    if h.len() != 2 || m.len() != 2 {
+        return None;
+    }
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// 自定义作息校验（非法一律中文原因，转 `CommandResult::err`）：至少 1 条、
+/// 不超 [`MAX_TIME_SLOTS`]；`number` 正整数且严格递增不重复；时间匹配 `HH:MM`
+/// 且 `end_time > start_time`（等长数字串字典序即时间序）。
+fn validate_time_slots(slots: &[TimeSlot]) -> Result<(), String> {
+    if slots.is_empty() {
+        return Err("作息至少需要一条".to_string());
+    }
+    if slots.len() > MAX_TIME_SLOTS {
+        return Err(format!("作息条数不能超过 {MAX_TIME_SLOTS} 条"));
+    }
+    let mut prev_number: u8 = 0;
+    for (i, s) in slots.iter().enumerate() {
+        if s.number == 0 {
+            return Err(format!("第 {} 条的大节号必须是正整数", i + 1));
+        }
+        if s.number <= prev_number {
+            return Err(format!(
+                "大节号必须严格递增且不重复（第 {} 条：{}）",
+                i + 1,
+                s.number
+            ));
+        }
+        let (Some(start), Some(end)) = (parse_hm(&s.start_time), parse_hm(&s.end_time)) else {
+            return Err(format!(
+                "第 {} 条的时间格式必须是 HH:MM（如 08:00）",
+                i + 1
+            ));
+        };
+        if end <= start {
+            return Err(format!(
+                "第 {} 条的结束时间（{}）必须晚于开始时间（{}）",
+                i + 1,
+                s.end_time,
+                s.start_time
+            ));
+        }
+        prev_number = s.number;
+    }
+    Ok(())
+}
+
+/// 保存自定义作息时间表（冻结契约 §2.3 `save_time_slots`）：
+/// `None` → 清空自定义（`config.slots = None`，恢复内置校本默认）；
+/// `Some(v)` → 校验通过后保存。返回刷新后的 [`TimetableView`]（前端免二次拉取）。
+#[tauri::command]
+pub async fn save_time_slots(
+    slots: Option<Vec<TimeSlot>>,
+) -> Result<CommandResult<TimetableView>, String> {
+    if let Some(v) = &slots {
+        if let Err(e) = validate_time_slots(v) {
+            return Ok(CommandResult::err(&e));
+        }
+    }
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        // Some(空数组) 按恢复内置处理（与「None/空 = 内置」口径一致），防御性归一
+        tt.config.slots = slots.clone().filter(|v| !v.is_empty());
+        Ok(tt.clone())
+    }) {
+        Ok(tt) => Ok(CommandResult::ok(build_timetable_view(
+            tt,
+            chrono::Local::now().date_naive(),
+        ))),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +641,7 @@ mod tests {
                 semester_start_date: start_date,
                 semester_total_weeks: 20,
                 first_day_of_week: 1,
+                slots: None,
             },
             courses,
             overrides: vec![],
@@ -783,5 +886,102 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
         );
         assert_eq!(view.current_week, None);
+    }
+
+    // ---------------- 收尾轮：作息时间表编辑 ----------------
+
+    fn slot(number: u8, start: &str, end: &str) -> TimeSlot {
+        TimeSlot {
+            number,
+            start_time: start.into(),
+            end_time: end.into(),
+            alias: None,
+        }
+    }
+
+    /// 自定义作息校验：合法样例通过；空 / 超上限 / 重复号 / 倒序 / 0 号 /
+    /// 坏格式 / 结束不晚于开始逐项拒绝。
+    #[test]
+    fn time_slot_validation_covers_bad_inputs() {
+        let ok = vec![slot(1, "08:00", "09:40"), slot(2, "10:10", "11:50")];
+        assert!(validate_time_slots(&ok).is_ok());
+
+        // 空数组
+        assert!(validate_time_slots(&[]).unwrap_err().contains("至少"));
+        // 超上限
+        let too_many: Vec<TimeSlot> = (1..=21)
+            .map(|n| slot(n, "08:00", "09:40"))
+            .collect();
+        assert!(validate_time_slots(&too_many).unwrap_err().contains("不能超过"));
+        // 重复号
+        let dup = vec![slot(1, "08:00", "09:40"), slot(1, "10:10", "11:50")];
+        assert!(validate_time_slots(&dup).unwrap_err().contains("严格递增"));
+        // 倒序
+        let reversed = vec![slot(2, "08:00", "09:40"), slot(1, "10:10", "11:50")];
+        assert!(validate_time_slots(&reversed).unwrap_err().contains("严格递增"));
+        // 0 号
+        assert!(validate_time_slots(&[slot(0, "08:00", "09:40")])
+            .unwrap_err()
+            .contains("正整数"));
+        // 坏格式：缺前导零 / 非数字 / 越界分钟 / 非 HH:MM 形态
+        for bad in ["8:00", "08:0a", "08:70", "24:00", "0800"] {
+            assert!(
+                validate_time_slots(&[slot(1, bad, "09:40")])
+                    .unwrap_err()
+                    .contains("HH:MM"),
+                "坏格式 {bad} 应被拒绝"
+            );
+        }
+        // 结束时间不晚于开始
+        assert!(validate_time_slots(&[slot(1, "10:10", "09:40")])
+            .unwrap_err()
+            .contains("晚于"));
+        assert!(validate_time_slots(&[slot(1, "09:40", "09:40")])
+            .unwrap_err()
+            .contains("晚于"));
+    }
+
+    /// `parse_hm`：合法 "HH:MM" → 分钟数；越界小时/分钟与坏格式 → None。
+    #[test]
+    fn parse_hm_accepts_only_valid_clock_time() {
+        assert_eq!(parse_hm("08:00"), Some(480));
+        assert_eq!(parse_hm("23:59"), Some(1439));
+        assert_eq!(parse_hm("24:00"), None);
+        assert_eq!(parse_hm("08:60"), None);
+        assert_eq!(parse_hm("8:00"), None);
+        assert_eq!(parse_hm("0800"), None);
+        assert_eq!(parse_hm("08-00"), None);
+    }
+
+    /// 生效作息单点取值（契约 §2.3 口径）：`config.slots` 有值且非空 → 自定义；
+    /// `None` 或空 → 回落内置校本 5 大节表。
+    #[test]
+    fn effective_slots_prefers_custom_and_falls_back_to_builtin() {
+        let custom = vec![slot(1, "08:30", "10:00"), slot(2, "10:20", "11:50"), slot(3, "14:00", "15:30")];
+        let mut tt = timetable_with(None, vec![]);
+        tt.config.slots = Some(custom.clone());
+        assert_eq!(effective_slots(&tt.config), custom);
+
+        tt.config.slots = None;
+        assert_eq!(effective_slots(&tt.config), block_time_slots());
+
+        tt.config.slots = Some(vec![]);
+        assert_eq!(effective_slots(&tt.config), block_time_slots(), "空自定义回落内置");
+    }
+
+    /// `TimetableView` 组装：带自定义 slots 时行数 = 自定义条数（前端网格按
+    /// slots.len() 渲染，不写死 5）。
+    #[test]
+    fn timetable_view_uses_custom_slots_row_count() {
+        let mut tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+        tt.config.slots = Some(vec![
+            slot(1, "08:30", "10:00"),
+            slot(2, "10:20", "11:50"),
+            slot(3, "14:00", "15:30"),
+            slot(4, "15:40", "17:10"),
+        ]);
+        let view = build_timetable_view(tt, NaiveDate::from_ymd_opt(2026, 9, 17).unwrap());
+        assert_eq!(view.slots.len(), 4);
+        assert_eq!(view.slots[0].start_time, "08:30");
     }
 }

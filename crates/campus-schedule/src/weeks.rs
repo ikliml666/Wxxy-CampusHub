@@ -98,6 +98,7 @@ mod tests {
             semester_start_date: start,
             semester_total_weeks: 20,
             first_day_of_week: 1,
+            slots: None,
         };
         assert_eq!(
             current_week(

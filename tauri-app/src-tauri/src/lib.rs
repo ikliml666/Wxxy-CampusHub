@@ -51,6 +51,7 @@ pub fn run() {
             commands::timetable::parse_notice,
             commands::timetable::apply_override,
             commands::timetable::revoke_notice,
+            commands::timetable::save_time_slots,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

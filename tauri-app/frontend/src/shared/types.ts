@@ -230,6 +230,8 @@ export interface CourseTableConfig {
   semesterTotalWeeks: number;
   /** 一周起始日：1=周一 … 7=周日 */
   firstDayOfWeek: number;
+  /** 自定义作息（M2.5 收尾轮追加）：null/空 = 内置校本大节表；有值 = 用户编辑过的作息（唯一事实源） */
+  slots: TimeSlot[] | null;
 }
 
 /** 调整类型：调课 / 停课 / 补课（Rust OverrideKind snake_case）。 */
@@ -274,7 +276,7 @@ export interface TimeSlot {
 /** get_timetable → data（批次 4 修订契约 §2.3）。 */
 export interface TimetableView {
   timetable: Timetable;
-  /** 校本大节作息（5 大节），时间标签唯一事实源 */
+  /** 生效作息（自定义优先、回落内置校本大节表），时间标签唯一事实源；行数不固定，按 slots.len() 渲染 */
   slots: TimeSlot[];
   /** 当前教学周；null = 未设置开学日或今天不在学期内 */
   currentWeek: number | null;

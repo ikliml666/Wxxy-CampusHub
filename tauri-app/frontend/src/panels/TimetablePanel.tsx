@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardPaste,
+  Clock,
   Download,
   Pencil,
   Plus,
@@ -24,6 +25,7 @@ import type {
   ImportResult,
   NoticeCandidate,
   OverrideKind,
+  TimeSlot,
   TimetableView,
 } from "@/shared/types";
 
@@ -49,7 +51,7 @@ const KIND_LABEL: Record<OverrideKind, string> = {
   extra: "补课",
 };
 
-/** 单大节行高（px）。5 大节 = 360px 网格主体。 */
+/** 单大节行高（px）；网格行数 = slots.length（作息可编辑后行数不固定为 5）。 */
 const ROW_H = 72;
 
 const DAY_NAMES = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -194,7 +196,11 @@ function buildWeekBlocks(
       ghost,
     });
 
-    // 停课优先：该周该次被停（newDay 未提及时按该课当次全停处理）
+    // 停课优先（冻结契约 §2.5.1 两档）：newDay 有值 = 只停「该周 · 星期 newDay」
+    // 那一次——该课当天有排课才渲染虚线「已停」占位，本周其他星期的同课不受影响
+    // （同课另一天的记录由挂在其 courseId 上的 override 单独处理）；
+    // newDay = null = 通知未提星期 → 该课在 weeks 列出的周次内整周全停，
+    // 该周该课所有原时段渲染虚线「已停」。
     if (cancel && (cancel.newDay == null || cancel.newDay === course.day)) {
       blocks.push(mk(course.day, startBlock, endBlock, course.position, cancel, "cancelled"));
       continue;
@@ -493,6 +499,167 @@ function CourseForm({
   );
 }
 
+// ---------------- 作息时间表编辑（冻结契约 §2.3 save_time_slots，M2.5 收尾轮） ----------------
+
+/** "HH:MM" + 分钟 → "HH:MM"（不跨 24:00，溢出截到 23:59）。 */
+function addMinutes(hm: string, minutes: number): string {
+  const [h, m] = hm.split(":").map(Number);
+  const total = Math.min((h || 0) * 60 + (m || 0) + minutes, 23 * 60 + 59);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/** 编辑态作息行：大节号由保存时的行序生成（1..n，天然严格递增），不手填。 */
+interface SlotRow {
+  startTime: string;
+  endTime: string;
+  alias: string | null;
+}
+
+function SlotsEditor({
+  initial,
+  usingCustom,
+  busy,
+  error,
+  onSave,
+  onReset,
+  onClose,
+}: {
+  /** 当前生效作息（自定义或内置默认），打开时快照 */
+  initial: TimeSlot[];
+  usingCustom: boolean;
+  busy: boolean;
+  error: string | null;
+  onSave: (slots: TimeSlot[]) => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const [rows, setRows] = useState<SlotRow[]>(
+    initial.map((s) => ({ startTime: s.startTime, endTime: s.endTime, alias: s.alias })),
+  );
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  // Esc 关闭（busy 时忽略）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const update = (i: number, patch: Partial<SlotRow>) =>
+    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  const addRow = () => {
+    const last = rows[rows.length - 1];
+    const start = last ? last.endTime : "08:00";
+    setRows((rs) => [...rs, { startTime: start, endTime: addMinutes(start, 100), alias: null }]);
+  };
+
+  const submit = () => {
+    if (rows.length === 0) return setLocalErr("作息至少需要一条");
+    for (const r of rows) {
+      if (!r.startTime || !r.endTime) return setLocalErr("每行都需要开始与结束时间");
+      if (r.endTime <= r.startTime) return setLocalErr("结束时间必须晚于开始时间");
+    }
+    setLocalErr(null);
+    onSave(rows.map((r, i) => ({ number: i + 1, startTime: r.startTime, endTime: r.endTime, alias: r.alias })));
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-label="作息时间表"
+        className="w-full max-w-md rounded-card border border-line bg-surface p-4 shadow-pop"
+      >
+        <div className="flex items-center justify-between">
+          <p className="text-body font-semibold text-text">作息时间表</p>
+          <span className="rounded bg-line px-1.5 text-caption text-text-2">
+            {usingCustom ? "自定义" : "本校默认"}
+          </span>
+        </div>
+        <p className="mt-1 text-caption text-text-2">
+          按行即大节（第 1 行 = 第 1 大节），课表网格与 ICS 导出都会按此展开。
+        </p>
+
+        <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
+          {rows.map((r, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="tabular-num w-14 shrink-0 text-caption font-medium text-text-2">
+                第 {i + 1} 大节
+              </span>
+              <input
+                type="time"
+                value={r.startTime}
+                onChange={(e) => update(i, { startTime: e.target.value })}
+                aria-label={`第 ${i + 1} 大节开始时间`}
+                disabled={busy}
+                className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+              />
+              <span aria-hidden className="text-caption text-text-2">–</span>
+              <input
+                type="time"
+                value={r.endTime}
+                onChange={(e) => update(i, { endTime: e.target.value })}
+                aria-label={`第 ${i + 1} 大节结束时间`}
+                disabled={busy}
+                className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+              />
+              <button
+                type="button"
+                aria-label={`删除第 ${i + 1} 大节`}
+                disabled={busy}
+                onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
+                className="shrink-0 rounded px-1.5 text-caption text-alert hover:underline disabled:opacity-50"
+              >
+                删除
+              </button>
+            </div>
+          ))}
+          {rows.length === 0 && (
+            <p className="py-3 text-center text-caption text-text-2">暂无作息行，点击下方新增。</p>
+          )}
+        </div>
+
+        <button
+          type="button"
+          disabled={busy}
+          onClick={addRow}
+          className="mt-2 flex items-center gap-1 text-caption text-sched hover:underline disabled:opacity-50"
+        >
+          <Plus aria-hidden="true" className="size-3.5" />
+          新增大节
+        </button>
+
+        {(localErr ?? error) && (
+          <p className="mt-2 text-caption text-alert" role="alert">
+            {localErr ?? error}
+          </p>
+        )}
+
+        <div className="mt-3 flex items-center gap-2 border-t border-line pt-3">
+          <Button variant="ghost" size="sm" disabled={busy || !usingCustom} onClick={onReset} title={usingCustom ? "清空自定义作息，恢复内置校本大节表" : "当前已是内置默认"}>
+            恢复本校默认
+          </Button>
+          <span className="flex-1" />
+          <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>
+            取消
+          </Button>
+          <Button size="sm" disabled={busy} onClick={submit}>
+            {busy ? "保存中…" : "保存"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------- 主面板 ----------------
 
 /** 面板四态。 */
@@ -535,6 +702,10 @@ export function TimetablePanel() {
   const [editing, setEditing] = useState<Course | null>(null);
   const [formInitial, setFormInitial] = useState<Partial<Course>>({});
   const [formError, setFormError] = useState<string | null>(null);
+
+  const [slotsOpen, setSlotsOpen] = useState(false);
+  const [slotsBusy, setSlotsBusy] = useState(false);
+  const [slotsErr, setSlotsErr] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<DetailPos | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -760,6 +931,34 @@ export function TimetablePanel() {
     }
   };
 
+  // ---------------- 作息保存 / 恢复默认（命令返回刷新后的 TimetableView，免二次拉取） ----------------
+
+  const saveSlots = async (slots: TimeSlot[]) => {
+    setSlotsBusy(true);
+    setSlotsErr(null);
+    const r = await invokeCommand<TimetableView>("save_time_slots", { slots });
+    setSlotsBusy(false);
+    if (r.success && r.data) {
+      setView({ phase: "ready", data: r.data });
+      setSlotsOpen(false);
+    } else {
+      setSlotsErr(r.message ?? "保存失败");
+    }
+  };
+
+  const resetSlots = async () => {
+    setSlotsBusy(true);
+    setSlotsErr(null);
+    const r = await invokeCommand<TimetableView>("save_time_slots", { slots: null });
+    setSlotsBusy(false);
+    if (r.success && r.data) {
+      setView({ phase: "ready", data: r.data });
+      setSlotsOpen(false);
+    } else {
+      setSlotsErr(r.message ?? "恢复失败");
+    }
+  };
+
   // ---------------- 渲染 ----------------
 
   const weekSwitcher = ready && (
@@ -802,6 +1001,10 @@ export function TimetablePanel() {
       <Button variant="outline" size="sm" disabled={icsBusy} onClick={exportIcs}>
         <Download aria-hidden="true" className="size-3.5" />
         导出 ICS
+      </Button>
+      <Button variant="outline" size="sm" onClick={() => { setSlotsErr(null); setSlotsOpen(true); }}>
+        <Clock aria-hidden="true" className="size-3.5" />
+        作息
       </Button>
     </div>
   );
@@ -1148,6 +1351,19 @@ export function TimetablePanel() {
                 void submitCourse(p);
               }}
               onCancel={closeForm}
+            />
+          )}
+
+          {/* 作息时间表编辑弹层（打开时快照当前生效作息） */}
+          {slotsOpen && ready && (
+            <SlotsEditor
+              initial={ready.slots}
+              usingCustom={tt?.config.slots != null && tt.config.slots.length > 0}
+              busy={slotsBusy}
+              error={slotsErr}
+              onSave={(slots) => void saveSlots(slots)}
+              onReset={() => void resetSlots()}
+              onClose={() => setSlotsOpen(false)}
             />
           )}
 

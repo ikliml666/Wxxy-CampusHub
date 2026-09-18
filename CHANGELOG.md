@@ -1,5 +1,18 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 收尾轮：作息时间表可编辑 + 停课 override 渲染口径冻结
+
+- **模块**：`crates/campus-schedule`（model/weeks）、`tauri-app/src-tauri`（commands/timetable、infra/timetable、lib.rs）、`tauri-app/frontend`（TimetablePanel.tsx、types.ts）、`docs/`（计划 §2.1/§2.3/§2.5.1 契约追加）、`.codewiki/`
+- **作息时间表编辑（契约 §2.1/§2.3 收尾轮追加落地）**：
+  1. `CourseTableConfig` 新增 `#[serde(default)] slots: Option<Vec<TimeSlot>>`（旧文件缺省 `None`；`None`/空 = 内置校本大节表，有值 = 用户编辑过的唯一事实源）；`TimeSlot` 补 derive `PartialEq`
+  2. 取值单点化：新增 `effective_slots(config)`（`config.slots` 优先、回落 `campus_portal::block_time_slots()`），`build_timetable_view` 与 `build_ics` 全部改走它——网格行 / ICS 展开 / 大节号→时间查找三处同一份 slots，不再各调各的
+  3. 新命令 `save_time_slots(slots: Option<Vec<TimeSlot>>) -> TimetableView`（命令数 34 → 35）：`None` 恢复内置、`Some(v)` 校验后保存（≥1 条、≤20 条、number 正整数严格递增不重复、HH:MM 且 end>start，非法一律中文 err）；返回刷新后的视图，前端免二次拉取
+  4. 前端：顶栏「作息」按钮 → `SlotsEditor` 弹层（原生 `<input type="time">`，增删行、大节号 = 行序不手填、「恢复本校默认」仅自定义态可用）；保存成功用返回的 `TimetableView` 直接更新，网格行按 `slots.len()` 渲染（本就不写死 5）
+- **停课 override 渲染口径（契约 §2.5.1 冻结）**：`new_day` 有值 = 只停「该周 · 星期 d」那一次；`None` = 该课在 weeks 列出的周次内整周全停。`buildWeekBlocks` 既有行为已符合两档，注释改为明确引用契约；`notice.rs`「提星期才填 new_day」现状与契约相符，未改动
+- **取舍**：大节号由行序生成（天然严格递增，后端校验仅防御）；`Some(空数组)` 防御性归一为 `None`；今日页「下一节课」仍直连 `block_time_slots()`（无 config 可读，与课表页自定义作息可能短暂分叉，属已知取舍）
+- **验证**：`cargo test --workspace` → **152 passed / 0 failed / 4 ignored**（基线 148 + 新增 4：作息校验 / parse_hm / effective_slots 回落 / 自定义行数视图组装）；`tsc --noEmit` 0 错误；`npm run build` 通过
+- **遗留**：作息弹层与停课两档渲染未真机点验（点击注入限制，待主智能体 WebView2 远程调试点验：一条「只停周四」+ 一条「没提星期」的通知）
+
 ## 2026-09-18 · M2.5 收尾：真机验收（导入 8 门课 / 调课自动生效 / 手动课程零变动 / ICS）
 
 - **模块**：验收与文档（无产品代码净改动）；`.codewiki/learnings/tauri-webview-ui-verification.md` 新增

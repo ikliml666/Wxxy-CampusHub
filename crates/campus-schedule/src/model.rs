@@ -83,6 +83,13 @@ pub struct CourseTableConfig {
     /// 一周起始日：1=周一 … 7=周日
     #[serde(default = "default_first_day")]
     pub first_day_of_week: u8,
+    /// 自定义作息时间表（冻结契约 §2.1，2026-09-18 收尾轮追加）。`None`/空 =
+    /// 用内置校本大节表 `campus_portal::block_time_slots()`（今日页与课表页同一
+    /// 事实来源）；有值 = 用户编辑过的作息，视为唯一事实源。取值口径收敛在
+    /// tauri 层 `commands::timetable::effective_slots`（网格行 / ICS 展开 /
+    /// ceil 映射三处必须共用同一份）。`TimeSlot.alias` 可作大节别名。
+    #[serde(default)]
+    pub slots: Option<Vec<TimeSlot>>,
 }
 
 fn default_total_weeks() -> u32 {
@@ -93,7 +100,7 @@ fn default_first_day() -> u8 {
 }
 
 /// 节次时间段（对齐 TimeSlot）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeSlot {
     pub number: u8,
@@ -204,6 +211,8 @@ mod tests {
         assert!(tt.courses.is_empty());
         assert!(tt.overrides.is_empty());
         assert_eq!(tt.updated_at, "");
+        // slots serde 缺省（冻结契约 §2.1 收尾轮追加）：旧文件无该字段 → None（内置作息）
+        assert!(tt.config.slots.is_none());
 
         let full = Timetable {
             config: CourseTableConfig {
@@ -212,6 +221,7 @@ mod tests {
                 semester_start_date: None,
                 semester_total_weeks: 20,
                 first_day_of_week: 1,
+                slots: None,
             },
             courses: vec![],
             overrides: vec![],
