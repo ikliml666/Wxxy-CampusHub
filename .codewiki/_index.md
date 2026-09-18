@@ -5,6 +5,7 @@
 - [[concepts\domain-color-system|域色编码系统（domain-color-system）]]
 ## Decision
 
+- [[decisions\timetable-editable-slots|作息时间表可编辑（save_time_slots 与 effective_slots 单点取值）]]
 - [[decisions\recording-jar-session|决策记录 - RecordingJar 自实现与会话持久化]]
 - [[decisions\guest-mode-account-shell|决策记录 - 游客优先外壳、账号系统与头像三态]]
 - [[decisions\timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]
