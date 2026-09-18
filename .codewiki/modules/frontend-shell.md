@@ -43,7 +43,7 @@ tags:
 ## IPC 出口与契约类型（shared/）
 
 - `tauriApi.ts:8-17`：`invokeCommand<T>(cmd, args)` 是**唯一 IPC 出口**，invoke 抛错包装为 `{ success:false, message:String(e) }`，调用方只处理 CommandResult（契约详见 [[modules/campus-hub-tauri|接线层]] 与 [[_architecture|架构总览]]）。
-- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:116` 起：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
+- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:128-179`：M2 批次 3 契约 6 接口（`AppItem` / `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
 - `cn.ts:3-5`：clsx + tailwind-merge 的 `cn()`。
 
 ## authStore：登录态单一来源（zustand + persist）
@@ -111,7 +111,7 @@ tags:
 
 ## 面板：游客空态与数据接入中
 
-8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。已接真实数据的面板：TodayPanel（M2 批次 1，见下节）、InfoPanel 与 TodoPanel（M2 批次 2，见下两节）。TodayPanel 游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
+8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。已接真实数据的面板：TodayPanel（M2 批次 1，见下节）、InfoPanel 与 TodoPanel（M2 批次 2，见下两节）、AppsPanel 与 SchedulePanel（M2 批次 3，见下两节）。TodayPanel 游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
 
 ## TodayPanel：今日页真实数据（M2 批次 1）
 
@@ -139,6 +139,22 @@ tags:
 - **三栏 rail**：契约冻结三栏 `TODO_TAB_IDS = ["todo", "done", "apply"]`（`TodoPanel.tsx:17`；接口实际返回 6 个 tab，unread/read/focus 不在契约内不展示）；名称接口优先、失败回落 `TODO_TAB_FALLBACK` 兜底文案不阻塞列表（`TodoPanel.tsx:18-22,88-89`）；`count > 0` 显示待办数徽标（`TodoPanel.tsx:129-131`）。
 - **列表**：`get_todo_list`（pageSize=10），标题 + 副行元信息 `metaLine`（申请人 · 申请时间 · 节点 · 紧急度，空段省略、全空回落 source 或 "—"，`TodoPanel.tsx:32-34,178-188`）；空态「暂无事项」（账号无待办时的常态）、错误可重试；分页同资讯页满页判断。
 - 分栏名称与待办数取 `get_todo_tabs`（增强信息），与列表取数解耦——分栏接口失败只影响 rail 文案与徽标，列表照常。
+
+## AppsPanel：应用页真实数据（M2 批次 3）
+
+- **四态**：`CatalogState`（`AppsPanel.tsx:13-18`，loading/ready/empty/error），`get_app_catalog` 单命令取数；empty = 分组与钉选全空。
+- **常用钉选区**：`AppCatalog.pinned` 横向置顶（`AppsPanel.tsx:181-190`），为空时整区不渲染。
+- **按部门分组网格**：`AppCatalog.groups` 按服务端组序渲染，组名即部门名（`AppsPanel.tsx:194` 起）；卡片 = 图标 + 应用名。
+- **图标**：`AppIcon` 有 `iconUrl`（后端代拉的 data URL）用 `<img>`，否则占位图标（`AppsPanel.tsx:20-27`）——不伪造图片。
+- **打开**：点击卡片经 `open_app`（`url` + `isCas`）在系统浏览器打开（`AppsPanel.tsx:119`），协议白名单与打开策略在后端强制；失败内联红字，不弹错误态。
+
+## SchedulePanel：日程页真实数据（M2 批次 3）
+
+- **周区间计算**：`weekRange(offset)`（`SchedulePanel.tsx:45`）取第 offset 周的 `[周一 00:00.000, 周日 23:59.999]` 本地毫秒区间；列序周一为 0（`getDay()` 周日=0 折算到第 6 列）。周切换器头部显示日期区间（如 `9.14 – 9.20`）。
+- **取数**：切周 / 切分类过滤触发 `get_schedule_month`（`startMs/endMs/codes`，`SchedulePanel.tsx:126-146`）；**全不选分类时不发请求**（服务端空 codes 语义未实测，前端规避）；事件四态（`SchedulePanel.tsx:23`，周内该筛选下无日程为 empty 态）。
+- **5 类彩色过滤 chips**：`get_schedule_classify` 取分类与**服务端色值**（chip 与日程块色标同源）；点击 toggle（`SchedulePanel.tsx:150`）；chips 自带加载骨架与出错重试（`SchedulePanel.tsx:210`）。
+- **落列与高亮**：事件按开始时间落列（`dayIndexOf`，`SchedulePanel.tsx:54`，跨周事件忽略）；**今日列高亮仅当前周生效**（`SchedulePanel.tsx:250,268`）。
+- **详情卡**：点击日程块在下方显示时间 / 地点 / 分类（`SchedulePanel.tsx:294` 起）；未选中时显示「点击日程块查看详情」操作提示（`SchedulePanel.tsx:318`）。
 
 ## DockNav：悬浮 Dock 导航（未改）
 

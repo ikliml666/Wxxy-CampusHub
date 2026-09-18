@@ -426,10 +426,12 @@ dependencies = [
 name = "campus-portal"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "campus-auth",
  "campus-schedule",
  "chrono",
  "ego-tree",
+ "futures-util",
  "reqwest 0.12.28",
  "scraper",
  "serde",

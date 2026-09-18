@@ -1,5 +1,26 @@
 # 更新日志
 
+## 2026-09-18 · M2 批次 3：应用页 + 日程页数据接线（M2 完成）
+
+- **模块**：`crates/campus-portal`（应用/日程 DTO 与解析、图标代拉、URL 校验分工扩展）、`tauri-app/src-tauri`（4 新命令，20 → 24）、`tauri-app/frontend`（AppsPanel/SchedulePanel 接真实数据 + TS 契约）、`.codewiki/`、`docs/`
+- **计划**：`docs/superpowers/plans/2026-09-18-m2-portal-pages.md`（实测接口全表 §1.2、请求通则 §1.1、冻结契约 §2.1 批次 3——本条不重复抄表）
+- **`campus-portal` 新增 DTO 与解析**（全部纯函数 + 脱敏单测）：
+  - DTO 六个：`AppItem`（`iconUrl` 为后端拼好的 data URL；`appIcon` UUID 以 `icon_id` 承载并 `#[serde(skip)]`，不透传 IPC）/ `AppGroup`（部门维度，id=name）/ `AppCatalog`（计划 §2.1 `{groups}` 的兼容扩展：追加 `pinned` = `queryMyStore` 收藏条目）/ `ScheduleClassify` / `ScheduleEvent`（classifyName/color 由分类列表按 code 映射补全——明细的 `scheduleClassifyName` 实测可为 null，不可依赖）/ `ScheduleDayCount`
+  - `schedule_data`：**bs-schedule 独立信封** `{code:"0",msg,data}`，成功判据 `code=="0"`（宽松兼容 code 为数字的形态），失败取 `msg`/`message` 给可读中文——与门户 `meta.success` 信封分开、不混用解析器（计划 §1.1 的两信封约定落地）
+  - 解析五件套：`parse_app_groups`（v2 分组形态 `data[].{depName,appList}`；空 depName 按「未分组」保留、应用不因分组字段异常丢失；缺 appId 条目跳过）/ `parse_app_items` / `parse_schedule_classify`（缺 classifyCode 跳过）/ `parse_schedule_events`（缺 id / 时间非数字跳过；分类 code 取 `typeCode` 为主、`scheduleClassifyCode` 兜底）/ `parse_schedule_day_counts`；`guess_image_mime` 按**魔数**判 MIME（PNG/JPEG/GIF/WEBP/SVG），不信任响应 Content-Type（文档库静态资源常给 `application/octet-stream`），识别不出按「无图标」降级——避免把 HTML 错误页伪装成 data URL
+- **`client.rs` 三处扩展**：
+  - 请求头组抽取为 `with_portal_headers`——GET / POST / 图标下载**三处同源同组**，计划 §1.1 全表只写一遍
+  - 新增 `post_json`：门户同源 POST JSON，头组同 GET 另带 `Content-Type: application/json`；bs-schedule 的区间/计数接口**缺头返回 500「系统错误」（实测）**，故与 GET 共用全量头组
+  - 新增 4 查询：`query_app_catalog`（分组 + 收藏两接口 + **带会话并发代拉全部图标**：附件 id 去重后 `buffer_unordered(4)`，单图标失败降级 None、不阻塞目录返回）/ `query_schedule_classify`（**会话内缓存**，实测 5 类静态数据仅首次真发请求）/ `query_schedule_events`（body 字段与官方前端逐字一致）/ `query_schedule_day_counts`（月视图角标用，本批前端未消费，能力先落协议层）
+  - `app_icon_data_url`：拉 `<base>/zuul/docrepo/download?attachmentId=<UUID>` → data URL，**结果内存缓存**（`None` = 服务端确认给的不是图片，同样缓存防每次刷新重试；传输类失败不缓存、下次自动重试）；附件 id 只允许 UUID 字符集
+- **图标代拉方案（真机验证成功）**：门户应用图标是**同源受保护资源**（`zuul/docrepo` 下载接口，需会话 Cookie），前端直连会因跨站 Cookie 拿到裂图 → 改为**后端带会话并发代拉字节、魔数判 MIME、base64 编码为 data URL 放进 `iconUrl`**；失败降级 `iconUrl: null` + 前端占位图标，**目录永不因图标失败阻塞**
+- **URL 校验分工定案（`article.rs`）**：新增 `is_http_url`（**协议白名单**，仅 http/https），`open_app` 用它。理由：appLink 来自校方应用目录（受信来源）、后端不抓取它（无 SSRF 面）、只在系统浏览器打开——实测 30 个应用中 **16 条链接在校园域外**（万方 4、虚拟图书馆 4、一卡通 `10.3.100.110` 4、超星泛雅 2、中国知网 2），域名限制只会拦掉学校自己的合法应用；真机点「一卡通」在修前会被「仅支持校园官网链接」拦住。**`is_allowed_info_url`（域名白名单 `*.cwxu.edu.cn`）保持不变**，继续守「后端要抓取的正文 URL」（`fetch_info_detail`）与 `open_in_browser`；单测双向钉死（协议白名单放行知网/万方/`10.3.100.110` 等形态、拒绝 `file:`/`javascript:`；域名白名单回归用例确认未被放宽）
+- **新增后端依赖**：`base64` 0.22（图标编码）、`futures-util` 0.3（`buffer_unordered` 限并发）
+- **tauri 接线**：新增 4 命令 `get_app_catalog` / `get_schedule_classify` / `get_schedule_month` / `open_app`（命令数 **20 → 24**）；`open_app` 复用 `open_url_in_browser` 的打开方式（官方 `tauri-plugin-opener` Rust API，不手写 Win32）但校验换成协议白名单，`isCas` 为契约保留字段、当前不影响打开策略；`get_schedule_month` 对区间倒挂拒绝（前端 bug 防御，不透传服务端）
+- **前端**：`AppsPanel.tsx`（常用钉选区 + 按部门分组网格 + 图标/占位 + 点击 `open_app` + 四态）；`SchedulePanel.tsx`（周视图 + 5 类彩色过滤 chips + 详情卡 + 四态；周切换显示日期区间如 `9.14 – 9.20`，今日列高亮仅当前周生效，全不选分类不发请求）；`types.ts` 同步契约 6 接口
+- **验证**：`cargo test --workspace` → **90 passed / 0 failed / 3 ignored**（`campus-portal` 37，批次 3 新增 10：分组宽松形态与错误路径、收藏条目、日程分类/事件映射与跳过规则、每日计数、魔数判 MIME、协议白名单放行与拒绝、域名白名单不放宽回归）；`cargo check -p campus-hub` 通过；`tsc --noEmit` 0 错误；`vite build` 通过；**真机验收**：应用页 = 常用钉选 + 按部门分组网格（公共服务/教务处/教师发展/学工部/财务处/图书馆/保卫处/信息化中心等）+ **真实彩色图标全部正常显示** + 点「一卡通」成功在系统浏览器打开（落点统一身份认证平台，修前会被域名白名单拦住）；日程页 = 周视图 `9.14 – 9.20` + 5 类彩色过滤 + 真实课程块（10:10–11:50、13:45–15:25，与学校日程服务实测作息一致）+ 今日列高亮 + 点击块看详情
+- **遗留**：① **WebVPN B 类包装未做**——`open_app` 目前一律按原链接协议直开，WebVPN 会话未打通（属 M4 范围），校外访问 B 类应用由浏览器侧自行报错；② **月视图与每日计数角标未做**——`getCountBetweenTime` 协议层就绪（解析 + 方法 + 单测），未加 IPC 命令、前端未消费；③ 计划的 3 个应用接口未实现（全量 `queryApp` / `queryClassifyList` / `queryDepLabel`）——实测 `v2/queryApp` 分组自带部门名且 appList 总数与全量接口一致，后两者是官方筛选器数据源、本 UI 无筛选器；④ 待办列表「有数据」路径仍未真机验证（该账号三栏均 0 条，沿用批次 2 遗留）
+
 ## 2026-09-18 · M2 批次 2：资讯页 + 待办页数据接线
 
 - **模块**：`crates/campus-portal`（新增 article 模块）、`tauri-app/src-tauri`（6 新命令 + opener 插件 + CSP）、`tauri-app/frontend`（InfoPanel/TodoPanel 接真实数据 + TS 契约）、`.codewiki/`、`docs/`

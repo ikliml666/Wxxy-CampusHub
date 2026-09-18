@@ -1,9 +1,9 @@
 //! 锡院助手门户业务协议核心（无 Tauri 依赖，安卓可复用）。
 //!
 //! 职责：复用 [`campus_auth::cas::CasClient`] 的已登录会话（同 Cookie jar），以门户
-//! 前端同款请求头组调用门户业务接口（学期 / 钱包卡 / 周课表 / 资讯 / 待办），并把
-//! 响应解析成供 IPC 层透传的 DTO。解析全部为纯函数（[`parse`]），单测用脱敏
-//! fixture；资讯正文抓取与清洗见 [`article`]（域名白名单 + 标签/属性白名单重建）。
+//! 前端同款请求头组调用门户业务接口（学期 / 钱包卡 / 周课表 / 资讯 / 待办 / 应用 /
+//! 日程），并把响应解析成供 IPC 层透传的 DTO。解析全部为纯函数（[`parse`]），单测
+//! 用脱敏 fixture；资讯正文抓取与清洗见 [`article`]（域名白名单 + 标签/属性白名单重建）。
 //!
 //! 敏感纪律：网关 JWT 与邮箱 `loginUrl`（内含 authkey）只在内存中使用，
 //! 不落盘、不写日志、不进文档、不返回给前端（解析结构体直接不定义该字段）。
@@ -12,12 +12,13 @@ pub mod article;
 pub mod client;
 pub mod parse;
 
-pub use article::{extract_article, is_allowed_info_url, is_auth_wall};
+pub use article::{extract_article, is_allowed_info_url, is_auth_wall, is_http_url};
 pub use client::PortalClient;
 pub use parse::{
-    elapsed_slot_count, next_course, next_course_from_now, parse_info_columns, parse_info_list,
-    parse_semester_info, parse_todo_list, parse_todo_tabs, parse_wallet_summary,
-    parse_week_schedule, WeekSchedule,
+    elapsed_slot_count, guess_image_mime, next_course, next_course_from_now, parse_app_groups,
+    parse_app_items, parse_info_columns, parse_info_list, parse_schedule_classify,
+    parse_schedule_day_counts, parse_schedule_events, parse_semester_info, parse_todo_list,
+    parse_todo_tabs, parse_wallet_summary, parse_week_schedule, WeekSchedule,
 };
 
 /// campus-portal 协议层错误。
@@ -165,4 +166,80 @@ pub struct TodoPage {
     pub page_count: u32,
     pub total: u32,
     pub items: Vec<TodoItem>,
+}
+
+// ---------------- M2 批次 3：应用 / 日程 ----------------
+
+/// 门户应用条目（`v2/queryApp` 组内与 `queryMyStore` 共用同构，仅取契约字段）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppItem {
+    pub id: String,
+    pub name: String,
+    /// 图标 data URL（后端带会话代拉，见 client::app_icon_data_url）；
+    /// 拉取失败 / 无图标为 None，前端显示占位图标。
+    pub icon_url: Option<String>,
+    /// 服务端下发的应用链接（打开时仍经 [`is_allowed_info_url`] 域名白名单强制校验）。
+    pub link: String,
+    /// `isCas == "1"`（CAS 单点登录类应用；当前打开策略不区分，契约保留字段）。
+    pub is_cas: bool,
+    pub show_type: String,
+    /// 图标附件 id（`appIcon` UUID），仅协议层拉取图标用；`#[serde(skip)]`
+    /// 不透传 IPC（前端只需要拼好的 data URL）。
+    #[serde(skip)]
+    pub icon_id: Option<String>,
+}
+
+/// 应用分组（`v2/queryApp` data[].depName + appList；id 即部门名，实测 8 组互异）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppGroup {
+    pub id: String,
+    pub name: String,
+    pub apps: Vec<AppItem>,
+}
+
+/// 应用目录（计划 §2.1 `AppCatalog { groups }` 的兼容扩展：追加 `pinned`
+/// —— `queryMyStore` 的收藏/常用条目，用于钉选区；groups 为部门分组全量）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppCatalog {
+    pub groups: Vec<AppGroup>,
+    pub pinned: Vec<AppItem>,
+}
+
+/// 日程分类（`findScheduleClassifyList`，实测 5 类，code 形如 `Default-person`）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleClassify {
+    pub name: String,
+    pub code: String,
+    /// 服务端给的色值（如 `#ff9ee1`），前端过滤 chip 与日程块色标直接使用。
+    pub color: String,
+}
+
+/// 日程条目（`findScheduleBetweenTime` data[]，仅取契约字段；startTime/endTime
+/// 为毫秒时间戳）。classifyName/color 由分类列表按 code 映射补全——明细里的
+/// `scheduleClassifyName` 实测可为 null，不能依赖。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEvent {
+    pub id: String,
+    pub title: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// 地点（`address`，服务端可能为 null → 空串）。
+    pub place: String,
+    pub classify_code: String,
+    pub classify_name: String,
+    pub color: String,
+}
+
+/// 每日日程计数（`getCountBetweenTime`，day 形如 `"2026-09-01"`；月视图角标用，
+/// 当前批次前端未消费，能力先落协议层）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleDayCount {
+    pub day: String,
+    pub count: u32,
 }

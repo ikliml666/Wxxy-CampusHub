@@ -5,6 +5,8 @@
 //! `h2` 优先、`<title>` 兜底。本模块：
 //! - [`is_allowed_info_url`]：**域名白名单**（仅 `*.cwxu.edu.cn`，计划红线 3，
 //!   防把用户可控 URL 透传给 HTTP 客户端造成 SSRF/钓鱼）；
+//! - [`is_http_url`]：**协议白名单**（仅 http/https）——只用于「系统浏览器打开、
+//!   后端不抓取内容」的 URL（`open_app` 打开校方目录下发的 appLink）；
 //! - [`is_auth_wall`]：判定正文页被站点鉴权开门页拦截（见函数注释）——命中时
 //!   命令层正常返回 `needsBrowser=true` 引导浏览器打开，**不进错误态**；
 //! - [`extract_article`]：提取标题与正文容器，按**标签/属性白名单**重建 HTML
@@ -28,6 +30,23 @@ pub fn is_allowed_info_url(raw: &str) -> bool {
     let host = host.to_ascii_lowercase();
     matches!(u.scheme(), "http" | "https")
         && (host == "cwxu.edu.cn" || host.ends_with(".cwxu.edu.cn"))
+}
+
+/// 打开类 URL 的**协议白名单**：仅允许 `http`/`https`，拒绝 `file:` /
+/// `javascript:` / `data:` 等任何其他 scheme。
+///
+/// 适用场景：**只在系统浏览器打开、后端绝不抓取其内容**的 URL（当前唯一调用方
+/// 是 `open_app` 打开校方应用目录下发的 `appLink`）。此处不做域名限制的理由：
+/// 该 URL 来自校方应用目录（受信来源），且我们的后端不发起对该 URL 的任何请求
+/// （无 SSRF 面），限制域名只会拦掉学校自己的合法应用——2026-09-18 真机实测
+/// 30 条目录数据中有 16 条为非校园域（一卡通 `10.3.100.110`、知网、万方、超星、
+/// 虚拟图书馆），用域名白名单全部打不开。真正的 SSRF 防护留在「后端要抓取的
+/// 正文 URL」路径上（[`is_allowed_info_url`] 域名白名单，**不要放宽那条**）。
+pub fn is_http_url(raw: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    matches!(u.scheme(), "http" | "https")
 }
 
 /// 危险标签：连同整棵子树剔除（可执行代码 / 嵌入对象 / 表单控件）。
@@ -327,6 +346,47 @@ mod tests {
         assert!(!is_allowed_info_url("javascript:alert(1)"));
         assert!(!is_allowed_info_url("not a url"));
         assert!(!is_allowed_info_url(""));
+    }
+
+    // ---------- is_http_url（open_app 协议白名单；域名不限） ----------
+
+    #[test]
+    fn open_app_protocol_guard_allows_http_https_from_trusted_catalog() {
+        // 校方应用目录实测存在的外部域 / 内网 IP 应用（受信来源、系统浏览器打开）
+        assert!(is_http_url("https://www.cnki.net/"));
+        assert!(is_http_url("http://10.3.100.110/"));
+        assert!(is_http_url("https://www.wanfangdata.com.cn/"));
+        assert!(is_http_url("https://fysso.chaoxing.com/login"));
+        assert!(is_http_url("https://cwxu.flyread.com.cn/"));
+        // 校园域与大写 scheme 形态
+        assert!(is_http_url("https://jwgl.cwxu.edu.cn/"));
+        assert!(is_http_url("HTTPS://Lib.CWXU.EDU.CN/"));
+    }
+
+    #[test]
+    fn open_app_protocol_guard_rejects_non_http_schemes() {
+        assert!(!is_http_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_http_url("javascript:alert(1)"));
+        assert!(!is_http_url("data:text/html;base64,PHNjcmlwdD4="));
+        assert!(!is_http_url("ftp://example.com/x"));
+        assert!(!is_http_url("vbscript:msgbox(1)"));
+        assert!(!is_http_url("not a url"));
+        assert!(!is_http_url(""));
+    }
+
+    // ---------- open_in_browser 域名白名单回归（修复后不得放宽） ----------
+
+    #[test]
+    fn open_in_browser_domain_whitelist_stays_tight() {
+        // 资讯正文降级打开仍走 is_allowed_info_url：校园域放行不变
+        assert!(is_allowed_info_url(
+            "https://www.cwxu.edu.cn/info/1033/9001.htm"
+        ));
+        // 校方目录里合法、但正文抓取路径仍不放行的外部域 / 内网 IP（回归保护）
+        assert!(!is_allowed_info_url("https://www.cnki.net/"));
+        assert!(!is_allowed_info_url("http://10.3.100.110/"));
+        assert!(!is_allowed_info_url("https://www.wanfangdata.com.cn/"));
+        assert!(!is_allowed_info_url("https://cwxu.edu.cn.evil.com/"));
     }
 
     // ---------- extract_article ----------

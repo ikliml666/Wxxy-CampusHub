@@ -37,6 +37,10 @@ pub fn run() {
             commands::portal::get_todo_tabs,
             commands::portal::get_todo_list,
             commands::portal::open_in_browser,
+            commands::portal::get_app_catalog,
+            commands::portal::get_schedule_classify,
+            commands::portal::get_schedule_month,
+            commands::portal::open_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

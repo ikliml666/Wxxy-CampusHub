@@ -123,3 +123,54 @@ export type PanelId =
   | "wallet"
   | "power"
   | "settings";
+
+// ---------- M2 批次 3：应用页 / 日程页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
+
+/** 门户应用条目；iconUrl 为后端代拉并转好的 data URL，失败/无图标为 null。 */
+export interface AppItem {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  /** 服务端下发的应用链接（open_app 仍经后端域名白名单校验） */
+  link: string;
+  isCas: boolean;
+  showType: string;
+}
+
+/** 应用分组（部门维度，name 即部门名）。 */
+export interface AppGroup {
+  id: string;
+  name: string;
+  apps: AppItem[];
+}
+
+/** 应用目录（pinned = queryMyStore 收藏/常用，契约的兼容扩展）。 */
+export interface AppCatalog {
+  groups: AppGroup[];
+  pinned: AppItem[];
+}
+
+/** 日程分类（实测 5 类；color 为服务端给的色值，过滤 chip 与日程块色标直接用）。 */
+export interface ScheduleClassify {
+  name: string;
+  code: string;
+  color: string;
+}
+
+/** 日程条目（毫秒时间戳；classifyName/color 由后端按分类 code 映射补全）。 */
+export interface ScheduleEvent {
+  id: string;
+  title: string;
+  startMs: number;
+  endMs: number;
+  place: string;
+  classifyCode: string;
+  classifyName: string;
+  color: string;
+}
+
+/** 每日日程计数（月视图角标用，当前批次前端未消费）。 */
+export interface ScheduleDayCount {
+  day: string;
+  count: number;
+}

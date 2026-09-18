@@ -2,12 +2,14 @@
 //!
 //! 两种响应信封，解析器不混用（计划 §1.1）：
 //! - 门户自身服务：`{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":...}`
-//!   —— 本模块三个接口全部属此信封；
-//! - 日程服务 `bs-schedule/*`（`code=="0"`）：M2 批次 3 再支持。
+//!   —— 见 [`envelope_data`]；
+//! - 日程服务 `bs-schedule/*`：`{"code":"0","msg":"ok","data":...}`，成功判据
+//!   `code=="0"` —— 见 [`schedule_data`]（失败形态实测 code 为数字、message 键名
+//!   会变成 `message`，两者都兼容）。
 
 use crate::{
-    CourseBrief, InfoColumn, InfoItem, InfoPage, PortalError, SemesterInfo, TodoItem, TodoPage,
-    TodoTab, WalletSummary,
+    AppGroup, AppItem, CourseBrief, InfoColumn, InfoItem, InfoPage, PortalError, ScheduleClassify,
+    ScheduleDayCount, ScheduleEvent, SemesterInfo, TodoItem, TodoPage, TodoTab, WalletSummary,
 };
 use campus_schedule::TimeSlot;
 
@@ -459,6 +461,212 @@ pub fn parse_todo_list(body: &str) -> Result<TodoPage, PortalError> {
     })
 }
 
+// ---------------- M2 批次 3：应用 / 日程 ----------------
+
+/// bs-schedule 日程服务信封校验：`code == "0"`（字符串 "0"，成功样本形态）返回
+/// `data` 引用（键缺失 → None，调用方按空集合处理——成功信封下「无数据」是
+/// 合法形态）；失败（实测 code 为数字、说明键为 `message`）→ [`PortalError::Parse`]。
+fn schedule_data<'a>(
+    v: &'a serde_json::Value,
+    api: &str,
+) -> Result<Option<&'a serde_json::Value>, PortalError> {
+    let ok = v
+        .get("code")
+        .and_then(jstr)
+        .is_some_and(|c| c.trim() == "0");
+    if !ok {
+        let msg = v
+            .get("msg")
+            .or_else(|| v.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("服务端未返回原因");
+        return Err(PortalError::Parse(format!("{api} 失败: {msg}")));
+    }
+    Ok(v.get("data"))
+}
+
+/// `"0"/"1"`（实测字符串形态）或 0/1 数字 → bool（其他值按 false）。
+fn jbool01(v: &serde_json::Value) -> bool {
+    v.as_i64()
+        .map(|n| n == 1)
+        .unwrap_or_else(|| v.as_str().is_some_and(|s| s.trim() == "1"))
+}
+
+/// 单个门户应用条目 → [`AppItem`]（缺 appId 的条目无稳定 key，由调用方跳过）。
+fn app_item_from(it: &serde_json::Value) -> Option<AppItem> {
+    let id = it.get("appId").and_then(jstr).filter(|s| !s.is_empty())?;
+    Some(AppItem {
+        id,
+        name: it.get("appName").and_then(jstr).unwrap_or_default(),
+        // data URL 由 client 层带会话代拉后填充，解析阶段恒 None
+        icon_url: None,
+        link: it.get("appLink").and_then(jstr).unwrap_or_default(),
+        is_cas: it.get("isCas").map(jbool01).unwrap_or(false),
+        show_type: it.get("showType").and_then(jstr).unwrap_or_default(),
+        icon_id: it.get("appIcon").and_then(jstr).filter(|s| !s.is_empty()),
+    })
+}
+
+/// 解析 `api/upp/appStore/v2/queryApp`（部门分组形态：data[].{depName,appList,count}，
+/// 实测 8 组 30 应用全量覆盖）。
+///
+/// depName 兼容字符串/null（宽松 jstr）；空 depName 的组按「未分组」保留（应用
+/// 不因分组字段异常而丢失）；组内条目缺 appId 跳过。组顺序按接口原样（官方
+/// 即按部门排序），不再二次排序。
+pub fn parse_app_groups(body: &str) -> Result<Vec<AppGroup>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("应用分组响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "应用分组")?;
+    let arr = d
+        .as_array()
+        .ok_or_else(|| PortalError::Parse("应用分组响应结构异常".to_string()))?;
+    Ok(arr
+        .iter()
+        .map(|g| {
+            let name = g
+                .get("depName")
+                .and_then(jstr)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "未分组".to_string());
+            let apps = g
+                .get("appList")
+                .and_then(|x| x.as_array())
+                .map(|items| items.iter().filter_map(app_item_from).collect::<Vec<_>>())
+                .unwrap_or_default();
+            AppGroup {
+                id: name.clone(),
+                name,
+                apps,
+            }
+        })
+        .collect())
+}
+
+/// 解析 `api/upp/appStore/queryMyStore`（我的收藏/常用，data 为应用条目数组）。
+pub fn parse_app_items(body: &str) -> Result<Vec<AppItem>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("我的收藏响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "我的收藏")?;
+    let arr = d
+        .as_array()
+        .ok_or_else(|| PortalError::Parse("我的收藏响应结构异常".to_string()))?;
+    Ok(arr.iter().filter_map(app_item_from).collect())
+}
+
+/// 解析 `api/bs-schedule/innerPlaintext/scheduleRpcManage/findScheduleClassifyList`
+/// （日程分类，实测 5 类）。缺 classifyCode 的条目跳过（过滤 key），名称/颜色
+/// 缺省空串。
+pub fn parse_schedule_classify(body: &str) -> Result<Vec<ScheduleClassify>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("日程分类响应解析失败: {e}")))?;
+    let d = schedule_data(&v, "日程分类")?;
+    let empty = Vec::new();
+    let arr = d.and_then(|x| x.as_array()).unwrap_or(&empty);
+    Ok(arr
+        .iter()
+        .filter_map(|c| {
+            let code = c
+                .get("classifyCode")
+                .and_then(jstr)
+                .filter(|s| !s.is_empty())?;
+            Some(ScheduleClassify {
+                name: c.get("classifyName").and_then(jstr).unwrap_or_default(),
+                code,
+                color: c.get("classifyColor").and_then(jstr).unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
+/// 解析 `api/bs-schedule/innerPlaintext/scheduleRpcManage/findScheduleBetweenTime`
+/// （日程区间明细；`classify` 为分类列表，按 code 映射补全名称与颜色）。
+///
+/// 实测字段：`scheduleName`（标题）、`startTime/endTime`（**毫秒时间戳**）、
+/// `address`（地点，可为 null）、`typeCode`（分类 code——明细无
+/// `scheduleClassifyCode` 字段，`scheduleClassifyName` 实测可为 null 不可依赖，
+/// 候选键宽松映射，真机数据异常时便于校准）。缺 id / 时间非数字的条目跳过
+/// （无 key / 无法按时间轴展示）。
+pub fn parse_schedule_events(
+    body: &str,
+    classify: &[ScheduleClassify],
+) -> Result<Vec<ScheduleEvent>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("日程明细响应解析失败: {e}")))?;
+    let d = schedule_data(&v, "日程明细")?;
+    let empty = Vec::new();
+    let arr = d.and_then(|x| x.as_array()).unwrap_or(&empty);
+    Ok(arr
+        .iter()
+        .filter_map(|it| {
+            let id = it.get("id").and_then(jstr).filter(|s| !s.is_empty())?;
+            let start_ms = it.get("startTime").and_then(jnum)? as u64;
+            let end_ms = it.get("endTime").and_then(jnum)? as u64;
+            let code = it
+                .get("typeCode")
+                .or_else(|| it.get("scheduleClassifyCode"))
+                .and_then(jstr)
+                .unwrap_or_default();
+            let known = classify.iter().find(|c| c.code == code);
+            Some(ScheduleEvent {
+                id,
+                title: it.get("scheduleName").and_then(jstr).unwrap_or_default(),
+                start_ms,
+                end_ms,
+                place: it.get("address").and_then(jstr).unwrap_or_default(),
+                classify_name: known
+                    .map(|c| c.name.clone())
+                    .or_else(|| {
+                        it.get("scheduleClassifyName")
+                            .and_then(jstr)
+                            .filter(|s| !s.is_empty())
+                    })
+                    .unwrap_or_default(),
+                color: known.map(|c| c.color.clone()).unwrap_or_default(),
+                classify_code: code,
+            })
+        })
+        .collect())
+}
+
+/// 解析 `api/bs-schedule/innerPlaintext/scheduleRpcManage/getCountBetweenTime`
+/// （每日日程计数，day 形如 `"2026-09-01"`）。缺 day 的条目跳过。
+pub fn parse_schedule_day_counts(body: &str) -> Result<Vec<ScheduleDayCount>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("日程计数响应解析失败: {e}")))?;
+    let d = schedule_data(&v, "日程计数")?;
+    let empty = Vec::new();
+    let arr = d.and_then(|x| x.as_array()).unwrap_or(&empty);
+    Ok(arr
+        .iter()
+        .filter_map(|it| {
+            let day = it.get("day").and_then(jstr).filter(|s| !s.is_empty())?;
+            Some(ScheduleDayCount {
+                day,
+                count: jnum_u32(it, "count"),
+            })
+        })
+        .collect())
+}
+
+/// 图标字节 → MIME 猜测（魔数判断，不信任响应 Content-Type——文档库静态资源
+/// 常给 `application/octet-stream`）。识别不出（如 HTML 错误页/登录跳转页）
+/// 返回 None，调用方按「无图标」降级，避免把错误页伪装成 data URL。
+pub fn guess_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif")
+    } else if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"<?xml") || bytes.starts_with(b"<svg") {
+        Some("image/svg+xml")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,5 +1067,182 @@ mod tests {
             .is_empty());
         assert!(parse_todo_list(r#"{"meta":{"success":false}}"#).is_err());
         assert!(parse_todo_list("not json").is_err());
+    }
+
+    // ---------- parse_app_groups / parse_app_items（fixture 全脱敏） ----------
+
+    /// v2 分组形态：data[].{depName,appList,count}；字段值形态复刻实测
+    ///（isCas/showType 为字符串 "0"/"1"，orderId 数字与字符串两种都见）。
+    /// 内容占位：部门=示例部门，应用=示例应用。
+    const APP_GROUPS_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":[
+        {"depName":"示例部门一","count":2,"appList":[
+            {"appId":"app-001","appName":"示例应用一","appIcon":"00000000-0000-0000-0000-000000000001","appLink":"https://app1.cwxu.edu.cn/","isCas":"1","showType":"1","orderId":1,"isPersonal":"0","isRecommend":"1"},
+            {"appId":"app-002","appName":"示例应用二","appIcon":"","appLink":"https://app2.cwxu.edu.cn/","isCas":"0","showType":"2","orderId":"2","isPersonal":"0","isRecommend":"0"},
+            {"appName":"缺 id 的条目","appLink":"https://x.cwxu.edu.cn/"}
+        ]},
+        {"depName":null,"count":1,"appList":[
+            {"appId":"app-003","appName":"示例应用三","appIcon":"00000000-0000-0000-0000-000000000003","appLink":"https://app3.cwxu.edu.cn/","isCas":0,"showType":"1","orderId":3,"isPersonal":"0","isRecommend":"0"}
+        ]}
+    ]}"#;
+
+    #[test]
+    fn app_groups_maps_dep_name_and_tolerant_field_types() {
+        let groups = parse_app_groups(APP_GROUPS_FIXTURE).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "示例部门一");
+        // 缺 appId 的条目跳过
+        assert_eq!(groups[0].apps.len(), 2);
+        let a = &groups[0].apps[0];
+        assert_eq!(a.id, "app-001");
+        assert_eq!(a.name, "示例应用一");
+        assert!(a.is_cas);
+        assert_eq!(a.icon_url, None); // data URL 由 client 层填充
+        assert_eq!(
+            a.icon_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        // orderId 字符串形态不影响其余字段；appIcon 空串 → icon_id None
+        let b = &groups[0].apps[1];
+        assert_eq!(b.icon_id, None);
+        assert!(!b.is_cas);
+        // depName null → 「未分组」兜底；isCas 数字 0 → false
+        assert_eq!(groups[1].name, "未分组");
+        assert!(!groups[1].apps[0].is_cas);
+    }
+
+    #[test]
+    fn app_groups_error_paths() {
+        assert!(parse_app_groups(r#"{"meta":{"success":true},"data":{}}"#).is_err());
+        assert!(parse_app_groups(r#"{"meta":{"success":false}}"#).is_err());
+        assert!(parse_app_groups("not json").is_err());
+        // appList 缺失 → 空组保留
+        let g = parse_app_groups(r#"{"meta":{"success":true},"data":[{"depName":"示例部门"}]}"#)
+            .unwrap();
+        assert_eq!(g.len(), 1);
+        assert!(g[0].apps.is_empty());
+    }
+
+    /// queryMyStore 形态：data 为应用数组（收藏/常用）；isCas 用数字 1 形态覆盖。
+    const APP_ITEMS_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":[
+        {"appId":"app-001","appName":"示例应用一","appIcon":"00000000-0000-0000-0000-000000000001","appLink":"https://app1.cwxu.edu.cn/","isCas":1,"showType":"1","orderId":1},
+        {"appId":"app-009","appName":"示例个人应用","appIcon":"00000000-0000-0000-0000-000000000009","appLink":"http://10.0.0.1/app","isCas":"0","showType":"2","orderId":9}
+    ]}"#;
+
+    #[test]
+    fn app_items_maps_mystore_entries() {
+        let items = parse_app_items(APP_ITEMS_FIXTURE).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_cas); // 数字 1 形态
+        assert_eq!(items[1].name, "示例个人应用");
+        assert!(!items[1].is_cas);
+        assert!(parse_app_items(r#"{"meta":{"success":true},"data":[]}"#)
+            .unwrap()
+            .is_empty());
+    }
+
+    // ---------- 日程服务（bs-schedule 信封 code=="0"） ----------
+
+    /// 分类形态：实测 5 类（code 固定为 Default-*，名称为通用分类词，非个人数据）。
+    ///（raw string 用 ## 定界——内容含 `"#ff9ee1"` 色值，单个 # 会被提前终止）
+    const SCHEDULE_CLASSIFY_FIXTURE: &str = r##"{"code":"0","msg":"ok","data":[
+        {"classifyName":"个人日程","classifyCode":"Default-person","classifyColor":"#ff9ee1"},
+        {"classifyName":"活动","classifyCode":"Default-Activity","classifyColor":"#95ec93"},
+        {"classifyName":"会议","classifyCode":"Default-Meeting","classifyColor":"#62b7fd"},
+        {"classifyName":"值班","classifyCode":"Default-duty","classifyColor":"#ffb37c"},
+        {"classifyName":"课程","classifyCode":"Default-class","classifyColor":"#c0a1fd"}
+    ]}"##;
+
+    #[test]
+    fn schedule_classify_maps_code_name_color() {
+        let cs = parse_schedule_classify(SCHEDULE_CLASSIFY_FIXTURE).unwrap();
+        assert_eq!(cs.len(), 5);
+        assert_eq!(cs[0].code, "Default-person");
+        assert_eq!(cs[0].color, "#ff9ee1");
+        // 失败信封：code 为数字（没带头时的实测形态），说明键为 message
+        let err = parse_schedule_classify(r#"{"code":500,"message":"系统错误","data":null}"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("系统错误"));
+        assert!(parse_schedule_classify(r#"{"code":"1","msg":"fail"}"#).is_err());
+        assert!(parse_schedule_classify("not json").is_err());
+    }
+
+    /// 明细形态复刻：typeCode 存分类 code；scheduleClassifyName/address 可为
+    /// null；startTime/endTime 为毫秒数字；一条缺时间戳的坏条目。
+    const SCHEDULE_EVENTS_FIXTURE: &str = r#"{"code":"0","msg":"ok","data":[
+        {"id":"evt-001","scheduleName":"示例会议一","typeCode":"Default-Meeting","scheduleClassifyName":null,"address":"示例楼 101","startTime":1788192000000,"endTime":1788195600000,"publishStatus":"1","status":"1"},
+        {"id":"evt-002","scheduleName":"示例课程","typeCode":"Default-class","scheduleClassifyName":null,"address":null,"startTime":1788747000000,"endTime":1788753000000},
+        {"id":"evt-003","scheduleName":"无时间的坏条目","typeCode":"Default-person","startTime":null,"endTime":null},
+        {"id":"evt-004","scheduleName":"未知分类条目","typeCode":"Default-other","scheduleClassifyName":"自定义分类","address":"示例地点","startTime":1788280000000,"endTime":1788283600000}
+    ]}"#;
+
+    #[test]
+    fn schedule_events_map_classify_and_skip_timeless() {
+        let cs = parse_schedule_classify(SCHEDULE_CLASSIFY_FIXTURE).unwrap();
+        let evs = parse_schedule_events(SCHEDULE_EVENTS_FIXTURE, &cs).unwrap();
+        // 缺时间戳的条目跳过
+        assert_eq!(evs.len(), 3);
+        let a = &evs[0];
+        assert_eq!(a.id, "evt-001");
+        assert_eq!(a.title, "示例会议一");
+        assert_eq!(a.start_ms, 1788192000000);
+        assert_eq!(a.end_ms, 1788195600000);
+        assert_eq!(a.place, "示例楼 101");
+        assert_eq!(a.classify_code, "Default-Meeting");
+        assert_eq!(a.classify_name, "会议"); // 由分类列表映射（明细里该字段为 null）
+        assert_eq!(a.color, "#62b7fd");
+        // address null → 空串
+        assert_eq!(evs[1].place, "");
+        assert_eq!(evs[1].classify_name, "课程");
+        // 未知分类：code 原样保留，名称回落明细 scheduleClassifyName，颜色空串
+        let c = &evs[2];
+        assert_eq!(c.classify_code, "Default-other");
+        assert_eq!(c.classify_name, "自定义分类");
+        assert_eq!(c.color, "");
+        // 空区间 / data 缺失 → 空列表不报错
+        assert!(
+            parse_schedule_events(r#"{"code":"0","msg":"ok","data":[]}"#, &cs)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_schedule_events(r#"{"code":"0","msg":"ok"}"#, &cs)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn schedule_day_counts_maps_day_and_count() {
+        let body = r#"{"code":"0","msg":"ok","data":[{"day":"2026-09-01","count":0},{"day":"2026-09-02","count":3},{"count":9}]}"#;
+        let dc = parse_schedule_day_counts(body).unwrap();
+        // 缺 day 的条目跳过
+        assert_eq!(dc.len(), 2);
+        assert_eq!(dc[0].day, "2026-09-01");
+        assert_eq!(dc[0].count, 0);
+        assert_eq!(dc[1].count, 3);
+        assert!(parse_schedule_day_counts(r#"{"code":"0","msg":"ok"}"#)
+            .unwrap()
+            .is_empty());
+        assert!(parse_schedule_day_counts(r#"{"code":500,"message":"系统错误"}"#).is_err());
+    }
+
+    // ---------- guess_image_mime（图标代拉的魔数判断） ----------
+
+    #[test]
+    fn image_mime_guessed_by_magic_bytes() {
+        assert_eq!(
+            guess_image_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+            Some("image/png")
+        );
+        assert_eq!(
+            guess_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(guess_image_mime(b"GIF89a"), Some("image/gif"));
+        let webp = b"RIFF\x00\x00\x00\x00WEBPVP8 ".to_vec();
+        assert_eq!(guess_image_mime(&webp), Some("image/webp"));
+        assert_eq!(guess_image_mime(b"<svg xmlns="), Some("image/svg+xml"));
+        // HTML 错误页 / 空字节 / 截断的 RIFF → None（按无图标降级）
+        assert_eq!(guess_image_mime(b"<!DOCTYPE html>"), None);
+        assert_eq!(guess_image_mime(b""), None);
+        assert_eq!(guess_image_mime(b"RIFF"), None);
     }
 }
