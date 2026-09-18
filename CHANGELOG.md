@@ -1,5 +1,29 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 收尾轮真机点验（CDP 打通 UI 交互，上一轮「点击未点验」缺口补齐）
+
+- **模块**：验收与文档（产品代码改动仅来自下条点验驱动的 ICS 修复）；`.codewiki/learnings/tauri-webview-ui-verification.md` 大幅补充
+- **突破口**：给 WebView2 开远程调试端口（启动 dev 时带 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`，**不改仓库代码**），用 CDP `Runtime.evaluate` 触发真实 DOM click、必要时用 `Input.dispatchMouseEvent` 派发带用户手势的鼠标事件——绕开「坐标点击被别窗接收 + WebView2 不派发 UIA Invoke」的死局
+- **逐项点验结果（真实账号 + 真机窗口）**：
+
+| 交互 | 结果 |
+|---|---|
+| 导入 / 同步 | ✅ 新增 8 · 更新 0 · 停开 0 · 共 8 门；第 2 周 / 共 19 周 |
+| 课程详情浮层 | ✅ 教师 / 教学班 / 周一 3-4 小节（第 1-12 周）/ 性质·考核「必修·考试」+「手动添加同款」「编辑」 |
+| 手动添加（受控表单填值 + 提交） | ✅ 8 → 9 门、标「手动」，随后二次导入仍保留（零变动复验） |
+| 调课通知（高置信自动应用） | ✅ 解析 → conf=high → 采纳 → 第 5 周出现【调】角标新时段块 + 原时段「已调出」虚线 |
+| 停课两档（契约 §2.5.1） | ✅「第5周周五1-2节 …停课」只停该次；「第6周 …停课」（未提星期）该课该周全停 |
+| 撤销此通知调整 | ✅ 3 条 override 全部撤销，落库 `sourceNoticeId` 计数归 0 |
+| 删除课程（含 confirm 确认） | ✅ 假课程移除，回到 8 门 |
+| 作息弹层（改时间 → 保存 / 恢复默认） | ✅ 08:00→08:30 网格同步 + 落库 `startTime`；恢复默认后 `slots: null` 且回 08:00 |
+| 导出 ICS | ✅ 写出 `E:\ik\download\课表.ics`（23136 字节，`file` 识别为 iCalendar calendar file，82 个 VEVENT，CRLF） |
+| 深色模式 / Dock 9 项视觉 | ✅ `html.dark` + 底色 `#17151C`，域色课程块与【导】角标对比度正常；Dock 9 项不溢出 |
+
+- **点验驱动的修复**：ICS 导出原用前端 Blob 下载（桌面端静默失效）→ 改后端写盘（详见上一条）
+- **仍未点验**：旧 localStorage 8 面板持久化值的升级场景（需先清 `campushub-ui` 再打开）
+- **验证**：`cargo test --workspace` → 153 passed / 0 failed / 4 ignored；`tsc --noEmit` 0 错误
+- **验收产物清理**：假课程「验收手动课」、3 条 override、导出的 `.ics` 均已清除，库中只留真实 8 门课（`slots: null`、0 override）
+
 ## 2026-09-18 · M2.5 收尾轮修复：ICS 导出改由后端写入下载目录（WebView2 不处理前端 Blob 下载）
 
 - **模块**：`tauri-app/src-tauri/src/commands/timetable.rs`、`tauri-app/frontend/src/panels/TimetablePanel.tsx`、`docs/superpowers/plans/2026-09-18-m2.5-timetable.md`（§2.3 命令表）、`.codewiki/`（learning 补节 + 模块文章）
@@ -10,7 +34,7 @@
   2. 前端 `exportIcs()` 删除 Blob / `createObjectURL` / `revokeObjectURL` / 动态 `<a>` 段，改为调命令后在既有提示位显示「已导出到 <路径>」或错误原因
   3. 契约 §2.3 `export_ics` 行同步改写并注明根因；CodeWiki learning 文章补「WebView2 不处理下载：不要用 `a[download]` 交付文件」节
 - **验证**：`cargo test --workspace` → **153 passed / 0 failed / 4 ignored**（基线 152 + 新增写盘单测 1）；`npx tsc --noEmit` 0 错误；`npm run build` 通过
-- **遗留**：真实下载目录的落盘效果未真机点验（本轮无 UI 注入手段），写盘语义已由临时目录单测覆盖
+- **真机点验（补记）**：已被随后的 CDP 远程调试点验覆盖——点「导出 ICS」→ 提示「导出到 `E:\ik\download\课表.ics`」，文件 23136 字节、`file` 识别为 iCalendar calendar file、82 个 VEVENT、CRLF 换行，见下一条
 
 ## 2026-09-18 · M2.5 收尾轮：作息时间表可编辑 + 停课 override 渲染口径冻结
 

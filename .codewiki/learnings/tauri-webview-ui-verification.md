@@ -63,8 +63,8 @@ curl -s http://localhost:1420/src/components/DockNav.tsx | grep -o 'id: *"[a-z]*
 - **落库结果**：直接读 `%APPDATA%/campushub/*.json`（`timetable.json` 的课程数/override/`autoApplied`，`session.json` 的 `tgtB64` 是否存在）
 - **协议层**：`CAMPUS_HUB_CREDS=<凭据文件> cargo test -p campus-auth -- --ignored jwglxt`（真实账号 SSO + 拉课表）
 
-受影响**只有**「鼠标点击 → IPC 命令」这一环；该环只能用源码级证据（dev server 下发的模块中确认存在
-`onClick: doImport`）加上命令本身的单测覆盖，须在汇报里如实标注未点验。
+受影响**只有**「鼠标点击 → IPC 命令」这一环。**该环已可用 CDP 远程调试点验**（见文末「用 CDP 绕过点击注入限制」）——
+2026-09-18 M2.5 收尾轮已实测走通，不必再退化成"只凭源码级证据 + 标注未点验"。
 
 ## WebView2 不处理下载：不要用 `a[download]` 交付文件（2026-09-18 M2.5 收尾轮）
 
@@ -75,3 +75,35 @@ curl -s http://localhost:1420/src/components/DockNav.tsx | grep -o 'id: *"[a-z]*
 **修法（已落地）**：文件交付改由后端命令落盘——`export_ics` 生成 ICS 后用 `dirs::download_dir()` 写入「课表.ics」（覆盖写，`std::fs::write` 失败透出系统错误），命令返回写入的完整路径，前端只把路径显示在既有提示位。写盘逻辑抽成纯函数 `write_ics_to(dir, text)`，用 `%TEMP%` 临时目录单测覆盖（不依赖真实下载目录）。
 
 **通用规则**：Tauri 桌面端凡「前端生成文件交给用户」的场景（ICS / CSV / 报告导出等），不要走 Blob 下载——在后端命令里写 `dirs::download_dir()`（或用 tauri-plugin-dialog 让用户选目录）并回显路径。验收时看文件是否真的出现在下载目录，不要只看前端无报错。
+
+## 用 CDP 绕过点击注入限制（2026-09-18 M2.5 收尾轮，实测可用）
+
+**一句话**：给 WebView2 开远程调试端口，用 CDP 在页面内触发真实事件——绕开「坐标点击进不来、UIA 不派发 click」的死局。
+
+**启动**（不改仓库代码，只在启动 dev 时带环境变量）：
+```bash
+cd tauri-app && WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" npx tauri dev
+```
+实测 `msedgewebview2.exe` 会带上该参数，`http://127.0.0.1:9222/json/version` 立即可用。
+
+**两个必知的坑**：
+1. **`/json/list` 在应用刚起时是空的**——page target 要等页面导航完成才注册；刚看到 `Running campus-hub.exe` 就查会误判"没有目标"（本次连踩两次），等 30~60 秒再查
+2. **dev 因 Rust 改动重启后 target 也会短暂消失**；持续为空就彻底重启 dev（kill `campus-hub.exe` + 命令行含项目路径的 `node.exe`/`cargo.exe`）
+
+**客户端**（本次落地于 `%TEMP%/cdp.ps1`，可直接复用）：`System.Net.WebSockets.ClientWebSocket` 连 `webSocketDebuggerUrl`，三种用法——
+- `-ExprFile <js>`：`Runtime.evaluate`（`returnByValue` + `awaitPromise`，可跑 async 动作序列）
+- `-Method <name> -ParamsFile <json>`：任意 CDP 方法
+- `-RealClickExpr <js>`：先 evaluate 取元素中心坐标（表达式返回 `{x,y}`），再发 `Input.dispatchMouseEvent` 的 `mousePressed`/`mouseReleased`（**带用户手势**语义）
+
+**页面内工具（提效关键）**：中文经 Bash→pwsh 传参会乱码，故把中文常量与工具**一次性注入页面**（`%TEMP%/inject.js`，中文写在文件里、由 `-Encoding UTF8` 读入），之后每次只传 ASCII：`window.__v.click("import")`。工具含：
+- 按键名点击：`click`（精确）/ `clickContains` / `clickNth`
+- **React 受控组件赋值**：`setNative`（native setter + `input`/`change` 事件；直接 `el.value=` React 感知不到）、`setSelect`（`HTMLSelectElement` 原生 setter）
+- 断言读取：`body()` / `blocks()`（按 `aria-label` 取课程块）/ `noticePanel()` / `inputs()`
+- 页面重载后 `window.__v` 丢失，需重新注入
+
+**三个实战技巧**：
+1. **索引错位坑**：`items = els.map(...).filter(...)` 之后 `els[i]` 不再对应 `items[i]`——必须保留 `[element, text]` 配对再筛（本次因此点错过菜单项）
+2. **原生对话框阻塞 evaluate**：`window.confirm` 弹出会挂起 JS 线程、`Runtime.evaluate` 不返回（脚本超时）；点会弹 confirm 的按钮前先 `window.confirm = () => true`
+3. **`element.click()` 足以触发 React onClick**（React 19 事件委托到 root，程序化 click 冒泡即命中），不必上 `Input.dispatchMouseEvent`；后者只在需要"真实用户手势"语义时用（本次用于排除「下载失败是因缺手势」的假设）
+
+**本次据此点验通过**：导入/同步、课程详情浮层、手动添加（受控表单填值 + 提交）、调课通知解析与采纳、停课两档渲染、撤销通知调整、删除课程（含 confirm）、作息弹层编辑与保存/恢复默认、导出 ICS、深色模式切换与视觉。仅「旧 localStorage 8 面板持久化值的升级场景」仍未实测（需清掉现有 `campushub-ui` 再打开）。
