@@ -135,6 +135,7 @@ pub fn parse_kb_response(json: &str, course_table_id: &str) -> Result<Vec<Course
             source: CourseSource::Import,
             weeks,
             class_id: if kb.jxb_id.is_empty() { None } else { Some(kb.jxb_id.clone()) },
+            disabled: false,
         });
     }
     Ok(courses)

@@ -23,7 +23,7 @@ pub mod zhengfang;
 pub use grid::{grid_scale_to_time, merge_courses, time_to_grid_scale, MergedCourseBlock, ScheduleMode};
 pub use model::{
     expand_week_mask, Course, CourseOverride, CourseSource, CourseTableConfig, OverrideKind,
-    TimeSlot,
+    TimeSlot, Timetable,
 };
 pub use timeslots::default_time_slots;
 pub use weeks::{current_week, semester_start_from_week, week_index_at_date};

@@ -332,9 +332,11 @@ async fn finish_login(
     if let Err(e) = store::save_account(&dir, username, password, display_name.as_deref()) {
         log::warn!("账号保存失败（会话已建立，本次登录不受影响）: {e}");
     }
-    // 会话落盘（cookie 逐条 DPAPI 加密，P0-3「重启保持」）。
+    // 会话落盘（cookie 与 TGT 逐项 DPAPI 加密，P0-3「重启保持」）。
+    // TGT 必须随会话持久化：CAS 不种登录 cookie，它是教务会话静默续期唯一凭据
+    //（login_saved 免密重登走同一内核，自动获得同样落盘）。
     let snapshot = client.jar().snapshot();
-    if let Err(e) = state::persist_session(&dir, username, &snapshot) {
+    if let Err(e) = state::persist_session(&dir, username, &snapshot, Some(&ok.tgt)) {
         log::warn!("会话持久化失败: {e}");
     }
     // 锁纪律：同步赋值，guard 在语句末 drop，此后无 await。
@@ -343,6 +345,7 @@ async fn finish_login(
         client,
         username: username.to_string(),
         portal,
+        tgt: Some(ok.tgt),
     });
     log::info!("登录成功: user={}", mask_username(username));
     Ok(CommandResult::ok(LoginResultData::LoggedIn(LoginData {

@@ -6,8 +6,10 @@ source_files:
   - tauri-app/src-tauri/src/commands/auth.rs
   - tauri-app/src-tauri/src/commands/profile.rs
   - tauri-app/src-tauri/src/commands/portal.rs
+  - tauri-app/src-tauri/src/commands/timetable.rs
   - tauri-app/src-tauri/src/commands/mod.rs
   - tauri-app/src-tauri/src/infra/state.rs
+  - tauri-app/src-tauri/src/infra/timetable.rs
   - tauri-app/src-tauri/src/infra/mod.rs
   - tauri-app/src-tauri/src/account/crypto.rs
   - tauri-app/src-tauri/src/account/store.rs
@@ -30,7 +32,7 @@ tags:
 
 `tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-45`。
 
-## 25 条命令面
+## 26 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -59,6 +61,7 @@ tags:
 | `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；**M2 遗留项起 codes 含 `Default-Meeting` 时并入会议卡日程**——失败空贡献不影响课表，失败时 stderr 有 `[meeting-diag]` 打点） | `portal.rs:229-261` |
 | `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25） | `portal.rs:264-281` |
 | `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略——可达性提示由前端按 `AppItem.access` 分级给出） | `portal.rs:284-301` |
+| `get_timetable` | — | `Timetable`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；域类型已 serde camelCase 直接透出，`updatedAt` 与冻结契约一致；M2.5 批次 1 新增，命令数 25 → 26） | `timetable.rs:12-17` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
@@ -102,7 +105,7 @@ tags:
 
 ## 登录成功收尾（`finish_login` `auth.rs:300-351`）
 
-`sso_follow(PORTAL_SERVICE)` 建门户会话 → **尽力取门户真实姓名**（`portal_user_profile`，失败只 warn 并回退上次已存 displayName、再回退学号——save_account 是整条 upsert，直接传 None 会把旧 displayName 抹掉，`auth.rs:312-330`）→ `save_account`(DPAPI，失败不阻断会话、降级日志 `auth.rs:332-334`) → `jar.snapshot()` 逐条 DPAPI 加密写 session.json（`auth.rs:336-339`）→ AppState 锁内同步赋值（guard 语句末 drop、此后无 await，`auth.rs:341-344`）。`displayName` 无来源时用 username（`auth.rs:349`）。姓名不进日志（敏感纪律）。
+`sso_follow(PORTAL_SERVICE)` 建门户会话 → **尽力取门户真实姓名**（`portal_user_profile`，失败只 warn 并回退上次已存 displayName、再回退学号——save_account 是整条 upsert，直接传 None 会把旧 displayName 抹掉，`auth.rs:312-330`）→ `save_account`(DPAPI，失败不阻断会话、降级日志 `auth.rs:332-334`) → `jar.snapshot()` + **`ok.tgt` 逐项 DPAPI 加密写 session.json**（`auth.rs:337-341`；TGT 必须随会话持久化——CAS 不种登录 cookie，它是教务会话静默续期唯一凭据，`login_saved` 免密重登走同一内核自动获得同样落盘）→ AppState 锁内同步赋值（guard 语句末 drop、此后无 await，`auth.rs:343-350`，`CasSession.tgt = Some(ok.tgt)`）。`displayName` 无来源时用 username（`auth.rs:352`）。姓名不进日志（敏感纪律）。
 
 `check_session` 返回 false（无会话/已过期/探测失败）时清 AppState 会话与 session.json（`auth.rs:450-455`）。`logout`：`GET {CAS_BASE}/logout` 尽力而为（5s 超时，复用 `sso_follow` 发 GET；REST 登录无 CASTGC，服务端可能本就无全局会话），随后本地清理必然执行（`auth.rs:461-475`）。`session_client` 是取会话 client 的唯一入口（锁内 clone，`auth.rs:357-364`），profile 模块的 `sync_official_avatar` 同样取用。
 
@@ -118,11 +121,12 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 | 文件 | 结构 | 写入方 |
 |---|---|---|
-| `session.json` | `{ username, cookies: [{ name, valueB64(DPAPI) }] }`（`state.rs:44-57`） | `persist_session`（`state.rs:60-80`）；读 `load_session`（单个 cookie 解密失败跳过，`state.rs:83-96`）；删 `clear_session` |
+| `session.json` | `{ username, cookies: [{ name, valueB64(DPAPI) }], tgtB64?(DPAPI) }`（`state.rs:63-70`；`tgtB64` 为 M2.5 批次 1 新增，缺省/None 时省略——CAS TGT 是教务会话静默续期唯一凭据，DPAPI 密文落盘、绝不落明文） | `persist_session(dir, username, cookies, tgt)`（`state.rs:82-101`）；读 `load_session` → `StoredSession{ username, cookies, tgt }`（单个 cookie/TGT 解密失败跳过为 None，`state.rs:107-124`）；删 `clear_session` |
 | `accounts.json` | `{ accounts: [{ username, passwordB64(DPAPI), lastLogin(epoch 毫秒串), displayName? }] }`（`store.rs:13-29`） | `save_account`（同 username upsert 覆盖，`store.rs:43-62`）、`remove_account`（不存在报错，`store.rs:81-89`） |
 | `profile.json` | `{ localBase64?, officialBase64?, officialFetchedAt? }`（camelCase，字段缺省即不存在，`profile.rs:41-52`）——**明文 base64，不走 DPAPI** | `store_local_avatar` / `clear_local_avatar` / `store_official_avatar`（`profile.rs:127-153`）；读 `read_profile`（文件缺失/损坏按空档处理，`profile.rs:62-67`） |
+| `timetable.json` | `campus_schedule::Timetable`（camelCase：`config/courses/overrides/updatedAt`）——**非凭据明文**，与 profile.json 同级；`infra/timetable.rs`（M2.5 批次 1 新建）：`load_timetable`（缺失/损坏 → 空课表不报错、不删坏文件，`timetable.rs:41-54`）、`save_timetable`（整体读写，原子性由调用方保证——冻结契约 §2.2 单文件无数据库，`timetable.rs:56-60`）、`empty_timetable`（`DEFAULT_TABLE_ID="default"`，`timetable.rs:24-36`） | 批次 2 `import_timetable` 起接入写入；批次 1 只有 `get_timetable` 读取 |
 
-启动回填 `restore_session()`（`state.rs:107-122`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填；文件缺失/损坏/cookies 空 → None。落盘内容不含明文凭据有单测断言（`state.rs:141-143`）。`CasSession` 自 2026-09-18 起挂 `portal: PortalClient`（`state.rs:16-21`，M2 批次 1）——`finish_login`（`auth.rs:341-345`）与 `restore_session`（`state.rs:117-121`）两处构造均 `PortalClient::new(client.clone())` 共享同一 jar，缓存生命周期 = 会话生命周期（详见 [[modules/campus-portal|门户业务协议核心]]）。
+启动回填 `restore_session()`（`state.rs:137-153`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填，**TGT 一并回填 `CasSession.tgt`**（旧格式文件无 tgtB64 → None，教务 901 时上层直接引导重新登录）；文件缺失/损坏/cookies 空 → None。落盘内容不含 cookie/TGT 明文有单测断言（`state.rs:168-196`，含旧格式兼容 `state.rs:198-224`）。`CasSession` 自 2026-09-18 起挂 `portal: PortalClient`（M2 批次 1）与 `tgt: Option<String>`（M2.5 批次 1，`state.rs:16-29`，仅内存明文、与 cookie 同级敏感）——`finish_login`（`auth.rs:343-350`）与 `restore_session`（`state.rs:144-152`）两处构造均 `PortalClient::new(client.clone())` 共享同一 jar，缓存生命周期 = 会话生命周期（详见 [[modules/campus-portal|门户业务协议核心]]）。
 
 ## 头像存取、官方同步与上传学校（`commands/profile.rs`）
 
@@ -141,4 +145,4 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 **102 passed / 3 ignored**（2026-09-18 M2 遗留项批次校验；campus-auth 26 + campus-hub 15 + campus-schedule 12 + campus-portal 49，另有 3 个 ignored 待真机样本/凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）。`cargo test --workspace` 全量 **113 passed / 4 ignored**（2026-09-18 M2.5 批次 1 校验；campus-auth lib 18 + 集成 14、campus-hub 18、campus-schedule 14、campus-portal 49；4 个 ignored 为 cas_live/jwglxt_live/captcha 评测，待真机凭据）。

@@ -4,6 +4,7 @@ pub mod cas;
 pub mod captcha;
 pub mod error;
 pub mod jar;
+pub mod jwglxt;
 pub mod rsa;
 
 pub use error::CampusAuthError;

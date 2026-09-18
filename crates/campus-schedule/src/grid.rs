@@ -339,6 +339,7 @@ mod tests {
             source: CourseSource::Import,
             weeks,
             class_id: None,
+            disabled: false,
         }
     }
 

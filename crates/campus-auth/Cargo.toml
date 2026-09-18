@@ -25,3 +25,5 @@ reqwest = { version = "0.12", default-features = false, features = [
 [dev-dependencies]
 # cas_live.rs 集成测试的 #[tokio::test] 运行时（计划依赖清单未列，async live 测试必需）
 tokio = { version = "1", features = ["rt", "macros"] }
+# jwglxt_live.rs 全链测试：SSO 进教务后用 parse_kb_response 断言课表可解析
+campus-schedule = { path = "../campus-schedule" }

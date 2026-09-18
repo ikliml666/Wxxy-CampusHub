@@ -60,10 +60,15 @@ pub struct Course {
     /// 教学班 ID（正方 `jxb_id`），自动更新 diff 的匹配键之一
     #[serde(default)]
     pub class_id: Option<String>,
+    /// 「已停开」标记：自动更新发现课程在教务最新课表中消失时置 `true`（**不删记录**，
+    /// 保留用户可能挂载的调课 override）；`CourseSource::Manual` 的课程**永不置位**
+    /// （冻结契约 §2.4：Manual 不参与 diff）。前端按 false 渲染、true 灰显或隐藏。
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 /// 课表配置（对齐 CourseTableConfig）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CourseTableConfig {
     pub course_table_id: String,
@@ -104,7 +109,7 @@ pub struct TimeSlot {
 ///
 /// 语义：叠加在 `course_id` 指向的导入课程之上，原数据保留可回滚；
 /// 撤销某条通知 = 删除 `source_notice_id` 匹配的全部 override。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CourseOverride {
     pub id: String,
@@ -132,6 +137,24 @@ pub enum OverrideKind {
     Extra,
 }
 
+/// 一份本地课表（M2.5 冻结契约 §2.1）：配置 + 课程 + 调课叠加 + 最近更新时刻。
+///
+/// 持久化形态即 `%APPDATA%/campushub/timetable.json` 的顶层结构（非凭据，明文）；
+/// 序列化 camelCase（`updatedAt` 等）。`courses`/`overrides` 带 serde 缺省，
+/// 旧文件或手工删节后仍可读取。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Timetable {
+    pub config: CourseTableConfig,
+    #[serde(default)]
+    pub courses: Vec<Course>,
+    #[serde(default)]
+    pub overrides: Vec<CourseOverride>,
+    /// 最近更新时刻（RFC3339 文本，由上层写入；空串 = 从未更新）
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 /// 周次位掩码（正方 `oldzc` 字段，bit0 = 第 1 周）展开为 1-based 周次列表。
 pub fn expand_week_mask(mask: u64) -> Vec<u32> {
     (0..64).filter(|b| mask & (1u64 << b) != 0).map(|b| b + 1).collect()
@@ -148,5 +171,54 @@ mod tests {
         // 单双周：0b010101010101 → 1,3,5,7,9,11（单周）
         assert_eq!(expand_week_mask(0b0101_0101_0101), vec![1, 3, 5, 7, 9, 11]);
         assert!(expand_week_mask(0).is_empty());
+    }
+
+    /// `disabled` serde 缺省（冻结契约 §2.1）：旧数据无该字段 → false；显式 true 保留；
+    /// 序列化键为 camelCase `disabled`。
+    #[test]
+    fn course_disabled_defaults_false_and_roundtrips() {
+        let legacy = r#"{
+            "id": "t-abc", "courseTableId": "t", "name": "信息安全",
+            "day": 1, "colorIndex": 0, "source": "import", "weeks": [1,2]
+        }"#;
+        let c: Course = serde_json::from_str(legacy).unwrap();
+        assert!(!c.disabled, "旧格式（无 disabled 字段）应缺省为 false");
+
+        let mut c = c.clone();
+        c.disabled = true;
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"disabled\":true"));
+        let back: Course = serde_json::from_str(&json).unwrap();
+        assert!(back.disabled);
+    }
+
+    /// `Timetable` serde：camelCase 顶层键（`updatedAt`）+ courses/overrides 缺省。
+    #[test]
+    fn timetable_serde_defaults_and_camel_case() {
+        let minimal = r#"{
+            "config": { "courseTableId": "default", "semesterTotalWeeks": 20, "firstDayOfWeek": 1 }
+        }"#;
+        let tt: Timetable = serde_json::from_str(minimal).unwrap();
+        assert_eq!(tt.config.course_table_id, "default");
+        assert!(tt.courses.is_empty());
+        assert!(tt.overrides.is_empty());
+        assert_eq!(tt.updated_at, "");
+
+        let full = Timetable {
+            config: CourseTableConfig {
+                course_table_id: "default".into(),
+                show_weekends: false,
+                semester_start_date: None,
+                semester_total_weeks: 20,
+                first_day_of_week: 1,
+            },
+            courses: vec![],
+            overrides: vec![],
+            updated_at: "2026-09-18T10:00:00+08:00".into(),
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains("\"updatedAt\""));
+        let back: Timetable = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, full);
     }
 }

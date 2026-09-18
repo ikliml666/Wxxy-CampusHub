@@ -394,6 +394,7 @@ name = "campus-auth"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "campus-schedule",
  "image",
  "md-5",
  "num-bigint-dig",
@@ -412,6 +413,7 @@ dependencies = [
  "base64 0.22.1",
  "campus-auth",
  "campus-portal",
+ "campus-schedule",
  "dirs",
  "log",
  "serde",

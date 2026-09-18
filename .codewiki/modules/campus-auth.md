@@ -7,6 +7,7 @@ source_files:
   - crates/campus-auth/src/jar.rs
   - crates/campus-auth/src/captcha.rs
   - crates/campus-auth/src/error.rs
+  - crates/campus-auth/src/jwglxt.rs
   - crates/campus-auth/src/lib.rs
   - crates/campus-auth/Cargo.toml
 tags:
@@ -29,7 +30,8 @@ tags:
 | `cas.rs` | CasClient：kaptcha → login → sso_follow → portal_probe + 门户资料接口（头像/姓名/头像上传） |
 | `jar.rs` | RecordingJar：记录型 CookieStore（会话检测与持久化的数据源） |
 | `captcha.rs` | 算术验证码识别（颜色不变强度图 + NCC 最近邻） |
-| `error.rs` | `CampusAuthError { Rsa, Http, Parse }`（`error.rs:5-12`） |
+| `jwglxt.rs` | 正方教务 SSO：`sso_ticket`（CAS REST 换票）+ `jwglxt_sso`（一键进教务）+ `fetch_timetable_json`（确保教务会话 + 拉课表 JSON 原文） |
+| `error.rs` | `CampusAuthError { Rsa, Http, Parse, JwglNotLogin }`（`error.rs:5-17`；`JwglNotLogin` = 教务 901 会话失效信号，M2.5 批次 1 新增） |
 
 ## 公开 API
 
@@ -50,6 +52,11 @@ tags:
 - `parse_portrait_change_response(body)`（`cas.rs:453-475`）：上传响应解析——`meta.success=true` 通过；`false` 取 `meta` 内消息为错；`data`/`meta` 缺失或非 JSON 一律 Parse 错。
 - `jar()`（`cas.rs:128-130`）：jar 句柄，供 check_session 与持久化。
 - 解析纯函数（离线单测覆盖）：`extract_head_portrait`（`cas.rs:373-397`，容忍完整 data URL——实测形态——与裸 base64 两种输入，剥 `data:` 前缀取首个 `,` 之后；空/缺失/非法 JSON 一律 Parse 错）与 `extract_user_profile`（`cas.rs:400-430`，`userName` trim 后为空即错、`departmentName` 缺失/空为 None；姓名与院系不进日志）。
+
+**jwglxt.rs**（2026-09-18 实测新增，正方教务 SSO，协议细节见 [[learnings/jwglxt-sso-chain|教务 SSO 链与课表接口取证]]）
+- `sso_ticket(tgt, service)`（`jwglxt.rs:56-77`）：`POST {CAS_BASE}/v1/tickets/{tgt}`（form `service=<service>`）→ 响应体纯文本即新 ST；非 `ST-` 开头 → Parse 错。**TGT 必须随会话持久化**——CAS 服务端不种任何登录 cookie（jar 实测登录后为空），会话复用全靠客户端保存 TGT。
+- `jwglxt_sso(tgt)`（`jwglxt.rs:88-91`）：换教务 ST（service=`JWGL_SERVICE`）→ 复用 `sso_follow` 走 `/sso/lyiotlogin` 302 链，返回落点 URL（实测 `…/jwglxt/xtgl/index_initMenu.html?jsdm=xs…` 学生主界面）；成功后 jar 种下教务域 `route`/`JSESSIONID`（+`rememberMe`），同 jar 的 `http_client()` 即可调 `/jwglxt/` 业务接口。
+- `fetch_timetable_json(tgt, xnm, xqm)`（`jwglxt.rs:124-146`，M2.5 批次 1）：**确保教务会话 + 拉课表 JSON 原文**一步到位——先直接 POST [`KBCX_XSKBCX_URL`]（`gnmkdm=N2151` 固定在 query，body 仅 `xnm=<学年起始年>&xqm=<学期代码 3/12/16>`，头组 `Content-Type: …charset=UTF-8` + `X-Requested-With: XMLHttpRequest`——XRW 必带，让会话失效表现为明确的 901 而非 200 登录页）；901 时 `tgt=Some` → `jwglxt_sso` 静默重进（换新 ST 走 5 跳链）后**重试一次**，重进失败或重试仍 901 → `JwglNotLogin`（TGT 失效 = 静默续期不可用，内部换票错误归一为该变体，不向用户暴露）；`tgt=None`（旧会话文件无 TGT）→ 直接 `JwglNotLogin`。判定逻辑抽纯函数 `interpret_kbcx_response`（`jwglxt.rs:35-49`，离线单测）：901 → `JwglNotLogin`；200 且 body 以 `{` 开头 → JSON 原文透传（**解析交上层** `campus_schedule::parse_kb_response`，本 crate 不依赖 campus-schedule 运行时依赖）；200 HTML（登录页形态）与其他状态码 → `Parse`，错误消息只含长度/状态码、不含响应原文。
 
 **jar.rs**（`RecordingJar`，实现 `reqwest::cookie::CookieStore`，`jar.rs:73-103`）
 - `snapshot() -> Vec<(String, String)>`（`jar.rs:39-41`）：全部已见 cookie（不含域信息，计划冻结接口）。
@@ -101,7 +108,9 @@ tags:
 | `tests/rsa_golden.rs` | golden 对拍（独立 BigInt 实现固化）+ 非 ASCII 拒绝 + `cas_token_header` 时间戳金标，3 个常跑测试 | 离线常跑 |
 | `tests/cas_parse.rs` | 16 码映射全覆盖、成功响应三形态解析、login body 构造、RecordingJar 记录行为 | 离线常跑 |
 | `cas.rs` 内嵌 `#[cfg(test)]`（`cas.rs:582-738`，14 个） | csrf 金标向量 `csrf_token_golden_vector`（防算法串漂移，`cas.rs:682-684`）+ 小写 hex 与时变性 `csrf_token_lowercase_hex_varies`；`portrait_change_success` / `portrait_change_failure_keeps_server_message` / `portrait_change_invalid_or_missing_meta` 上传响应解析三分支；`extract_head_portrait`（data URL/裸 base64/缺失/空串/非法 JSON）与 `extract_user_profile`（正常/无院系/空姓名/非法输入）解析单测 | 离线常跑 |
+| `jwglxt.rs` 内嵌 `#[cfg(test)]`（4 个，M2.5 批次 1） | `interpret_kbcx_response` 三分支（901 → `JwglNotLogin`；200 JSON 透传/前导空白容忍；200 HTML 拒绝且错误不含原文）+ 其他状态码 → Parse + `kbcx_url_same_origin_as_jwgl_service` 常量防漂移（课表端点与 JWGL_SERVICE 同源、`gnmkdm=N2151` 在 query） | 离线常跑 |
 | `tests/captcha_solve.rs` | 合成图 roundtrip（全链路，常跑）+ `build_templates` 模板生成 + 100 张样本三分类评测（门槛：正确率 ≥98% 且自信错误 =0） | 评测部分 `#[ignore]`（2 个） |
 | `tests/cas_live.rs` | 全流程 live 冒烟（凭据经 `CAMPUS_HUB_CREDS` 环境变量指向文件，真实凭据绝不入代码，`cas_live.rs:1-11`） | `#[ignore]`，主智能体验收时跑 |
+| `tests/jwglxt_live.rs` | 教务全链 live：`jwglxt_sso` → 课表接口 200 JSON 含 kbList → `parse_kb_response` >0 门课 → 头组/参数对照 → 失败模式断言（未登录+XRW=901 空 body；非 ajax=200 登录页 HTML）；`jwgl_service_shape` 常量防漂移为离线常跑 | live 部分 `#[ignore]` |
 
-`cargo test -p campus-auth` 全绿：lib 14 + rsa_golden 3 + cas_parse 8 + captcha_solve 1 常跑（另有 3 个 ignored 待真机样本/凭据）。
+`cargo test -p campus-auth` 全绿：lib 18（cas 14 + jwglxt 4）+ rsa_golden 3 + cas_parse 8 + captcha_solve 1 + jwglxt_live 常量防漂移 1 常跑（另有 4 个 ignored 待真机样本/凭据）。
