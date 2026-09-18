@@ -11,14 +11,18 @@
 //! - [`grid`]：课程网格布局（时间换算 + 重叠分簇分列），渲染层消费几何结果
 //! - [`timeslots`]：默认 13 节作息常量
 //! - [`zhengfang`]：正方教务课表响应解析（周次位掩码展开）
+//! - [`diff`]：导入自动对比更新（本地课表 ↔ 教务最新课表，冻结契约 §2.4）
 //!
 //! 算法与数据模型移植自 shiguangschedule（Apache-2.0），见 NOTICE.md。
 
+pub mod diff;
 pub mod grid;
 pub mod model;
 pub mod timeslots;
 pub mod weeks;
 pub mod zhengfang;
+
+pub use diff::{diff_courses, format_weeks, DiffResult};
 
 pub use grid::{grid_scale_to_time, merge_courses, time_to_grid_scale, MergedCourseBlock, ScheduleMode};
 pub use model::{

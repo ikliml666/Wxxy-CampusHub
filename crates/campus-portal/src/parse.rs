@@ -163,7 +163,10 @@ pub fn parse_week_schedule(body: &str) -> Result<WeekSchedule, PortalError> {
 /// `Default-class` 事件真实上课时间）：大节2 10:10-11:50、大节3 13:45-15:25 为
 /// 实测值；其余档位为推算，M2.5 校本化作息时校准。**不改动
 /// `campus-schedule::default_time_slots()`**（上游默认值，被金标测试钉住）。
-fn block_time_slots() -> Vec<TimeSlot> {
+///
+/// `pub`：M2.5 起课表 ICS 导出（tauri 层）与今日页「下一节课」共用同一份
+/// 校本大节表——单点事实来源，调用方不得复制常量。
+pub fn block_time_slots() -> Vec<TimeSlot> {
     const RAW: [(u8, &str, &str); 5] = [
         // ponytail: 未实测——由大节2 10:10 开始反推（30 分钟大课间）；M2.5 校准
         (1, "08:00", "09:40"),

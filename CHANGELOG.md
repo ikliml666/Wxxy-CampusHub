@@ -1,5 +1,16 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 批次 2：课表自动对比更新 + 手动课程 + ICS 导出
+
+- **模块**：`crates/campus-schedule`（新增 `diff.rs` 导入 diff 纯函数模块）、`crates/campus-portal`（`block_time_slots()` 提升 `pub` 并 re-export）、`tauri-app/src-tauri`（5 新命令 **26 → 31**，`commands/timetable.rs` 扩展）、`tauri-app/src-tauri/Cargo.toml`（补 `chrono` 依赖）、`.codewiki/`
+- **依据**：计划 `docs/superpowers/plans/2026-09-18-m2.5-timetable.md`（diff 冻结语义 §2.4、命令面 §2.3、节次口径 §1.3——本条不重复抄契约）
+- **diff 纯函数（`campus-schedule/src/diff.rs`）**：`diff_courses(existing, incoming) -> DiffResult{courses, added, changed, removed, changes}`——匹配键 = 课程名 + `class_id`（缺失退化仅课程名）；新出现新增 / 字段变化更新（星期、节次、周次、教室、教师五字段字段级文案，如 `信息安全 教室 D4-207 → D4-305`，多字段「；」连接）/ 消失置 `disabled=true` 不删记录；**Manual 课程零触碰**（不参与匹配、永不停开，专门单测）；已停开课程再次消失不重复计数（removed = 本次新发现）；停开课程复活（`disabled=false`）计入 changed；匹配成功整条采用新数据但 **id 沿用旧库**（override 挂 course_id，必须稳定）；周次排序后比较（手工乱序不误报）；`format_weeks` 连续区间合并（1-12）。取舍记录见 `.codewiki/decisions/timetable-diff-manual-and-ics.md`。
+- **`import_timetable` 命令**：需登录（无会话「请先登录」；`JwglNotLogin` 中文透出「教务会话已失效，请重新登录」）。学期信息（会话内缓存）推导参数：`xnm` = `start_date` 前 4 位、`semester` `"1"→3 / "2"→12`（**不用 `grade`**，冻结口径）→ `fetch_timetable_json`（901→TGT 静默重进在 campus-auth 内部）→ `parse_kb_response` → diff 合并旧库 → 落库（同时以学期信息初始化/更新 `semester_start_date` 与 `semester_total_weeks`，单字段解析失败保留旧值）→ `ImportResult{added, changed, removed, total, changes}`（total = 合并后课程总数，含停开保留记录）。
+- **手动课程三命令**（本地操作、无需登录）：`add_course_manual(input)`（`source=Manual`、colorIndex 由入参、id=`manual-<纳秒>` 与导入 id `<table_id>-<jxb_id>` 前缀不同永不冲突；入参校验：课程名/星期 1-7/节次/周次 ≥1）；`update_course(course)` 按 id 整条替换（任意来源可编辑）；`delete_course(id)` 级联清理该课程挂载的 override。三者共用 `mutate_timetable`（load→改→save）骨架；无进程内互斥（前端交互串行，契约 §2.2 原子性由调用方保证）。
+- **`export_ics` 命令**：返回展开式 VEVENT 文本（不落盘，前端 Blob 下载）。每门未停开课程 × 其每个教学周各一个 VEVENT（不依赖 RRULE）；日期 = `semester_start_date` + `(周次-1)×7 + (星期-1)` 天；时间取校本大节作息——`campus_portal::block_time_slots()` 本批次提升 `pub`（与今日页同一事实来源，未复制常量、49 个既有测试全过），**大节号 = `(起始小节+1)/2`**、结束时刻取结束小节对应大节 end_time（`3-4节` → 10:10-11:50）；大节越界跳过不伪造；TEXT 转义 + CRLF；**floating local time**（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释）；缺 `semester_start_date` 报「请先完成一次导入」。
+- **验证**：`cargo test --workspace` → **131 passed / 0 failed / 4 ignored**（本批新增 19：campus-schedule 14→25（diff 11 个）、campus-hub 18→26（ICS/导入辅助 8 个））；`tsc --noEmit` 0 错误。live（真实账号导入 8 门课）由主智能体验收时跑。
+- **遗留**：① M2.5 批次 1 无 CHANGELOG 条目（其内容见提交 e155f98 的 commit message）；② `Semester` 暑期 `"3"` 未映射（契约口径仅 1/2，未知序号报错）；③ ICS 未做 RFC 5545 行折叠（字段均为短文本，实测远低于 75 字节）。
+
 ## 2026-09-18 · M2 遗留项：日程月视图/会议并入与应用可达性元数据
 
 - **模块**：`crates/campus-portal`（新增 access 可达性模块、会议解析纯函数、会议查询与学期缓存）、`tauri-app/src-tauri`（1 新命令 **24 → 25**，`get_schedule_month` 并入会议）、`tauri-app/frontend`（SchedulePanel 月视图/角标、AppsPanel 可达性徽标与分级点击）、`docs/`、`.codewiki/`

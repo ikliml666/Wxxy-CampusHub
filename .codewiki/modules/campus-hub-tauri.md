@@ -32,7 +32,7 @@ tags:
 
 `tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-45`。
 
-## 26 条命令面
+## 31 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -61,7 +61,12 @@ tags:
 | `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；**M2 遗留项起 codes 含 `Default-Meeting` 时并入会议卡日程**——失败空贡献不影响课表，失败时 stderr 有 `[meeting-diag]` 打点） | `portal.rs:229-261` |
 | `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25） | `portal.rs:264-281` |
 | `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略——可达性提示由前端按 `AppItem.access` 分级给出） | `portal.rs:284-301` |
-| `get_timetable` | — | `Timetable`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；域类型已 serde camelCase 直接透出，`updatedAt` 与冻结契约一致；M2.5 批次 1 新增，命令数 25 → 26） | `timetable.rs:12-17` |
+| `get_timetable` | — | `Timetable`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；域类型已 serde camelCase 直接透出，`updatedAt` 与冻结契约一致；M2.5 批次 1 新增，命令数 25 → 26） | `timetable.rs:31-34` |
+| `import_timetable` | — | `ImportResult{ added, changed, removed, total, changes }`（链路见下节；M2.5 批次 2 新增，命令数 26 → 27） | `timetable.rs:75` |
+| `add_course_manual` | `input: ManualCourseInput{ name, teacher, position, day, startSection, endSection, weeks, colorIndex, remark? }` | `Course`（source=Manual、id=`manual-<纳秒>`；入参校验：课程名/星期/节次/周次，M2.5 批次 2） | `timetable.rs:203` |
+| `update_course` | `course: Course` | `Course`（按 id 整条替换，id 不存在 err「课程不存在」；任意来源可编辑，M2.5 批次 2） | `timetable.rs:238` |
+| `delete_course` | `id: String` | 无（**级联清理**该课程挂载的 override；不存在 err「课程不存在」，M2.5 批次 2） | `timetable.rs:256` |
+| `export_ics` | — | `String`（展开式 VEVENT 文本，**不落盘**前端 Blob 下载；见下节，M2.5 批次 2） | `timetable.rs:378` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
@@ -89,6 +94,14 @@ tags:
 - **`get_schedule_classify` / `get_schedule_month`**：日程分类与区间明细透传；`get_schedule_month` 对 `endMs <= startMs` 直接 err「日程区间无效」（前端 bug 防御，不透传服务端）。**会议并入（M2 遗留项）**：课表明细 Ok 时 `extend(query_meetings_for_range(...))`——codes 含 `Default-Meeting` 才并入；会议链路任一环节失败为空贡献（**降级承诺：不影响课表日程与日历**），失败环节在协议层留 `[meeting-diag]` stderr 打点（只打失败，成功静默），命令层零打点。
 - **`get_schedule_day_counts`**（遗留项新增）：月视图角标取数，区间倒挂防御同上；透传 bs-schedule `getCountBetweenTime`（**无分类参数，计数为当日全量**）。
 - **`open_app(url, isCas)`**：校验用**协议白名单** `campus_portal::is_http_url`（仅 http/https），而非 `open_url_in_browser` 的域名白名单——该 URL 来自校方应用目录（受信来源）、后端不抓取它（无 SSRF 面）、只在系统浏览器打开；实测 30 条目录数据中 16 条为非校园域，域名白名单会把学校自己的合法应用全部拦掉。打开动作复用官方 `tauri-plugin-opener` Rust API。**`isCas` 是契约保留字段，当前不影响打开策略**（`let _ = is_cas`）——可达性提示由前端按 `AppItem.access` 分级给出（webvpn 提示后仍打开 / unavailable 只提示不打开）。⚠️ WebVPN B 类包装未实现（实测网关对未登录请求一律回落、明文包装无法验证，会话打通 + 包装 + A 类 CAS 直达签发归 M4）。分工原则与数据分布见 [[learnings/portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工]]。
+
+## 课表命令与导入/ICS 链路（`commands/timetable.rs`，M2.5 批次 1+2）
+
+课表命令不依赖 `portal_of` 模式：`get_timetable`/`export_ics`/手动课程三命令是**纯本地操作**（不取 State，直接 `state::data_dir()`）；只有 `import_timetable` 需要会话——锁内 clone `(client, tgt, portal)` 三件套后 drop guard 再 await。
+
+- **`import_timetable` 链路**（`timetable.rs:75-150`）：门户学期信息（会话内已缓存）推导 `xnm`/`xqm`（冻结契约 §1.2 口径：`xnm`=`start_date` 前 4 位、`semester` `"1"→3/"2"→12`，**不用 `grade`**）→ `fetch_timetable_json`（901→TGT 静默重进在 campus-auth 内部；失败 Display 中文直接透出，`JwglNotLogin` =「教务会话已失效，请重新登录」）→ `parse_kb_response(json, DEFAULT_TABLE_ID)` → [[modules/campus-schedule|课表核心]] `diff_courses` 合并旧库 → 落库 → `ImportResult{added, changed, removed, total, changes}`（total = 合并后课程总数，含停开保留记录）。学期信息同时初始化/更新 `semester_start_date`（`"YYYYMMDD"`→`NaiveDate`）与 `semester_total_weeks`，**单字段解析失败保留旧值**（不因坏数据丢课表）。
+- **手动课程三命令**共用 `mutate_timetable`（load → 改 → save 骨架，`timetable.rs:165`）；无进程内互斥（前端交互串行，契约 §2.2 原子性由调用方保证）。`add_course_manual` 入参校验（课程名非空/星期 1-7/节次 start≤end/周次非空且 ≥1）后构造 `source=Manual` 课程，id=`manual-<纳秒时间戳>`（与导入 id `<table_id>-<jxb_id>` 前缀不同永不冲突，取舍见 [[decisions/timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]）。
+- **`export_ics`**（`build_ics`，`timetable.rs:299`）：展开式 VEVENT（不依赖 RRULE）——每门未停开课程 × 其每个教学周一个 VEVENT；日期 = `semester_start_date`（第 1 周周一锚点）+ `(周次-1)×7 + (星期-1)` 天；时间取 `campus_portal::block_time_slots`（本批次提升为 `pub` 并 re-export，与今日页同一事实来源），**大节号 = `(起始小节+1)/2`**，结束时刻取结束小节对应大节的 end_time；起始/结束大节任一超出 5 大节表 → 跳过该课程；TEXT 转义（`,` `;` `\` 换行）+ CRLF 行尾；floating local time（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释，取舍见同上 decision 文章）；缺 `semester_start_date` err「请先完成一次导入」。
 
 ## 登录重试状态机
 
@@ -124,7 +137,7 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 | `session.json` | `{ username, cookies: [{ name, valueB64(DPAPI) }], tgtB64?(DPAPI) }`（`state.rs:63-70`；`tgtB64` 为 M2.5 批次 1 新增，缺省/None 时省略——CAS TGT 是教务会话静默续期唯一凭据，DPAPI 密文落盘、绝不落明文） | `persist_session(dir, username, cookies, tgt)`（`state.rs:82-101`）；读 `load_session` → `StoredSession{ username, cookies, tgt }`（单个 cookie/TGT 解密失败跳过为 None，`state.rs:107-124`）；删 `clear_session` |
 | `accounts.json` | `{ accounts: [{ username, passwordB64(DPAPI), lastLogin(epoch 毫秒串), displayName? }] }`（`store.rs:13-29`） | `save_account`（同 username upsert 覆盖，`store.rs:43-62`）、`remove_account`（不存在报错，`store.rs:81-89`） |
 | `profile.json` | `{ localBase64?, officialBase64?, officialFetchedAt? }`（camelCase，字段缺省即不存在，`profile.rs:41-52`）——**明文 base64，不走 DPAPI** | `store_local_avatar` / `clear_local_avatar` / `store_official_avatar`（`profile.rs:127-153`）；读 `read_profile`（文件缺失/损坏按空档处理，`profile.rs:62-67`） |
-| `timetable.json` | `campus_schedule::Timetable`（camelCase：`config/courses/overrides/updatedAt`）——**非凭据明文**，与 profile.json 同级；`infra/timetable.rs`（M2.5 批次 1 新建）：`load_timetable`（缺失/损坏 → 空课表不报错、不删坏文件，`timetable.rs:41-54`）、`save_timetable`（整体读写，原子性由调用方保证——冻结契约 §2.2 单文件无数据库，`timetable.rs:56-60`）、`empty_timetable`（`DEFAULT_TABLE_ID="default"`，`timetable.rs:24-36`） | 批次 2 `import_timetable` 起接入写入；批次 1 只有 `get_timetable` 读取 |
+| `timetable.json` | `campus_schedule::Timetable`（camelCase：`config/courses/overrides/updatedAt`）——**非凭据明文**，与 profile.json 同级；`infra/timetable.rs`（M2.5 批次 1 新建）：`load_timetable`（缺失/损坏 → 空课表不报错、不删坏文件，`timetable.rs:41-54`）、`save_timetable`（整体读写，原子性由调用方保证——冻结契约 §2.2 单文件无数据库，`timetable.rs:56-60`）、`empty_timetable`（`DEFAULT_TABLE_ID="default"`，`timetable.rs:24-36`） | `import_timetable`（M2.5 批次 2）与手动课程三命令写入 |
 
 启动回填 `restore_session()`（`state.rs:137-153`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填，**TGT 一并回填 `CasSession.tgt`**（旧格式文件无 tgtB64 → None，教务 901 时上层直接引导重新登录）；文件缺失/损坏/cookies 空 → None。落盘内容不含 cookie/TGT 明文有单测断言（`state.rs:168-196`，含旧格式兼容 `state.rs:198-224`）。`CasSession` 自 2026-09-18 起挂 `portal: PortalClient`（M2 批次 1）与 `tgt: Option<String>`（M2.5 批次 1，`state.rs:16-29`，仅内存明文、与 cookie 同级敏感）——`finish_login`（`auth.rs:343-350`）与 `restore_session`（`state.rs:144-152`）两处构造均 `PortalClient::new(client.clone())` 共享同一 jar，缓存生命周期 = 会话生命周期（详见 [[modules/campus-portal|门户业务协议核心]]）。
 
@@ -145,4 +158,4 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）。`cargo test --workspace` 全量 **113 passed / 4 ignored**（2026-09-18 M2.5 批次 1 校验；campus-auth lib 18 + 集成 14、campus-hub 18、campus-schedule 14、campus-portal 49；4 个 ignored 为 cas_live/jwglxt_live/captcha 评测，待真机凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）。`cargo test --workspace` 全量 **131 passed / 4 ignored**（2026-09-18 M2.5 批次 2 校验；campus-auth lib 18 + 集成 13、campus-hub 26（含 M2.5 批次 2 新增 8：ICS 展开/时间锚点/停开过滤/大节越界/转义与 CRLF/开学日解析/手动入参校验/转义函数）、campus-schedule 25（含 diff 模块 11：三分支/Manual 零触碰/退化匹配/复活/二轮不重复计数/等价 noop/乱序周次/周次文案）、campus-portal 49；4 个 ignored 为 cas_live/jwglxt_live/captcha 评测，待真机凭据）。

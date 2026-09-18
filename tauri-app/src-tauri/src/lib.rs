@@ -43,6 +43,11 @@ pub fn run() {
             commands::portal::get_schedule_day_counts,
             commands::portal::open_app,
             commands::timetable::get_timetable,
+            commands::timetable::import_timetable,
+            commands::timetable::add_course_manual,
+            commands::timetable::update_course,
+            commands::timetable::delete_course,
+            commands::timetable::export_ics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

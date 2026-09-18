@@ -7,6 +7,7 @@ source_files:
   - crates/campus-schedule/src/grid.rs
   - crates/campus-schedule/src/timeslots.rs
   - crates/campus-schedule/src/zhengfang.rs
+  - crates/campus-schedule/src/diff.rs
   - crates/campus-schedule/src/lib.rs
   - crates/campus-schedule/Cargo.toml
   - crates/campus-schedule/NOTICE.md
@@ -66,6 +67,18 @@ tags:
 - `Semester`：第 1 学期=3、第 2 学期=12、暑期=16（`zhengfang.rs:52-66`）；`query_body` 构造表单体（`zhengfang.rs:69-71`）。
 - `parse_kb_response(json, course_table_id)`（`zhengfang.rs:88-141`）：`kbList` 条目只声明用到的字段、全部宽容缺省（`zhengfang.rs:21-48`）；`jcs` "3-4" 解析节次、`xqj` 解析星期（非法条目整条跳过，坏数据测试 `zhengfang.rs:166-179`）；`oldzc` 十进制周次位掩码（bit0=第 1 周）经 `expand_week_mask` 展开（`model.rs:136-138`，单双周测试 `model.rs:147-150`）；输出 `source=Import` 课程。
 - `stable_color`（`zhengfang.rs:144-146`）：课程名字节 `*31` 散列出颜色索引，同一门课每次导入颜色一致。
+
+## 导入 diff（diff.rs，M2.5 批次 2，本项目原创）
+
+`diff_courses(existing, incoming) -> DiffResult`（`diff.rs:135`）实现冻结契约 §2.4 的自动对比更新，输出即「合并后的完整课程列表」（直接写库）+ 计数（added/changed/removed）+ 人类可读 `changes` 文案：
+
+- **匹配键 = 课程名 + `class_id`**（`match_key`，`diff.rs:36`）；`class_id` 缺失退化为仅课程名匹配（`Option<&str>` 的 None==None）。
+- **Manual 零触碰**（`diff.rs:141-145`）：旧库 Manual 课程原样 push——不参与匹配、不被更新、永不被置 `disabled`（专门单测 `diff_never_touches_manual_courses` 覆盖「同名 Import 来袭」与「Manual 消失」两个方向）。
+- 消失 → 置 `disabled=true` 不删记录；**已停开的再次消失不重复计数/不重复报文案**（`diff.rs:167-176`，单测 `diff_second_run_no_duplicate_removed`）——removed 语义 =「本次新发现停开」。
+- 字段级 diff（`field_changes`，`diff.rs:43-76`）：星期/节次/周次/教室/教师五个字段；周次**排序后比较**（旧库手工编辑乱序不误报）。文案形态照契约：`信息安全 教室 D4-207 → D4-305`，多字段以「；」连接；added=`新增 X`、removed=`X 停开`、复活=`X 恢复开课`。
+- **复活语义**：disabled 旧课再次匹配到 → `disabled=false` 并计入 changed（单测 `diff_revives_disabled_course`）。
+- 匹配成功时**整条采用 incoming 数据但 id 沿用旧库**（`diff.rs:160-165`）——调课 override 挂在 `course_id` 上，id 必须稳定（class_id 缺失退化匹配时 incoming 的 `<table_id>-<空 jxb_id>` id 可能不同，取舍见 [[decisions/timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]）。
+- `format_weeks`（`diff.rs:103`）：周次列表连续区间合并成紧凑文案（`1,2,3,7,8` → `1-3,7-8`）。
 
 ## Apache-2.0 合规三件套
 

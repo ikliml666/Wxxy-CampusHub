@@ -17,8 +17,8 @@ pub use access::{classify_app_access, AppAccess};
 pub use article::{extract_article, is_allowed_info_url, is_auth_wall, is_http_url};
 pub use client::PortalClient;
 pub use parse::{
-    elapsed_slot_count, guess_image_mime, next_course, next_course_from_now, parse_app_groups,
-    parse_app_items, parse_info_columns, parse_info_list, parse_schedule_classify,
+    block_time_slots, elapsed_slot_count, guess_image_mime, next_course, next_course_from_now,
+    parse_app_groups, parse_app_items, parse_info_columns, parse_info_list, parse_schedule_classify,
     parse_schedule_day_counts, parse_schedule_events, parse_semester_info, parse_todo_list,
     parse_todo_tabs, parse_wallet_summary, parse_week_schedule, WeekSchedule,
 };

@@ -7,6 +7,7 @@
 
 - [[decisions\recording-jar-session|决策记录 - RecordingJar 自实现与会话持久化]]
 - [[decisions\guest-mode-account-shell|决策记录 - 游客优先外壳、账号系统与头像三态]]
+- [[decisions\timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]
 ## Learning
 
 - [[learnings\cas-sso-plaintext-redirect|CAS SSO 回跳的三处坑：重定向中断、明文落点、探测误判]]
