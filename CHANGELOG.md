@@ -1,5 +1,25 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 批次 4：课表页 UI（周视图 / 详情浮层 / 手动课程 / 调课待确认 / ICS 导出）
+
+- **模块**：`tauri-app/src-tauri`（`get_timetable` 出参按契约修订改为 `TimetableView`）、`tauri-app/frontend`（`PanelId` 8→9 项、`TimetablePanel.tsx` 新建、`types.ts` 课表契约 12 接口、DockNav/AppShell/uiStore/index.css 接线）、`docs/`（计划 §2.3 TimetableView 修订落档）、`.codewiki/`
+- **`TimetableView` 修订（批次 4 前契约修订落地）**：`get_timetable` 返回 `TimetableView{ timetable, slots, currentWeek, today }`——`slots` = `campus_portal::block_time_slots()` 下发（**时间标签唯一事实源，前端不硬编码**）、`currentWeek` = `campus_schedule::current_week`（无开学日/今天越出学期 → null）、`today` = "YYYY-MM-DD"。组装抽纯函数 `build_timetable_view` 可单测；`parse_notice` 的周次口径与之同源。取舍见 `.codewiki/decisions/timetable-view-contract.md`。
+- **前端契约镜像（`types.ts`）**：M2.5 课表 12 接口照 Rust camelCase 序列化——`Course`/`CourseOverride` 的 Option 字段恒存在 `| null`；`NoticeCandidate` 的 Option 字段 Rust 侧 `skip_serializing_if` 缺省省略 → TS 用**可选属性**（两类形态不可混写）。`PanelId` 追加 `"timetable"`（types + DOCK_ITEMS + PANEL_MAP 三处同步）。
+- **uiStore persist 兼容**：persist 升 `version: 1` + `migrate`——旧持久化值（8 面板之一）原样保留，非法 `activePanel` 兜底回 `"today"`（防 `PANEL_MAP` 查空白屏）。
+- **DockNav 9 项**：课表（`CalendarRange` 图标、sched 湖蓝域色）置于「今日」之后；9 项总宽约 416px，1280px 默认窗口不溢出；磁吸/胶囊/圆点动画按 `DOCK_ITEMS` 遍历注册，无需额外适配。
+- **课表色板**：`COURSE_PALETTE` 8 档全走 token——6 个既有域色 + index.css 新增 `--color-aqua`/`--color-rose`（深主题各提亮一档）；**导入课程 `colorIndex` 是课名哈希大数（`stable_color`），取色一律 `% 色板长度`**，与手动课程 0..=7 下标统一。
+- **`TimetablePanel`（单文件）**：
+  - 顶栏：`第N周 / 共M周`（N=视图周，默认 currentWeek，null 时按第 1 周并显示「尚未设置开学日」琥珀提示）+ `◀ 本周 ▶`（clamp 1..totalWeeks）+ 「导入/同步」（成功摘要条：新增/更新/停开/共 N 门 + `changes[]` 逐条、失败中文红字；成功后回当前教学周）+ 「导出 ICS」（Blob 下载「课表.ics」）。
+  - 周视图：列 = 周一…周日（列头日期由 `semesterStartDate + (周-1)×7` 推、今日列按 `today` 字符串比对高亮）；行 = 后端 `slots` 5 大节；块 absolute 按大节跨度铺（小节→大节 `ceil(小节/2)` 与 ICS 展开同口径）；【导】= source=import、【调】= 该块关联生效 override。
+  - override 合成（`buildWeekBlocks` 纯函数）：停课 → 原时段虚线「已停」占位；调课（新时间≠原时间）→ 原时段虚线「已调出」+ 新时段实体块；仅换教室 → 原位渲染新教室；补课 → 新增实体块；同一课多条 override **逆序取最后一条**（与后端 upsert 幂等呼应）；同日重叠轻量分列（连通簇 + 贪心占道，`grid::merge_courses` 语义的前端重写，不在 IPC 面）。
+  - 详情浮层：fixed 定位（视口 clamp、下放不下上翻、Esc/点外关闭）；教师/教学班（classId）/周次/教室；**`remark` 按来源区分标签**——导入课程装的是「课程性质·考核方式」（正方 `kcxz·khfsmc`），手动课程才是备注；该课 override 列表可撤销；「手动添加同款」预填表单 + 「编辑」（提示导入课程修改会被下次导入覆盖）。
+  - 手动表单：名称/教师/教室/星期/起止小节/周次/颜色/备注，周次文本 `1-8,10` 混排解析 + 全部/单周/双周快捷；新增走 `add_course_manual`、编辑走 `update_course`。
+  - 调课通知区：粘贴 → `parse_notice` → 候选列表（high=「可自动应用」绿标、low=琥珀 reason+excerpt）→「采纳」`apply_override`；已生效 override 列表「撤销此通知调整」= `revoke_notice(sourceNoticeId)` 整批撤销。
+  - 全部课程列表：按星期/节次排序平铺，`disabled=true` 灰显 +「已停开」徽标（**不画进网格**），行内编辑/删除（删除 confirm，后端级联清理 override）。
+  - 四态齐全：guest 登录空态 / loading 骨架 / ready 0 门「导入课表+手动添加」引导 / error 重试；无任何假数据。
+- **验证**：`cargo test --workspace` → **148 passed / 0 failed / 4 ignored**（本批新增 2：`build_timetable_view` 组装断言 slots=5 大节/currentWeek 口径/camelCase 键 + 无开学日/开学前 → currentWeek=null）；`tsc --noEmit` 0 错误；`npm run build` 通过。真机（导入 8 门课显示、角标、手动课程多次导入零变动、Dock 9 项视觉）由主智能体验收。
+- **遗留**：① 停课 override 的 `newDay=null`（通知未提及时）按「该课该周全停」渲染，契约未细化该点；② 视图周切换无日期越界防呆之外的提示（开学前/放假周网格空白属预期）；③ 作息时间表编辑 UI 不做（计划 §5 明确不做）。
+
 ## 2026-09-18 · M2.5 批次 3：调课通知 L1/L2 解析与 override 命令
 
 - **模块**：`crates/campus-schedule`（新增 `notice.rs` 解析内核模块）、`tauri-app/src-tauri`（3 新命令 **31 → 34**，`commands/timetable.rs` 扩展）、`.codewiki/`

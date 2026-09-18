@@ -61,7 +61,7 @@ tags:
 | `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；**M2 遗留项起 codes 含 `Default-Meeting` 时并入会议卡日程**——失败空贡献不影响课表，失败时 stderr 有 `[meeting-diag]` 打点） | `portal.rs:229-261` |
 | `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25） | `portal.rs:264-281` |
 | `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略——可达性提示由前端按 `AppItem.access` 分级给出） | `portal.rs:284-301` |
-| `get_timetable` | — | `Timetable`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；域类型已 serde camelCase 直接透出，`updatedAt` 与冻结契约一致；M2.5 批次 1 新增，命令数 25 → 26） | `timetable.rs:31-34` |
+| `get_timetable` | — | `TimetableView{ timetable, slots, currentWeek, today }`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；`slots` = 校本大节作息 `campus_portal::block_time_slots()` **下发给前端做时间标签唯一事实源**、`currentWeek` = `weeks::current_week`（无开学日/今天越出学期为 null）、`today` = "YYYY-MM-DD"；组装纯函数 `build_timetable_view` 可单测。批次 1 原返回裸 `Timetable`，2026-09-18 批次 4 前修订（契约 §2.3），命令数 25 → 26） | `timetable.rs:36-71` |
 | `import_timetable` | — | `ImportResult{ added, changed, removed, total, changes }`（链路见下节；M2.5 批次 2 新增，命令数 26 → 27） | `timetable.rs:75` |
 | `add_course_manual` | `input: ManualCourseInput{ name, teacher, position, day, startSection, endSection, weeks, colorIndex, remark? }` | `Course`（source=Manual、id=`manual-<纳秒>`；入参校验：课程名/星期/节次/周次，M2.5 批次 2） | `timetable.rs:203` |
 | `update_course` | `course: Course` | `Course`（按 id 整条替换，id 不存在 err「课程不存在」；任意来源可编辑，M2.5 批次 2） | `timetable.rs:238` |

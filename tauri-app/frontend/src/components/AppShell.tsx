@@ -14,6 +14,7 @@ import {
 import AccountMenu from "@/components/AccountMenu";
 import DockNav from "@/components/DockNav";
 import { TodayPanel } from "@/panels/TodayPanel";
+import { TimetablePanel } from "@/panels/TimetablePanel";
 import { InfoPanel } from "@/panels/InfoPanel";
 import { TodoPanel } from "@/panels/TodoPanel";
 import { SchedulePanel } from "@/panels/SchedulePanel";
@@ -24,6 +25,7 @@ import { SettingsPanel } from "@/panels/SettingsPanel";
 
 const PANEL_MAP: Record<PanelId, ComponentType> = {
   today: TodayPanel,
+  timetable: TimetablePanel,
   info: InfoPanel,
   todo: TodoPanel,
   schedule: SchedulePanel,

@@ -113,9 +113,11 @@ export interface TodoPage {
   items: TodoItem[];
 }
 
-// PanelId 冻结 8 项；M2.5 课表页届时追加 "timetable" 需同步改此处 + DOCK_ITEMS + persist 兼容
+// PanelId 现为 9 项（2026-09-18 M2.5 批次 4 追加 "timetable"）：三处同步 = 本类型 +
+// DockNav DOCK_ITEMS + AppShell PANEL_MAP；uiStore persist 的 migrate 校验非法值兜底。
 export type PanelId =
   | "today"
+  | "timetable"
   | "info"
   | "todo"
   | "schedule"
@@ -183,4 +185,147 @@ export interface ScheduleEvent {
 export interface ScheduleDayCount {
   day: string;
   count: number;
+}
+
+// ---------- M2.5：课表页（tauri commands/timetable.rs，契约冻结于计划 §2.1–§2.5；
+// 镜像 crates/campus-schedule/src/model.rs 与 src/notice.rs 的 camelCase 序列化） ----------
+
+/** 课程来源：导入（自动更新可触碰）/ 手动添加（永不触碰）。 */
+export type CourseSource = "import" | "manual";
+
+/** 一门课程（同一课程多周复用同一条记录，周次见 weeks）。 */
+export interface Course {
+  id: string;
+  courseTableId: string;
+  name: string;
+  teacher: string;
+  position: string;
+  /** 星期几，1=周一 … 7=周日 */
+  day: number;
+  /** 起始/结束小节（1-based 教务小节号）；导入课程恒有值 */
+  startSection: number | null;
+  endSection: number | null;
+  isCustomTime: boolean;
+  customStartTime: string | null;
+  customEndTime: string | null;
+  /** 卡片颜色索引：导入课程为课名哈希大数，**取色必须 % 色板长度** */
+  colorIndex: number;
+  /** 导入课程 = 课程性质·考核方式（kcxz·khfsmc）；手动课程 = 用户备注 */
+  remark: string | null;
+  source: CourseSource;
+  /** 出现周次（1-based 显式列表） */
+  weeks: number[];
+  /** 教学班 ID（正方 jxb_id，diff 匹配键之一） */
+  classId: string | null;
+  /** 「已停开」：导入课程消失时后端置 true（不删记录）；手动课程永不置位 */
+  disabled: boolean;
+}
+
+/** 课表配置。 */
+export interface CourseTableConfig {
+  courseTableId: string;
+  showWeekends: boolean;
+  /** 学期开学日 "YYYY-MM-DD"（周次锚点；null = 未设置） */
+  semesterStartDate: string | null;
+  semesterTotalWeeks: number;
+  /** 一周起始日：1=周一 … 7=周日 */
+  firstDayOfWeek: number;
+}
+
+/** 调整类型：调课 / 停课 / 补课（Rust OverrideKind snake_case）。 */
+export type OverrideKind = "rescheduled" | "cancelled" | "extra";
+
+/** 单次调课叠加（叠加于导入课程之上，原数据保留；撤销按 sourceNoticeId 整批）。 */
+export interface CourseOverride {
+  id: string;
+  courseId: string;
+  /** 生效周次（1-based） */
+  weeks: number[];
+  changeType: OverrideKind;
+  /** 调课/补课 = 新时间；停课 = 被停那次的星期（供定位），通知未提及时 null */
+  newDay: number | null;
+  newStartSection: number | null;
+  newEndSection: number | null;
+  newPosition: string | null;
+  /** 来源通知 ID（撤销与去重键） */
+  sourceNoticeId: string;
+  /** 高置信自动应用 = true；低置信人工采纳 = false */
+  autoApplied: boolean;
+}
+
+/** 一份本地课表（timetable.json 顶层结构）。 */
+export interface Timetable {
+  config: CourseTableConfig;
+  courses: Course[];
+  overrides: CourseOverride[];
+  /** 最近更新时刻 RFC3339；空串 = 从未更新 */
+  updatedAt: string;
+}
+
+/** 节次时间段（后端下发，前端不得硬编码时间）。 */
+export interface TimeSlot {
+  number: number;
+  /** "HH:MM" */
+  startTime: string;
+  endTime: string;
+  alias: string | null;
+}
+
+/** get_timetable → data（批次 4 修订契约 §2.3）。 */
+export interface TimetableView {
+  timetable: Timetable;
+  /** 校本大节作息（5 大节），时间标签唯一事实源 */
+  slots: TimeSlot[];
+  /** 当前教学周；null = 未设置开学日或今天不在学期内 */
+  currentWeek: number | null;
+  /** 本机今天 "YYYY-MM-DD" */
+  today: string;
+}
+
+/** import_timetable → data（变更摘要，changes 为人类可读条目）。 */
+export interface ImportResult {
+  added: number;
+  changed: number;
+  removed: number;
+  /** 合并后本地课程总数（含已停开保留记录） */
+  total: number;
+  changes: string[];
+}
+
+/** add_course_manual 入参（冻结契约 §2.3）。 */
+export interface ManualCourseInput {
+  name: string;
+  teacher: string;
+  position: string;
+  /** 1=周一 … 7=周日 */
+  day: number;
+  startSection: number;
+  endSection: number;
+  /** 出现周次（1-based） */
+  weeks: number[];
+  /** 前端色板下标 */
+  colorIndex: number;
+  remark?: string | null;
+}
+
+/** 解析置信度。high = 要素齐全且课程名唯一精确匹配（自动应用）；low = 待确认。 */
+export type NoticeConfidence = "high" | "low";
+
+/** 调课通知候选（parse_notice → data，不入库）。
+ *  ⚠️ Rust 侧 Option 字段 skip_serializing_if 缺省省略 → TS 用可选属性（非 null）。 */
+export interface NoticeCandidate {
+  noticeId: string;
+  courseId?: string;
+  courseName: string;
+  changeType: OverrideKind;
+  weeks: number[];
+  newDay?: number;
+  newStartSection?: number;
+  newEndSection?: number;
+  newPosition?: string;
+  confidence: NoticeConfidence;
+  /** 降级原因（high 时为空串） */
+  reason: string;
+  /** 原文摘录（命中课程所在行） */
+  excerpt: string;
 }

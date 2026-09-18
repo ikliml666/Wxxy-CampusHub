@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import {
   CalendarDays,
+  CalendarRange,
   LayoutGrid,
   ListChecks,
   Newspaper,
@@ -28,14 +29,17 @@ export const DOCK_ITEMS: {
   icon: LucideIcon;
   color: string;
 }[] = [
-  { id: "today",    label: "今日", icon: SunMedium,    color: "var(--color-brand)" },
-  { id: "info",     label: "资讯", icon: Newspaper,    color: "var(--color-info)" },
-  { id: "todo",     label: "待办", icon: ListChecks,   color: "var(--color-todo)" },
-  { id: "schedule", label: "日程", icon: CalendarDays, color: "var(--color-sched)" },
-  { id: "apps",     label: "应用", icon: LayoutGrid,   color: "var(--color-sched)" },
-  { id: "wallet",   label: "钱包", icon: Wallet,       color: "var(--color-wallet)" },
-  { id: "power",    label: "电费", icon: Zap,          color: "var(--color-wallet)" },
-  { id: "settings", label: "设置", icon: Settings,     color: "var(--color-text-2)" },
+  // 9 项（M2.5 批次 4 追加课表）：总宽约 9×40 + 8×4 + 24 = 416px，
+  // 1280px 默认窗口下不溢出；磁吸/胶囊动画按 DOCK_ITEMS 遍历注册，无需额外适配。
+  { id: "today",     label: "今日", icon: SunMedium,      color: "var(--color-brand)" },
+  { id: "timetable", label: "课表", icon: CalendarRange,  color: "var(--color-sched)" },
+  { id: "info",      label: "资讯", icon: Newspaper,      color: "var(--color-info)" },
+  { id: "todo",      label: "待办", icon: ListChecks,     color: "var(--color-todo)" },
+  { id: "schedule",  label: "日程", icon: CalendarDays,   color: "var(--color-sched)" },
+  { id: "apps",      label: "应用", icon: LayoutGrid,     color: "var(--color-sched)" },
+  { id: "wallet",    label: "钱包", icon: Wallet,         color: "var(--color-wallet)" },
+  { id: "power",     label: "电费", icon: Zap,            color: "var(--color-wallet)" },
+  { id: "settings",  label: "设置", icon: Settings,       color: "var(--color-text-2)" },
 ];
 
 const MAGNETIC_RANGE = 80;

@@ -16,6 +16,8 @@
   --color-todo: #d9822b;       /* 域琥珀：待办 */
   --color-sched: #2b7dbf;      /* 域湖蓝：日程/会议 */
   --color-alert: #d9455b;      /* 低余额/告警 */
+  --color-aqua: #128a9c;       /* 课表色板扩展档：青（域色系扩展，M2.5） */
+  --color-rose: #c2477f;       /* 课表色板扩展档：玫紫（域色系扩展，M2.5） */
   --color-surface-2: #fbfafc;  /* 卡片内嵌区/骨架底 */
   --color-line-strong: rgb(31 27 41 / 0.10); /* hover 加深边线 */
 
@@ -112,6 +114,8 @@
   --color-todo: #eda45c;
   --color-sched: #5da3e0;
   --color-alert: #e56b7d;
+  --color-aqua: #4db6c7;       /* 课表色板扩展档：深主题提亮 */
+  --color-rose: #e284b3;
   --color-surface-2: #252230;
   --color-line-strong: rgb(255 255 255 / 0.14);
   /* 深档阴影：冷色系（深紫染）且减淡，避免灰底上发脏 */

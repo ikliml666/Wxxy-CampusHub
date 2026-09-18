@@ -23,7 +23,7 @@ use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use crate::infra::{state, timetable};
 use campus_portal::block_time_slots;
-use campus_schedule::model::{Course, CourseOverride, Timetable};
+use campus_schedule::model::{Course, CourseOverride, TimeSlot, Timetable};
 use campus_schedule::{current_week, diff_courses, parse_kb_response, parse_notice_text, Semester, NoticeConfidence};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -33,11 +33,38 @@ use tauri::State;
 /// 无会话时的约定文案（与 profile.rs / portal.rs 同口径）。
 const ERR_NO_SESSION: &str = "请先登录";
 
+/// get_timetable → data（批次 4 修订契约 §2.3）：课表本体 + 校本大节作息 +
+/// 当前教学周 + 今天。`slots` 是时间标签的唯一事实源（前端不得硬编码时间），
+/// `currentWeek` 为 None 表示未配置开学日或今天不在学期范围内。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimetableView {
+    pub timetable: Timetable,
+    pub slots: Vec<TimeSlot>,
+    pub current_week: Option<u32>,
+    /// 本机今天 "YYYY-MM-DD"
+    pub today: String,
+}
+
+/// 纯函数组装（便于单测）：周次口径与 [`parse_notice`] 一致
+/// （`campus_schedule::current_week`）。
+fn build_timetable_view(tt: Timetable, today: chrono::NaiveDate) -> TimetableView {
+    TimetableView {
+        slots: block_time_slots(),
+        current_week: current_week(today, &tt.config),
+        today: today.format("%Y-%m-%d").to_string(),
+        timetable: tt,
+    }
+}
+
 /// 本地课表读取（无入参）。
 #[tauri::command]
-pub async fn get_timetable() -> Result<CommandResult<Timetable>, String> {
+pub async fn get_timetable() -> Result<CommandResult<TimetableView>, String> {
     let dir = state::data_dir()?;
-    Ok(CommandResult::ok(timetable::load_timetable(&dir)))
+    Ok(CommandResult::ok(build_timetable_view(
+        timetable::load_timetable(&dir),
+        chrono::Local::now().date_naive(),
+    )))
 }
 
 // ---------------- M2.5 批次 2：导入 / 手动课程 / ICS ----------------
@@ -713,5 +740,48 @@ mod tests {
         assert_eq!(tt.overrides[0].source_notice_id, high.notice_id);
         assert_eq!(tt.overrides[0].new_day, high.new_day);
         assert_eq!(tt.overrides[0].new_position, high.new_position);
+    }
+
+    // ---------------- 批次 4：TimetableView 组装 ----------------
+
+    /// 开学日 2026-09-07（周一）+ 今天 2026-09-17（周四）→ 第 2 周（与门户
+    /// 「第2周」实测一致）；slots = 校本 5 大节（时间标签唯一事实源）；
+    /// today 序列化为 "YYYY-MM-DD"。
+    #[test]
+    fn timetable_view_assembles_slots_week_and_today() {
+        let view = build_timetable_view(
+            fixture(),
+            NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
+        );
+        assert_eq!(view.current_week, Some(2));
+        assert_eq!(view.today, "2026-09-17");
+        assert_eq!(view.slots.len(), 5);
+        assert_eq!(view.slots[0].number, 1);
+        assert_eq!(view.slots[0].start_time, "08:00");
+        assert_eq!(view.slots[4].end_time, "20:10");
+        assert_eq!(view.timetable.courses.len(), 2);
+
+        // camelCase 序列化键（前端镜像契约）
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"currentWeek\":2"));
+        assert!(json.contains("\"timetable\":"));
+    }
+
+    /// 未配置开学日 → currentWeek=null（前端据此提示先设置开学日）；
+    /// 今天越出学期范围（第 0 周）同样为 null。
+    #[test]
+    fn timetable_view_current_week_none_without_anchor() {
+        let view = build_timetable_view(
+            timetable_with(None, vec![]),
+            NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
+        );
+        assert_eq!(view.current_week, None);
+
+        // 开学 2026-09-07，今天 2026-09-01（开学前）→ None
+        let view = build_timetable_view(
+            fixture(),
+            NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        );
+        assert_eq!(view.current_week, None);
     }
 }
