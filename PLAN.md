@@ -110,7 +110,7 @@
   - **鼠标点击链路已真机点验**（2026-09-18 收尾轮补齐）：给 WebView2 开远程调试端口 + CDP 触发真实 DOM 事件，逐项点验导入/详情浮层/手动添加/调课与停课/撤销/删除/作息编辑/ICS 导出/深色模式；仅「旧 localStorage 面板持久化升级场景」未测。方法见 `.codewiki/learnings/tauri-webview-ui-verification.md`
   - **作息表编辑 UI 已做**（§5.1 第 6 条「可编辑」）：课表页「作息」按钮 → 弹层按行编辑各大节起止时间、可增删行，保存落 `config.slots`、可一键恢复本校默认；网格行数不写死、ICS 展开同源
   - **ICS 导出**：交付形态已修正——原前端 Blob 下载在 WebView2 里静默失效（真机点验发现），改为后端写入 `dirs::download_dir()` 并回显路径；真机确认写出 23136 字节、82 个 VEVENT 的合法 iCalendar 文件
-  - **命令面 35 条**（M2.5 新增 10 条：`get_timetable` / `import_timetable` / `add_course_manual` / `update_course` / `delete_course` / `parse_notice` / `apply_override` / `revoke_notice` / `export_ics`）
+  - **命令面 35 条**（M2.5 新增 10 条：`get_timetable` / `import_timetable` / `add_course_manual` / `update_course` / `delete_course` / `parse_notice` / `apply_override` / `revoke_notice` / `export_ics` / `save_time_slots`）
 
 ### M3 · 一卡通 + 电费查询 ⬜
 - [ ] CAS→慧新E校 SSO 桥接换 token（`berserker-auth/cas/redirect/lyCas` 流程）
