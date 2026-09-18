@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-18 · 交接报告 HANDOFF.md（面向 M2 接手方）
+
+- **模块**：文档（无代码行为改动）：新增 `docs/HANDOFF.md`；`crates/campus-auth/tests/captcha_solve.rs` 注释同步；`.codewiki/` 索引与基线
+- **摘要**：为下一阶段（M2 门户各页 / M2.5 课表接线与 UI）接手方补写交接报告，含：
+  - 现状坐标：M0/M1 已交付验收、`campus-schedule` 算法内核就绪（12 测试）、M2 未动工（除登录面板外 8 个面板为占位）
+  - 仓库与协作现状：无远端、本地 ff 合并（不走 git-merge-push.sh）、`git add` 明确路径、凭据与验证码红线
+  - 代码地图（三 crate + tauri 接线 + 前端面板状态表）与分层约定（协议在 crates、IPC 契约 `CommandResult` 三态）
+  - 已打通链路可复用事实：CAS 全流程（含手动跟随重定向原因）、验证码方案与三分类指标、正方课表数据源（jwgl 端点/`oldzc` 位掩码）、慧新E校 `synAccessSource=app`
+  - 运行命令（全量测试/前端构建/tauri dev 与打包/live 测试/验证码样本重建与评测）、铁律 5 条、已知坑索引（指向 `.codewiki/learnings/`）
+  - 下一步切入点（建议先补门户业务接口侦察 + 建 `crates/campus-portal`）、M2.5 剩余项（含 `PanelId` 追加 `timetable` 需同步的三处）、未决风险表
+- **附带修正**：`captcha_solve.rs` 两处注释仍写"类内取均值"，而实现早已改为"每类保留最多 `PER_CLASS_LIMIT`(=10) 张样本补丁"（均值会使同类 NCC 落到阈值边缘、正确率实测跌至 54%），注释已同步；CodeWiki `cw index` + `cw meta update` 推进基线至 `4b58765`
+- **验证**：`cargo test --workspace` → 35 passed / 3 ignored / 0 failed；`tauri-app/frontend` `npm run build` → 通过（vite 6.4.3，JS 537.91 kB）；`cw status` → up to date
+- **遗留**：桌面窗口内用真实账号点一次登录尚未人工确认（live 测试只覆盖 Rust 协议层），已写入交接报告「未决与风险」首条
+
 ## 2026-09-17 · M0+M1 交付：脚手架 + CAS 登录闭环（含验证码自动识别，真实账号端到端打通）
 
 - **模块**：`crates/campus-auth/`（新）、`tauri-app/{frontend,src-tauri}`（新）、根 workspace、CodeWiki
