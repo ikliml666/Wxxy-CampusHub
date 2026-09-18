@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-09-18 · M2.5 收尾轮修复：ICS 导出改由后端写入下载目录（WebView2 不处理前端 Blob 下载）
+
+- **模块**：`tauri-app/src-tauri/src/commands/timetable.rs`、`tauri-app/frontend/src/panels/TimetablePanel.tsx`、`docs/superpowers/plans/2026-09-18-m2.5-timetable.md`（§2.3 命令表）、`.codewiki/`（learning 补节 + 模块文章）
+- **缺陷现象（真机验收发现）**：课表页「导出 ICS」点击后无任何反应——无提示、`%USERPROFILE%\Downloads` 无文件、全盘无新 `.ics`、页面无报错；CDP `Input.dispatchMouseEvent`（真实鼠标事件、带用户手势）重试同样无效
+- **根因**：Tauri/WebView2 默认不处理下载（`DownloadStarting` 未接管），前端 `URL.createObjectURL` + `a[download]` 静默失效——Blob 下载交付在桌面端不可用
+- **修法**：
+  1. 后端 `export_ics` 改为生成 ICS 后写入 `dirs::download_dir()` 下的「课表.ics」（已存在直接覆盖，不加时间戳后缀；取不到下载目录 / 写盘失败均 `CommandResult::err` 中文原因并附系统错误信息），返回写入的完整路径；写盘抽成纯函数 `write_ics_to(dir, text)` 并新增临时目录单测（断言固定文件名、内容含 `BEGIN:VCALENDAR`、覆盖语义）；`build_ics` 纯函数未动
+  2. 前端 `exportIcs()` 删除 Blob / `createObjectURL` / `revokeObjectURL` / 动态 `<a>` 段，改为调命令后在既有提示位显示「已导出到 <路径>」或错误原因
+  3. 契约 §2.3 `export_ics` 行同步改写并注明根因；CodeWiki learning 文章补「WebView2 不处理下载：不要用 `a[download]` 交付文件」节
+- **验证**：`cargo test --workspace` → **153 passed / 0 failed / 4 ignored**（基线 152 + 新增写盘单测 1）；`npx tsc --noEmit` 0 错误；`npm run build` 通过
+- **遗留**：真实下载目录的落盘效果未真机点验（本轮无 UI 注入手段），写盘语义已由临时目录单测覆盖
+
 ## 2026-09-18 · M2.5 收尾轮：作息时间表可编辑 + 停课 override 渲染口径冻结
 
 - **模块**：`crates/campus-schedule`（model/weeks）、`tauri-app/src-tauri`（commands/timetable、infra/timetable、lib.rs）、`tauri-app/frontend`（TimetablePanel.tsx、types.ts）、`docs/`（计划 §2.1/§2.3/§2.5.1 契约追加）、`.codewiki/`

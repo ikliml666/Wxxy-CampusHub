@@ -65,3 +65,13 @@ curl -s http://localhost:1420/src/components/DockNav.tsx | grep -o 'id: *"[a-z]*
 
 受影响**只有**「鼠标点击 → IPC 命令」这一环；该环只能用源码级证据（dev server 下发的模块中确认存在
 `onClick: doImport`）加上命令本身的单测覆盖，须在汇报里如实标注未点验。
+
+## WebView2 不处理下载：不要用 `a[download]` 交付文件（2026-09-18 M2.5 收尾轮）
+
+**现象**：课表页「导出 ICS」点击后完全无反应——无提示、`%USERPROFILE%\Downloads` 无文件、全盘搜不到新 `.ics`、页面无报错。用 CDP `Input.dispatchMouseEvent`（真实鼠标事件、带用户手势）再点一次仍无文件，**排除「缺用户手势」**。
+
+**根因**：Tauri/WebView2 默认不接管下载（`DownloadStarting` 事件未被处理），前端 `URL.createObjectURL(new Blob(...))` + `a[download]` + `a.click()` 这条浏览器惯用路在桌面端 WebView2 里**静默失效**——不报错、不落盘、无任何反馈。
+
+**修法（已落地）**：文件交付改由后端命令落盘——`export_ics` 生成 ICS 后用 `dirs::download_dir()` 写入「课表.ics」（覆盖写，`std::fs::write` 失败透出系统错误），命令返回写入的完整路径，前端只把路径显示在既有提示位。写盘逻辑抽成纯函数 `write_ics_to(dir, text)`，用 `%TEMP%` 临时目录单测覆盖（不依赖真实下载目录）。
+
+**通用规则**：Tauri 桌面端凡「前端生成文件交给用户」的场景（ICS / CSV / 报告导出等），不要走 Blob 下载——在后端命令里写 `dirs::download_dir()`（或用 tauri-plugin-dialog 让用户选目录）并回显路径。验收时看文件是否真的出现在下载目录，不要只看前端无报错。

@@ -8,8 +8,9 @@
 //!   `parse_kb_response` → [`campus_schedule::diff_courses`] 合并旧库 → 落库。
 //! - 手动课程三命令：本地数据操作（无需登录）；`source=Manual` 的课程不参与
 //!   导入 diff（冻结契约 §2.4）。
-//! - [`export_ics`]：展开式 VEVENT 文本（**不落盘**，前端 Blob 下载）。时间取
-//!   校本大节作息 `campus_portal::block_time_slots`（与今日页同一事实来源），
+//! - [`export_ics`]：生成展开式 VEVENT 后**由后端写入用户下载目录**并返回写入
+//!   路径（2026-09-18 真机验收：WebView2 不处理下载，前端 Blob 交付不可用）。
+//!   时间取校本大节作息 `campus_portal::block_time_slots`（与今日页同一事实来源），
 //!   日期由 `semester_start_date` + 周次 + 星期推出。
 //! - [`parse_notice`] / [`apply_override`] / [`revoke_notice`]（批次 3）：解析
 //!   纯函数在 campus_schedule::notice（契约 §2.5），本层只做接线——本地课表 +
@@ -30,6 +31,7 @@ use campus_schedule::model::{Course, CourseOverride, TimeSlot, Timetable};
 use campus_schedule::{current_week, diff_courses, parse_kb_response, parse_notice_text, Semester, NoticeConfidence};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tauri::State;
 
@@ -426,13 +428,30 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
     Ok(out)
 }
 
-/// 导出 ICS 文本（不落盘，前端 Blob 下载）。
+/// 把 ICS 文本写入 `dir` 下固定文件名「课表.ics」（已存在直接覆盖），返回完整路径。
+fn write_ics_to(dir: &Path, text: &str) -> Result<PathBuf, String> {
+    let path = dir.join("课表.ics");
+    std::fs::write(&path, text).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
+    Ok(path)
+}
+
+/// 导出 ICS：生成文本后写入用户下载目录并返回写入的完整路径（WebView2 不处理
+/// 前端 Blob 下载，交付必须由后端落盘）。
 #[tauri::command]
 pub async fn export_ics() -> Result<CommandResult<String>, String> {
     let dir = state::data_dir()?;
     let tt = timetable::load_timetable(&dir);
-    match build_ics(&tt) {
-        Ok(text) => Ok(CommandResult::ok(text)),
+    let text = match build_ics(&tt) {
+        Ok(t) => t,
+        Err(e) => return Ok(CommandResult::err(&e)),
+    };
+    let Some(dl_dir) = dirs::download_dir() else {
+        return Ok(CommandResult::err(
+            "无法定位系统下载目录（当前平台不受支持或目录不可用）",
+        ));
+    };
+    match write_ics_to(&dl_dir, &text) {
+        Ok(path) => Ok(CommandResult::ok(path.display().to_string())),
         Err(e) => Ok(CommandResult::err(&e)),
     }
 }
@@ -728,6 +747,20 @@ mod tests {
         assert!(ics.starts_with("BEGIN:VCALENDAR\r\n"));
         assert!(ics.ends_with("END:VCALENDAR\r\n"));
         assert!(!ics.contains("LOCATION:D4,207"));
+    }
+
+    /// 写盘 helper：不依赖真实下载目录，在临时目录断言固定文件名、内容与覆盖语义。
+    #[test]
+    fn write_ics_to_overwrites_at_target_path() {
+        let dir = std::env::temp_dir().join(format!("campushub-ics-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_ics_to(&dir, "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n").unwrap();
+        assert_eq!(path.file_name().unwrap(), "课表.ics");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("BEGIN:VCALENDAR"));
+        // 已存在 → 直接覆盖，不加时间戳后缀
+        write_ics_to(&dir, "overwritten").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "overwritten");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `semester_start_from_info`：门户 `"YYYYMMDD"` 解析与坏数据防御。

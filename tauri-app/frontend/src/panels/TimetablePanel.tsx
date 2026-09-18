@@ -811,18 +811,15 @@ export function TimetablePanel() {
   const exportIcs = async () => {
     setIcsBusy(true);
     setIcsMsg(null);
+    // WebView2 不处理下载（DownloadStarting 未接管），前端 Blob/a[download] 不可用，
+    // 交付由后端 export_ics 直接写入下载目录，这里只展示结果。
     const r = await invokeCommand<string>("export_ics");
     setIcsBusy(false);
-    if (!r.success || typeof r.data !== "string") {
+    if (r.success && typeof r.data === "string") {
+      setIcsMsg(`已导出到 ${r.data}`);
+    } else {
       setIcsMsg(r.message ?? "导出失败");
-      return;
     }
-    const url = URL.createObjectURL(new Blob([r.data], { type: "text/calendar;charset=utf-8" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "课表.ics";
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   const parseNotice = async () => {
