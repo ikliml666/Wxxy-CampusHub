@@ -6,6 +6,19 @@
 
 ---
 
+## 〇、2026-09-18 补记（会话 `sess-c2ed9b35`，交接点后已并入 master）
+
+本轮做的是**壳层与服务形态**，不是 M2 业务页，接手 M2 前请先读这四条：
+
+1. **GUI 真机登录欠账已清**：`tauri dev` 用真实账号跑通「冷启动游客态 → 账号菜单 → 已保存账号免密登录 → 学校头像同步 + 门户真实姓名落库 → 退出回落游客态」（正文第九节首条风险关闭）。
+2. **开场形态变了**：登录不再是门禁——`App.tsx` 恒渲染壳，`check_session` 非阻塞；登录入口在右上角账号胶囊 / 今日页引导条 / 各页空态按钮，统一弹层（`components/LoginDialog.tsx`；原 `panels/LoginPanel.tsx` 已删除）。登录态读 `stores/authStore.ts`（`status: unknown|guest|authed`），头像三态 本地>官方>首字（游客不展示账号头像）。
+3. **命令面 7 → 12 条**：新增 `get_avatar`/`set_avatar`/`clear_avatar`/`sync_official_avatar`/`remove_account`；`list_accounts` 增 `displayName`；`campus-auth` 新增门户资料接口（`portal_login_info` 取官方头像、`portal_user_profile` 取真实姓名/院系）。
+4. **M2 直接可用**：`docs/design/frontend-design.md` **附录 C** 记了本轮门户实机复查结论与**首页接口全景**（资讯/待办/课表/学期/消息/应用商店等实测 URL）；8 个面板已重做成「游客空态 + 数据接入中」两态骨架，接数据即用。
+
+> 正文（一至十节）仍是 M0/M1/M2.5 的准确描述，除「第九节首条风险」与「面板/命令面计数」外无需更正。
+
+---
+
 ## 一、一句话现状
 
 **M0（脚手架）与 M1（CAS 登录 + 账号管理）已交付并验收完毕**，真实账号 CAS 端到端登录已跑通（CAS 签发 TGT+ST → 手动跟随 SSO 302 链 → 门户种下会话 Cookie → `portal_probe() == Alive`）；**M2.5 的算法内核（`campus-schedule` crate）也已移植完成**（12 个单元测试全过），但课表 UI 与教务导入接线尚未开始。M2（门户各业务页）**尚未动工**——目前除登录面板外的 8 个面板全是「建设中」占位。
