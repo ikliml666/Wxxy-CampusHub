@@ -40,6 +40,7 @@ pub fn run() {
             commands::portal::get_app_catalog,
             commands::portal::get_schedule_classify,
             commands::portal::get_schedule_month,
+            commands::portal::get_schedule_day_counts,
             commands::portal::open_app,
         ])
         .run(tauri::generate_context!())

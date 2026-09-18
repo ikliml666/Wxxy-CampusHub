@@ -7,6 +7,7 @@
 //!   `code=="0"` —— 见 [`schedule_data`]（失败形态实测 code 为数字、message 键名
 //!   会变成 `message`，两者都兼容）。
 
+use crate::access::classify_app_access;
 use crate::{
     AppGroup, AppItem, CourseBrief, InfoColumn, InfoItem, InfoPage, PortalError, ScheduleClassify,
     ScheduleDayCount, ScheduleEvent, SemesterInfo, TodoItem, TodoPage, TodoTab, WalletSummary,
@@ -495,12 +496,16 @@ fn jbool01(v: &serde_json::Value) -> bool {
 /// 单个门户应用条目 → [`AppItem`]（缺 appId 的条目无稳定 key，由调用方跳过）。
 fn app_item_from(it: &serde_json::Value) -> Option<AppItem> {
     let id = it.get("appId").and_then(jstr).filter(|s| !s.is_empty())?;
+    let link = it.get("appLink").and_then(jstr).unwrap_or_default();
     Some(AppItem {
         id,
         name: it.get("appName").and_then(jstr).unwrap_or_default(),
         // data URL 由 client 层带会话代拉后填充，解析阶段恒 None
         icon_url: None,
-        link: it.get("appLink").and_then(jstr).unwrap_or_default(),
+        // 可达性按附录 A 实测表推导（不信任 isCas——附录 A 有标 cas 实则
+        // 停自家登录页/仅 WebVPN 可达的）；表未命中回落 External
+        access: classify_app_access(&link),
+        link,
         is_cas: it.get("isCas").map(jbool01).unwrap_or(false),
         show_type: it.get("showType").and_then(jstr).unwrap_or_default(),
         icon_id: it.get("appIcon").and_then(jstr).filter(|s| !s.is_empty()),
@@ -623,6 +628,7 @@ pub fn parse_schedule_events(
                     .unwrap_or_default(),
                 color: known.map(|c| c.color.clone()).unwrap_or_default(),
                 classify_code: code,
+                extra: None,
             })
         })
         .collect())
@@ -646,6 +652,171 @@ pub fn parse_schedule_day_counts(body: &str) -> Result<Vec<ScheduleDayCount>, Po
             })
         })
         .collect())
+}
+
+// ---------------- M2 遗留 A2：校级会议日程并入 ----------------
+
+/// 教学周次 → 中文数字（1..=99；常规学期 1-19，越界留余量）。0 或 >99 → None。
+///
+/// 用于构造会议卡查询标题 `第<中文数字>周会议日程安排表`（DJZ 参数实测按周
+/// 过滤，2026-09-18 四组对照：第二周→6 条、第一周→3 条、第九周→0 条、无周次
+/// 前缀→0 条）。示例：1→一、10→十、12→十二、20→二十、21→二十一。
+pub fn week_to_chinese(week: u32) -> Option<String> {
+    const DIGITS: [&str; 10] = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    if week == 0 || week > 99 {
+        return None;
+    }
+    let tens = week / 10;
+    let ones = (week % 10) as usize;
+    let tens_part = match tens {
+        0 => String::new(),
+        1 => "十".to_string(),
+        _ => format!("{}十", DIGITS[tens as usize]),
+    };
+    Some(format!("{tens_part}{}", DIGITS[ones]))
+}
+
+/// 会议条目自然语言时刻（`SJ`，实测如「下午3:00」）→ 24h `(h, m)`。
+///
+/// 全角冒号归一；「下午/晚上」且 h<12 → +12（「下午12:00」保持中午 12 点），
+/// 「上午/凌晨/中午」保持原值。解析不出（缺冒号 / 越界 / 非数字）→ None，
+/// 调用方按全天处理，**不伪造时刻**。
+pub fn parse_meeting_time(sj: &str) -> Option<(u8, u8)> {
+    // 跳过前导非数字（「下午3」→ 3）后取段首连续数字（「00-4」→ 0，
+    // 容忍「3:00-4:30」区间形态取开始时刻）
+    let leading = |s: &str| -> Option<u8> {
+        let digits = s.trim_start_matches(|c: char| !c.is_ascii_digit());
+        let n = digits.chars().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return None;
+        }
+        digits[..n].parse().ok()
+    };
+    let s = sj.trim().replace('：', ":");
+    let (h, m) = s.split_once(':')?;
+    let h: u8 = leading(h.trim())?;
+    let m: u8 = leading(m.trim())?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let h = if (sj.contains("下午") || sj.contains("晚上")) && h < 12 {
+        h + 12
+    } else {
+        h
+    };
+    Some((h, m))
+}
+
+/// 会议日期（`NF` 年份 + `RQ` 实测如「9月15日」）→ 本地当日
+/// `[00:00:00.000, 23:59:59.999]` 毫秒区间。解析不出 → None（调用方跳过条目：
+/// 无日期锚点无法落时间轴）。
+pub fn parse_meeting_day_range(nf: &str, rq: &str) -> Option<(u64, u64)> {
+    use chrono::TimeZone;
+    let (m, d) = rq.split_once('月')?;
+    let month: u32 = m.trim().parse().ok()?;
+    let day: u32 = d.trim().trim_end_matches('日').trim().parse().ok()?;
+    let year: i32 = nf.trim().parse().ok()?;
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    let start = chrono::Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
+        .single()?;
+    let end = chrono::Local
+        .from_local_datetime(&date.and_hms_opt(23, 59, 59)?)
+        .single()?;
+    Some((start.timestamp_millis() as u64, end.timestamp_millis() as u64 + 999))
+}
+
+/// 教学周次推算：`start_ms`（前端所取周/月区间的起点毫秒）落在第几教学周。
+/// `start_date` 为学期开学日 `"YYYYMMDD"`（开学当周 = 第 1 周）；开学前 → None。
+pub fn teaching_week_of(start_ms: u64, start_date: &str) -> Option<u32> {
+    use chrono::TimeZone;
+    let y: i32 = start_date.get(0..4)?.parse().ok()?;
+    let m: u32 = start_date.get(4..6)?.parse().ok()?;
+    let d: u32 = start_date.get(6..8)?.parse().ok()?;
+    let semester_start = chrono::NaiveDate::from_ymd_opt(y, m, d)?;
+    let local = chrono::Local
+        .timestamp_millis_opt(start_ms as i64)
+        .single()?;
+    let diff = (local.date_naive() - semester_start).num_days();
+    (diff >= 0).then_some(diff as u32 / 7 + 1)
+}
+
+/// 解析会议卡接口 `api/uppexcard/ext/dynamicData/<内部主机>/ZCHY?DJZ=<周次会议
+/// 日程标题>`（门户信封；条目字段 HYMC/ZCR/CBDW/DD/RQ/SJ/ZJ/CXRY/NF/ZC，
+/// 2026-09-18 实测 6 条/页）。
+///
+/// 映射为 [`ScheduleEvent`]：title=HYMC、place=DD、classifyCode 固定
+/// `Default-Meeting`（名称/颜色由 `classify` 列表映射）；日期由 NF+RQ 推出，
+/// 时间由 SJ 转 24h——SJ 解析不出按**全天**（00:00-23:59），解析出则
+/// endMs=startMs（服务端只给开始时刻，不伪造结束时间，前端对等值显示单时刻）。
+/// NF/RQ 缺失或推不出日期的条目跳过。ZCR/CXRY/CBDW 非空段拼进 `extra`。
+/// id 用序号合成 `meeting-<i>`（服务端条目无稳定 id，仅当次渲染 key 用）。
+pub fn parse_meeting_events(
+    body: &str,
+    classify: &[ScheduleClassify],
+) -> Result<Vec<ScheduleEvent>, PortalError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| PortalError::Parse(format!("会议日程响应解析失败: {e}")))?;
+    let d = envelope_data(&v, "会议日程")?;
+    let empty = Vec::new();
+    let arr = d.as_array().unwrap_or(&empty);
+    let known = classify.iter().find(|c| c.code == "Default-Meeting");
+    let mut out = Vec::new();
+    for (i, it) in arr.iter().enumerate() {
+        let Some(title) = it.get("HYMC").and_then(jstr).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let (Some(nf), Some(rq)) = (
+            it.get("NF").and_then(jstr),
+            it.get("RQ").and_then(jstr),
+        ) else {
+            continue;
+        };
+        let Some((day_start, day_end)) = parse_meeting_day_range(&nf, &rq) else {
+            continue;
+        };
+        let (start_ms, end_ms) =
+            match it.get("SJ").and_then(jstr).as_deref().and_then(parse_meeting_time) {
+                Some((h, m)) => {
+                    let start = day_start + (u64::from(h) * 3600 + u64::from(m) * 60) * 1000;
+                    (start, start)
+                }
+                None => (day_start, day_end),
+            };
+        let extra: Vec<String> = [
+            ("主持人", it.get("ZCR").and_then(jstr)),
+            ("参会人员", it.get("CXRY").and_then(jstr)),
+            ("承办单位", it.get("CBDW").and_then(jstr)),
+        ]
+        .into_iter()
+        .filter_map(|(label, v)| {
+            v.filter(|s| !s.is_empty()).map(|s| format!("{label}：{s}"))
+        })
+        .collect();
+        out.push(ScheduleEvent {
+            id: format!("meeting-{i}"),
+            title,
+            start_ms,
+            end_ms,
+            place: it.get("DD").and_then(jstr).unwrap_or_default(),
+            classify_code: "Default-Meeting".to_string(),
+            classify_name: known
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "会议".to_string()),
+            color: known.map(|c| c.color.clone()).unwrap_or_default(),
+            extra: (!extra.is_empty()).then(|| extra.join(" · ")),
+        });
+    }
+    Ok(out)
+}
+
+/// 会议卡查询标题（`DJZ` 参数）：`第<中文数字>周会议日程安排表`。
+///
+/// 实测该参数**按周过滤**（2026-09-18 四组对照：第二周→6 条、第一周→3 条、
+/// 第九周→0 条、无周次前缀→0 条），周次取教学周（`teaching_week_of` 推算）；
+/// 0 / >99（`week_to_chinese` 表达不了）→ None（调用方按拉取失败降级）。
+pub fn meeting_query_title(week: u32) -> Option<String> {
+    Some(format!("第{}周会议日程安排表", week_to_chinese(week)?))
 }
 
 /// 图标字节 → MIME 猜测（魔数判断，不信任响应 Content-Type——文档库静态资源
@@ -1222,6 +1393,196 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(parse_schedule_day_counts(r#"{"code":500,"message":"系统错误"}"#).is_err());
+    }
+
+    // ---------- M2 遗留 A2：会议并入 ----------
+
+    #[test]
+    fn week_number_to_chinese_covers_regular_semester() {
+        assert_eq!(week_to_chinese(1).as_deref(), Some("一"));
+        assert_eq!(week_to_chinese(2).as_deref(), Some("二"));
+        assert_eq!(week_to_chinese(9).as_deref(), Some("九"));
+        assert_eq!(week_to_chinese(10).as_deref(), Some("十"));
+        assert_eq!(week_to_chinese(11).as_deref(), Some("十一"));
+        assert_eq!(week_to_chinese(19).as_deref(), Some("十九"));
+        assert_eq!(week_to_chinese(20).as_deref(), Some("二十"));
+        assert_eq!(week_to_chinese(21).as_deref(), Some("二十一"));
+        assert_eq!(week_to_chinese(99).as_deref(), Some("九十九"));
+        assert_eq!(week_to_chinese(0), None);
+        assert_eq!(week_to_chinese(100), None);
+    }
+
+    #[test]
+    fn meeting_time_parses_natural_language_to_24h() {
+        // 实测形态「下午3:00」→ 15:00
+        assert_eq!(parse_meeting_time("下午3:00"), Some((15, 0)));
+        assert_eq!(parse_meeting_time("上午9:30"), Some((9, 30)));
+        assert_eq!(parse_meeting_time("晚上7:30"), Some((19, 30)));
+        // 24h 原样；全角冒号归一；「下午12:00」保持中午
+        assert_eq!(parse_meeting_time("14:00"), Some((14, 0)));
+        assert_eq!(parse_meeting_time("9：15"), Some((9, 15)));
+        assert_eq!(parse_meeting_time("下午12:00"), Some((12, 0)));
+        assert_eq!(parse_meeting_time("下午15:05"), Some((15, 5)));
+        // 解析不出 → None（调用方按全天，不伪造）
+        assert_eq!(parse_meeting_time("下午三点"), None);
+        assert_eq!(parse_meeting_time("待定"), None);
+        assert_eq!(parse_meeting_time("25:00"), None);
+        assert_eq!(parse_meeting_time("12:60"), None);
+        assert_eq!(parse_meeting_time(""), None);
+    }
+
+    #[test]
+    fn meeting_day_range_roundtrips_local_date() {
+        use chrono::{Datelike, TimeZone};
+        let (s, e) = parse_meeting_day_range("2026", "9月15日").unwrap();
+        assert_eq!(e - s, 86_399_999);
+        let d = chrono::Local.timestamp_millis_opt(s as i64).single().unwrap();
+        assert_eq!((d.year(), d.month(), d.day()), (2026, 9, 15));
+        // 解析不出 → None
+        assert_eq!(parse_meeting_day_range("2026", "待通知"), None);
+        assert_eq!(parse_meeting_day_range("xxxx", "9月15日"), None);
+        assert_eq!(parse_meeting_day_range("2026", "13月40日"), None);
+    }
+
+    #[test]
+    fn teaching_week_counts_from_semester_start() {
+        use chrono::{NaiveDate, TimeZone};
+        let ms = |(y, m, d): (i32, u32, u32)| {
+            chrono::Local
+                .from_local_datetime(&NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(0, 0, 0).unwrap())
+                .single()
+                .unwrap()
+                .timestamp_millis() as u64
+        };
+        // 开学日 2026-09-07（周一）为第 1 周
+        assert_eq!(teaching_week_of(ms((2026, 9, 7)), "20260907"), Some(1));
+        assert_eq!(teaching_week_of(ms((2026, 9, 13)), "20260907"), Some(1));
+        assert_eq!(teaching_week_of(ms((2026, 9, 14)), "20260907"), Some(2));
+        assert_eq!(teaching_week_of(ms((2026, 9, 20)), "20260907"), Some(2));
+        // 开学前 / 坏参数
+        assert_eq!(teaching_week_of(ms((2026, 9, 6)), "20260907"), None);
+        assert_eq!(teaching_week_of(ms((2026, 9, 14)), "2026090"), None);
+    }
+
+    /// 会议卡 fixture（门户信封；内容全脱敏：示例会议/示例地点/张三，
+    /// 不含真实会议名/人名/单位）。
+    const MEETING_FIXTURE: &str = r#"{"meta":{"success":true,"statusCode":200,"message":"ok"},"data":[
+        {"HYMC":"示例会议一","ZCR":"张三","CBDW":"示例单位","DD":"示例楼 201","RQ":"9月15日","SJ":"下午3:00","ZJ":"星期二","CXRY":"示例人员","NF":"2026","ZC":"第二周会议","DJZ":"第二周会议日程安排表"},
+        {"HYMC":"示例会议二","ZCR":"","CBDW":"","DD":"","RQ":"9月16日","SJ":"时间待定","ZJ":"星期三","CXRY":"","NF":"2026","ZC":"第二周会议","DJZ":"第二周会议日程安排表"},
+        {"HYMC":"缺日期的坏条目","ZCR":"张三","DD":"示例楼","RQ":"","SJ":"下午3:00","NF":"2026"}
+    ]}"#;
+
+    #[test]
+    fn meeting_events_map_fields_and_degrade_gracefully() {
+        let cs = parse_schedule_classify(SCHEDULE_CLASSIFY_FIXTURE).unwrap();
+        let evs = parse_meeting_events(MEETING_FIXTURE, &cs).unwrap();
+        // 缺日期（RQ 空）的条目跳过
+        assert_eq!(evs.len(), 2);
+        let a = &evs[0];
+        assert_eq!(a.id, "meeting-0");
+        assert_eq!(a.title, "示例会议一");
+        assert_eq!(a.place, "示例楼 201");
+        assert_eq!(a.classify_code, "Default-Meeting");
+        assert_eq!(a.classify_name, "会议");
+        assert_eq!(a.color, "#62b7fd");
+        // 「下午3:00」→ 当日 15:00 开始；服务端无结束时刻 → endMs=startMs
+        let (ds, _de) = parse_meeting_day_range("2026", "9月15日").unwrap();
+        assert_eq!(a.start_ms, ds + 15 * 3_600_000);
+        assert_eq!(a.end_ms, a.start_ms);
+        // 附加信息拼接（非空段）
+        assert_eq!(a.extra.as_deref(), Some("主持人：张三 · 参会人员：示例人员 · 承办单位：示例单位"));
+        // SJ 解析不出 → 全天（当日 00:00-23:59:59.999）；附加信息全空 → extra None
+        let b = &evs[1];
+        let (ds2, de2) = parse_meeting_day_range("2026", "9月16日").unwrap();
+        assert_eq!(b.start_ms, ds2);
+        assert_eq!(b.end_ms, de2);
+        assert_eq!(b.extra, None);
+        // 空数据 / 信封失败 / 非法 JSON
+        assert!(parse_meeting_events(r#"{"meta":{"success":true},"data":[]}"#, &cs)
+            .unwrap()
+            .is_empty());
+        assert!(parse_meeting_events(r#"{"meta":{"success":false}}"#, &cs).is_err());
+        assert!(parse_meeting_events("not json", &cs).is_err());
+    }
+
+    /// 「不信任 isCas」：门户标 cas（"1"）但可达性表归 webvpn → 以表为准。
+    #[test]
+    fn access_overrides_portal_iscas() {
+        let webvpn = app_item_from(&serde_json::json!({
+            "appId": "app-tsg", "appName": "示例镜像库",
+            "appLink": "https://tsgcnki.cwxu.edu.cn/", "isCas": "1"
+        }))
+        .unwrap();
+        assert_eq!(webvpn.access, crate::access::AppAccess::Webvpn);
+        let cas = app_item_from(&serde_json::json!({
+            "appId": "app-wf", "appName": "示例文献库",
+            "appLink": "https://www.wanfangdata.com.cn/", "isCas": 1
+        }))
+        .unwrap();
+        assert_eq!(cas.access, crate::access::AppAccess::Cas);
+        // 链接解析失败 → 保守默认 external
+        let bad = app_item_from(&serde_json::json!({
+            "appId": "app-bad", "appLink": "", "isCas": "0"
+        }))
+        .unwrap();
+        assert_eq!(bad.access, crate::access::AppAccess::External);
+    }
+
+    /// 回归（离线钉死 DJZ 标题构造）：第 N 周 → `第<中文数字>周会议日程安排表`。
+    #[test]
+    fn meeting_query_title_builds_week_headline() {
+        assert_eq!(
+            meeting_query_title(2).as_deref(),
+            Some("第二周会议日程安排表")
+        );
+        assert_eq!(
+            meeting_query_title(1).as_deref(),
+            Some("第一周会议日程安排表")
+        );
+        assert_eq!(
+            meeting_query_title(9).as_deref(),
+            Some("第九周会议日程安排表")
+        );
+        assert_eq!(meeting_query_title(0), None);
+        assert_eq!(meeting_query_title(100), None);
+    }
+
+    /// 回归（真机「会议 0 条」排查）：NF=2026、RQ=9月15日、SJ=下午3:00 的
+    /// 会议条目，其开始毫秒必须落在本地 [2026-09-14, 2026-09-21) 周区间内
+    ///——否则命令层的区间过滤会把本该显示的会议误丢（表现为静默 0 条）。
+    #[test]
+    fn meeting_event_falls_inside_week_range() {
+        use chrono::{NaiveDate, TimeZone};
+        let cs = parse_schedule_classify(SCHEDULE_CLASSIFY_FIXTURE).unwrap();
+        let local_ms = |(y, m, d): (i32, u32, u32)| {
+            chrono::Local
+                .from_local_datetime(
+                    &NaiveDate::from_ymd_opt(y, m, d)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap(),
+                )
+                .single()
+                .unwrap()
+                .timestamp_millis() as u64
+        };
+        // 本周（2026-09-18 实测周次 2）：周一 9/14 00:00 起、7 天（左闭右开）
+        let week_start = local_ms((2026, 9, 14));
+        let week_end = week_start + 7 * 86_400_000;
+        for (rq, sj) in [("9月15日", "下午3:00"), ("9月18日", "上午10:00")] {
+            let body = format!(
+                r#"{{"meta":{{"success":true,"statusCode":200,"message":"ok"}},"data":[
+                    {{"HYMC":"示例会议","ZCR":"张三","CBDW":"示例单位","DD":"示例楼 201","RQ":"{rq}","SJ":"{sj}","ZJ":"星期二","CXRY":"示例人员","NF":"2026","ZC":"第二周会议"}}
+                ]}}"#
+            );
+            let evs = parse_meeting_events(&body, &cs).unwrap();
+            assert_eq!(evs.len(), 1, "RQ={rq} 应解析出 1 条");
+            assert!(
+                evs[0].start_ms >= week_start && evs[0].start_ms < week_end,
+                "RQ={rq} 的开始毫秒 {} 应落在 [{week_start}, {week_end})",
+                evs[0].start_ms
+            );
+        }
     }
 
     // ---------- guess_image_mime（图标代拉的魔数判断） ----------

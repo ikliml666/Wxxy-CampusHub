@@ -8,10 +8,12 @@
 //! 敏感纪律：网关 JWT 与邮箱 `loginUrl`（内含 authkey）只在内存中使用，
 //! 不落盘、不写日志、不进文档、不返回给前端（解析结构体直接不定义该字段）。
 
+pub mod access;
 pub mod article;
 pub mod client;
 pub mod parse;
 
+pub use access::{classify_app_access, AppAccess};
 pub use article::{extract_article, is_allowed_info_url, is_auth_wall, is_http_url};
 pub use client::PortalClient;
 pub use parse::{
@@ -181,9 +183,12 @@ pub struct AppItem {
     pub icon_url: Option<String>,
     /// 服务端下发的应用链接（打开时仍经 [`is_allowed_info_url`] 域名白名单强制校验）。
     pub link: String,
-    /// `isCas == "1"`（CAS 单点登录类应用；当前打开策略不区分，契约保留字段）。
+    /// `isCas == "1"`（CAS 单点登录类应用；**不可全信**——可达性以此项为准）。
     pub is_cas: bool,
     pub show_type: String,
+    /// 可达性分类（按 [`access::classify_app_access`] 的附录 A 实测表推导；
+    /// 不信任门户 `isCas`，表未命中回落 `External`）。
+    pub access: AppAccess,
     /// 图标附件 id（`appIcon` UUID），仅协议层拉取图标用；`#[serde(skip)]`
     /// 不透传 IPC（前端只需要拼好的 data URL）。
     #[serde(skip)]
@@ -233,6 +238,9 @@ pub struct ScheduleEvent {
     pub classify_code: String,
     pub classify_name: String,
     pub color: String,
+    /// 附加信息（会议条目的主持人/参会人员/承办单位拼接文本；课表等其余来源
+    /// 为 None——契约的兼容扩展，前端详情卡有则展示）。
+    pub extra: Option<String>,
 }
 
 /// 每日日程计数（`getCountBetweenTime`，day 形如 `"2026-09-01"`；月视图角标用，

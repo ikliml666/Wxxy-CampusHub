@@ -126,15 +126,20 @@ export type PanelId =
 
 // ---------- M2 批次 3：应用页 / 日程页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
 
+/** 应用可达性（后端按附录 A 实测表按 host 推导，不信任门户 isCas；未命中回落 external）。 */
+export type AppAccess = "cas" | "webvpn" | "external" | "unavailable";
+
 /** 门户应用条目；iconUrl 为后端代拉并转好的 data URL，失败/无图标为 null。 */
 export interface AppItem {
   id: string;
   name: string;
   iconUrl: string | null;
-  /** 服务端下发的应用链接（open_app 仍经后端域名白名单校验） */
+  /** 服务端下发的应用链接（open_app 后端按协议白名单校验） */
   link: string;
   isCas: boolean;
   showType: string;
+  /** 可达性分类：cas=直达 / webvpn=需校园网或 WebVPN / external=外链 / unavailable=暂不可用 */
+  access: AppAccess;
 }
 
 /** 应用分组（部门维度，name 即部门名）。 */
@@ -167,9 +172,14 @@ export interface ScheduleEvent {
   classifyCode: string;
   classifyName: string;
   color: string;
+  /** 附加信息（会议的主持人/参会人员/承办单位拼接文本；其余来源为 null）。 */
+  extra: string | null;
 }
 
-/** 每日日程计数（月视图角标用，当前批次前端未消费）。 */
+/**
+ * 每日日程计数（月视图角标）。⚠️ bs-schedule 接口无分类过滤参数，计数为当日
+ * 全量日程数（如实呈现服务端计数）。
+ */
 export interface ScheduleDayCount {
   day: string;
   count: number;

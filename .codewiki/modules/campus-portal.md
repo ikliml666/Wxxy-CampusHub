@@ -6,6 +6,7 @@ source_files:
   - crates/campus-portal/src/client.rs
   - crates/campus-portal/src/parse.rs
   - crates/campus-portal/src/article.rs
+  - crates/campus-portal/src/access.rs
 tags:
   - portal
   - http
@@ -15,6 +16,8 @@ tags:
   - scraper
   - apps
   - schedule
+  - meeting
+  - access
   - icon
 ---
 
@@ -45,9 +48,9 @@ tags:
 - **批次 2 `InfoDetail { title, html: Option, needsBrowser, url }`**（`lib.rs:121-132`）：计划 §2.1 `{title, html}` 的兼容扩展，三分类结果——正常返回清洗后 HTML；`needsBrowser=true` 表示正文受官网鉴权保护（**正常返回，不是错误**），前端引导浏览器打开 `url`；网络/解析异常才走 Err。
 - **批次 2 待办**：`TodoTab { id, name, desc, count }` / `TodoItem { id, title, applicant, applyTime, source, node, urgency }` / `TodoPage`（`lib.rs:135-168`）。⚠️ 接口实际返回 6 个 tab（todo/done/apply/unread/read/focus），全量透传，前端按契约展示三个；`TodoItem` 字段形态**未实测**（账号无待办数据，`lib.rs:144-146` 注释），按多候选键宽松映射，真机出现数据后需校准。
 - 客户端方法：批次 1 三查询 `query_semester_info` / `query_wallet_summary` / `query_week_schedule`（`client.rs:155-167`）；批次 2 五查询 `query_info_columns`（`client.rs:170-172`）/ `query_info_list`（`client.rs:175-189`，`columnId` 拼接查询串前经 `is_safe_id` ASCII 字母数字校验，`client.rs:44-46`）/ `query_todo_tabs`（`client.rs:192-194`）/ `query_todo_list`（`client.rs:197-214`，`tabId` 白名单六值校验）/ `fetch_info_detail`（`client.rs:228-258`）。端点常量 `EP_*`（`client.rs:26-40`）。
-- **批次 3 应用 DTO**：`AppItem { id, name, iconUrl: Option, link, isCas, showType }` / `AppGroup { id, name, apps }`（部门维度，id=name）/ `AppCatalog { groups, pinned }`（计划 §2.1 `{groups}` 的兼容扩展：追加 `pinned` = `queryMyStore` 收藏条目）。`appIcon` UUID 以 `icon_id` 字段承载并 `#[serde(skip)]`——**不透传 IPC**，前端只消费拼好的 `iconUrl` data URL（`lib.rs:176-209`）。
-- **批次 3 日程 DTO**：`ScheduleClassify { name, code, color }` / `ScheduleEvent { id, title, startMs, endMs, place, classifyCode, classifyName, color }`（classifyName/color 由分类列表按 code 映射补全——明细的 `scheduleClassifyName` 实测可为 null，不可依赖）/ `ScheduleDayCount { day, count }`（月视图角标用，本批前端未消费，能力先落协议层）（`lib.rs:214-245`）。
-- **批次 3 四查询**：`query_app_catalog`（`client.rs:389-433`）/ `query_schedule_classify`（`client.rs:436-451`）/ `query_schedule_events`（`client.rs:457-476`）/ `query_schedule_day_counts`（`client.rs:479-491`）；图标通道 `app_icon_data_url`（`client.rs:230-276`）。详见下文「应用目录与图标代拉」「日程协议：bs-schedule 独立信封」两节。
+- **批次 3 应用 DTO**：`AppItem { id, name, iconUrl: Option, link, isCas, showType, access }` / `AppGroup { id, name, apps }`（部门维度，id=name）/ `AppCatalog { groups, pinned }`（计划 §2.1 `{groups}` 的兼容扩展：追加 `pinned` = `queryMyStore` 收藏条目）。`appIcon` UUID 以 `icon_id` 字段承载并 `#[serde(skip)]`——**不透传 IPC**，前端只消费拼好的 `iconUrl` data URL（`lib.rs:176-209`）。`access`（M2 遗留项新增，`lib.rs:191`）为可达性分类，**解析层按附录 A 实测表推导、不信任门户 isCas**（见下文「应用可达性元数据」节）。
+- **批次 3 日程 DTO**：`ScheduleClassify { name, code, color }` / `ScheduleEvent { id, title, startMs, endMs, place, classifyCode, classifyName, color, extra }`（classifyName/color 由分类列表按 code 映射补全——明细的 `scheduleClassifyName` 实测可为 null，不可依赖；`extra: Option<String>` 为 M2 遗留项新增，承载会议的主持人/参会人员/承办单位拼接文本，其余来源 None）/ `ScheduleDayCount { day, count }`（月视图角标；M2 遗留项批次已加 IPC 命令并被前端消费）（`lib.rs:214-246`）。
+- **批次 3 四查询 + 遗留项会议两方法**：`query_app_catalog`（`client.rs:389-433`）/ `query_schedule_classify`（`client.rs:436-451`）/ `query_schedule_events`（`client.rs:457-476`）/ `query_schedule_day_counts`（`client.rs:499-507`）；会议通道 `query_meetings_for_range`（`client.rs:528`，永不 Err 的并入入口）与 `query_meeting_events`（`client.rs:564`，按周缓存）；图标通道 `app_icon_data_url`（`client.rs:230-276`）。详见下文「应用目录与图标代拉」「日程协议：bs-schedule 独立信封」「校级会议并入」「应用可达性元数据」诸节。
 
 ## 正文抓取与清洗（article.rs，批次 2）
 
@@ -77,7 +80,26 @@ bs-schedule RPC 接口（`api/bs-schedule/innerPlaintext/scheduleRpcManage/*`）
 
 - `query_schedule_classify`（`client.rs:436-451`）：5 类静态数据（`Default-person`/`Default-Activity`/`Default-Meeting`/`Default-duty`/`Default-class`），**会话内缓存**（`classify: Arc<Mutex<...>>`，`client.rs:112`）仅首次真发请求。
 - `query_schedule_events`（`client.rs:457-476`）：区间明细 POST，body 字段与官方前端逐字一致（`scheduleName:null`、`publishStatus:1`、collaborative 空串）；先取分类列表，把 `classifyName`/`color` 按 code 映射补全进事件（明细的 `scheduleClassifyName` 实测可为 null）。
-- `query_schedule_day_counts`（`client.rs:479-491`）：每日计数（月视图角标），**本批无 IPC 命令、前端未消费**——能力先落协议层，属计划允许的裁剪。
+- `query_schedule_day_counts`（`client.rs:499-507`）：每日计数（月视图角标），M2 遗留项批次已加 IPC 命令 `get_schedule_day_counts` 并被前端消费。⚠️ 接口**无分类过滤参数**——计数为当日全量日程数（会议卡来源不计入），前端如实呈现，不伪造过滤后计数。
+
+## 校级会议并入（M2 遗留项，2026-09-18）
+
+会议卡数据源 `GET api/uppexcard/ext/dynamicData/10.1.90.34/ZCHY`（`EP_MEETING`，`client.rs:63`；`10.1.90.34` 是门户代理的内部主机），门户信封。**DJZ 参数按周过滤**（2026-09-18 实测四组：`第二周会议日程安排表`→6 条、`第一周…`→3 条、`第九周…`→0 条、无周次前缀→0 条），标题必须由教学周次构造。链路（协议与可观测化教训见 [[learnings/meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]）：
+
+- **周次推算** `teaching_week_of(start_ms, start_date)`（`parse.rs:731`）：区间起点毫秒回读本地日期，与学期开学日（"YYYYMMDD"）差值换算，开学当周 = 第 1 周，开学前 None。**标题构造** `meeting_query_title(week)`（`parse.rs:818`）= `第<中文数字>周会议日程安排表`，`week_to_chinese`（`parse.rs:664`，1–99）转中文数字。
+- **`query_meetings_for_range`**（`client.rs:528`）：并入入口、**永不 Err**——codes 未含 `Default-Meeting` / 学期信息失败 / 周次推算失败 / 拉取或解析失败 / 0 条 → 空切片，绝不影响课表日程与日历本身；结果按 `start_ms ∈ [start, end)` 区间过滤。命令层 `get_schedule_month` 在课表明细 Ok 分支里 extend（会议失败为空贡献）。
+- **`query_meeting_events`**（`client.rs:564`）：按教学周次**会话内缓存**（`meetings: HashMap<u32, Option<Vec<_>>>`，确认 0 条同样缓存、传输/解析失败不缓存下次重试——与图标缓存同一模式）；色值/名称由分类列表（会话内缓存）按 `Default-Meeting` 映射。中文 query 由 url 层自动 percent-encode（离线验证与官方请求逐字节一致）。
+- **字段映射与时间降级**：`parse_meeting_events`（`parse.rs:754`）——`HYMC`→title、`DD`→place、`ZCR`/`CXRY`/`CBDW` 拼进 `extra`；日期由 `NF`+`RQ`（"9月15日"）推出；时间 `parse_meeting_time`（`parse.rs:684`，"下午3:00"→24h：全角冒号归一、跳过前导非数字取段首数字、「下午/晚上」且 <12 加 12）——**解析不出按全天（00:00–23:59:59.999），解析出则 `endMs=startMs`**（服务端无结束时刻，不伪造）；`NF`/`RQ` 缺失条目跳过；日期区间由 `parse_meeting_day_range`（`parse.rs:713`）给出本地当日毫秒界。
+- **可观测化策略**：**只在降级/失败时输出**一行 `[meeting-diag]` stderr——学期信息失败（`client.rs:540`）/ 周次推算失败（`client.rs:546`）/ 请求失败（`client.rs:580`，错误消息含 URL 与 HTTP 状态）/ 解析失败（`client.rs:594`，含服务端 message 或 serde 类别）；**不含 JWT/cookie/响应体，成功路径零输出**（每失败一行、不重复打点）。此策略是「错误全吞成空 Vec 导致真机『会议 0 条』无法定位」的事后改进——教训：降级路径必须可观测，否则静默空与真 0 条不可区分。
+
+## 应用可达性元数据（access.rs，M2 遗留项，2026-09-18）
+
+门户 `isCas` 字段**不可全信**（设计文档附录 A：有标 cas 实则停自家登录页/仅 WebVPN 可达的），客户端自带按 host 归类的可达性表（附录 A 实测矩阵的代码化）：
+
+- **`AppAccess` 四分类**（`access.rs:16`，IPC 小写字符串）：`cas`（CAS 直达可用）/ `webvpn`（需校园网或 WebVPN）/ `external`（浏览器外链）/ `unavailable`（实测死链或需自有登录）。
+- **`ACCESS_TABLE`**（`access.rs:31`）：仅收录附录 A 有实测结论的 host——cas 8（whall/cxcyjy/jwgl/yd/一卡通 `10.3.100.110`/超星 fysso/lib/万方）、webvpn 7（jxzlbz1/cwbx/tsgcnki/tsgieee/tsgscid/tsgwebof/tsgkjyy）、unavailable 2（lw/cwxu.flyread.com.cn）。`sygl`/`tsggcszh`/`tsgzzwy`/`www1` 附录 A 无结论**不进表**；「联创文印/馆藏数字化」host 未出现在目录 30 条 appLink 中，不编造。
+- **`classify_app_access(link)`**（`access.rs:56`）：host 精确或子域后缀匹配（`strip_suffix` 防前缀伪造，`evilwhall.cwxu.edu.cn` 不命中）；URL 解析失败/无 host/未命中 → `external`（保守默认）。`app_item_from` 在解析层调用，`AppItem.access` 与门户 `isCas` 解耦（单测 `access_overrides_portal_iscas` 钉死「isCas=1 但表归 webvpn → 以表为准」）。
+- **边界**：可达性表是打开前的**信息与提示层**，不替代 URL 校验——抓取按域名白名单、打开按协议白名单的 G3 分工不变。WebVPN URL 包装未做（网关对未登录请求一律回落、明文包装无法验证），归 M4。
 
 ## 解析纯函数（parse.rs）
 
@@ -92,12 +114,15 @@ bs-schedule RPC 接口（`api/bs-schedule/innerPlaintext/scheduleRpcManage/*`）
   - `parse_info_list`（`parse.rs:355-386`）：`infoId` 或 `extLink` 缺失的条目跳过（无 id 无法标记已读、无 url 无法打开正文），其余字段缺失降级空串；分页字段经 `jnum_u32` 宽松 u32、原样透传。
   - `parse_todo_tabs`（`parse.rs:392-411`）：6 tab 全量透传；`selected`（筛选项定义）不在契约内，忽略。
   - `parse_todo_list`（`parse.rs:426-459`）：信封 `data` 内层又是 `data:[]` 条目数组；字段经 `todo_item_field`（`parse.rs:416-420`）按候选键序取第一个非空值（候选键为门户系统常见命名，真实字段形态未实测）；id 映射不出的条目跳过（前端列表需要稳定 key）。
-  - **批次 3 追加**：`parse_app_groups`（`parse.rs:516-543`，depName 兼容字符串/null，空 depName 按「未分组」保留——应用不因分组字段异常丢失；组序按接口原样不再二次排序）/ `parse_app_items`（`parse.rs:546-554`）/ `parse_schedule_classify`（`parse.rs:559-579`，缺 classifyCode 的条目跳过）/ `parse_schedule_events`（`parse.rs:589-629`，缺 id / 时间非数字跳过；分类 code 取 `typeCode` 为主、`scheduleClassifyCode` 兜底——明细无 `scheduleClassifyCode` 字段）/ `parse_schedule_day_counts`（`parse.rs:633-649`，缺 day 跳过）；公共件：`schedule_data` 信封判定（见上节）、`jbool01`（`parse.rs:489-493`，`"0"/"1"` 字符串或 0/1 数字 → bool）、`guess_image_mime`（见上节）。
+  - **批次 3 追加**：`parse_app_groups`（`parse.rs:516-543`，depName 兼容字符串/null，空 depName 按「未分组」保留——应用不因分组字段异常丢失；组序按接口原样不再二次排序）/ `parse_app_items`（`parse.rs:546-554`）/ `parse_schedule_classify`（`parse.rs:559-579`，缺 classifyCode 的条目跳过）/ `parse_schedule_events`（`parse.rs:589-629`，缺 id / 时间非数字跳过；分类 code 取 `typeCode` 为主、`scheduleClassifyCode` 兜底——明细无 `scheduleClassifyCode` 字段）/ `parse_schedule_day_counts`（`parse.rs:639-649`，缺 day 跳过）；公共件：`schedule_data` 信封判定（见上节）、`jbool01`（`parse.rs:489-493`，`"0"/"1"` 字符串或 0/1 数字 → bool）、`guess_image_mime`（见上节）。
+  - **M2 遗留项追加（会议 + 可达性）**：`week_to_chinese`（`parse.rs:664`）/ `parse_meeting_time`（`parse.rs:684`）/ `parse_meeting_day_range`（`parse.rs:713`）/ `teaching_week_of`（`parse.rs:731`）/ `parse_meeting_events`（`parse.rs:754`）/ `meeting_query_title`（`parse.rs:818`）——语义见「校级会议并入」节；可达性归类在 access.rs（非 parse），`app_item_from` 内接线。
 
-## 测试（37 个，全离线脱敏 fixture）
+## 测试（49 个，全离线脱敏 fixture）
 
 批次 1 的 13 个（`parse.rs`，含回归用例 `next_course_maps_column_pair_to_block_start` 钉「列对→大节起始时刻」口径）+ 批次 2 新增 14 个：`parse.rs` 8 个（栏目兜底补全与排序、`titleLocale` 宽松形态、列表过滤与降级、待办多候选键与空数据等）；`article.rs:282-456` 6 个——白名单放行与绕过形态（`cwxu.edu.cn.evil.com` / `cwxu.edu.cn@evil.com` / `ftp:` / `file:` / `javascript:` / query 藏域名）、正文提取与清洗断言（危险标签整棵剔除、事件属性/style 丢弃、相对转绝对、实体回写、外站 http(s) 链接保留而导航由前端容器拦截）、兜底选择器（无 h2 用 title、无 v_news_content 用 `[id^=vsb_content]`）、错误路径、auth wall 三依据判定与正常页不误判（含「正文含『系统提示』四字不误判」回归）。fixture 全部用占位值，真实姓名/学号/邮箱/authkey/JWT 不进测试样本。
 
 批次 3 新增 10 个：`parse.rs` 7 个（`app_groups_maps_dep_name_and_tolerant_field_types` 分组宽松形态、`app_groups_error_paths`、`app_items_maps_mystore_entries`、`schedule_classify_maps_code_name_color`、`schedule_events_map_classify_and_skip_timeless` 映射补全与跳过规则、`schedule_day_counts_maps_day_and_count`、`image_mime_guessed_by_magic_bytes` 魔数判定）；`article.rs` 3 个——`open_app_protocol_guard_allows_http_https_from_trusted_catalog`（协议白名单放行知网/万方/`10.3.100.110`/超星/虚拟图书馆等真实形态，域名不限）、`open_app_protocol_guard_rejects_non_http_schemes`（拒绝 `file:`/`javascript:`）、`open_in_browser_domain_whitelist_stays_tight`（**回归钉住**：域名白名单未因 `open_app` 的引入而放宽）。
+
+M2 遗留项新增 12 个：`parse.rs` 8 个——会议侧 `week_number_to_chinese_covers_regular_semester`（1–99 中文数字与越界）、`meeting_time_parses_natural_language_to_24h`（「下午3:00」等与解析不出降级）、`meeting_day_range_roundtrips_local_date`（本地毫秒界回读）、`teaching_week_counts_from_semester_start`（开学当周 = 第 1 周、开学前 None）、`meeting_events_map_fields_and_degrade_gracefully`（字段映射、extra 拼接、全天/单时刻降级、坏条目跳过）、`meeting_query_title_builds_week_headline`（**回归**：第 2 周 → `第二周会议日程安排表`）、`meeting_event_falls_inside_week_range`（**回归**：9月15日/18日条目毫秒必须落在本地周区间，防区间过滤误丢）、`access_overrides_portal_iscas`（**回归**：isCas=1 但表归 webvpn → 以表为准）；`access.rs` 4 个——精确与 IP 命中、子域命中与前缀伪造不命中、未命中回落 external（含解析失败/空串）、小写序列化。
 
 接线方式见 [[modules/campus-hub-tauri|接线层]] 的 `get_portal_overview` 与批次 2 的资讯/待办/浏览器打开命令；前端消费见 [[modules/frontend-shell|前端外壳]] InfoPanel/TodoPanel 两节。

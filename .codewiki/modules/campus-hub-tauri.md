@@ -28,9 +28,9 @@ tags:
 
 # 接线层（campus-hub src-tauri）
 
-`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-44`。
+`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-45`。
 
-## 24 条命令面
+## 25 条命令面
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -56,8 +56,9 @@ tags:
 | `open_in_browser` | `url` | 无（白名单强制 `*.cwxu.edu.cn`，非法域名 err「仅支持校园官网链接」；2026-09-18 M2 批次 2 新增） | `portal.rs:183-192` |
 | `get_app_catalog` | — | `AppCatalog{ groups, pinned }`（图标已由后端代拉为 data URL，失败条目 iconUrl 为 null；2026-09-18 M2 批次 3 新增） | `portal.rs:199-210` |
 | `get_schedule_classify` | — | `ScheduleClassify[]`（5 类，会话内后端已缓存） | `portal.rs:214-225` |
-| `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；命令名保留 month——当前前端只用于周区间取数） | `portal.rs:230-248` |
-| `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略） | `portal.rs:264-279` |
+| `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；**M2 遗留项起 codes 含 `Default-Meeting` 时并入会议卡日程**——失败空贡献不影响课表，失败时 stderr 有 `[meeting-diag]` 打点） | `portal.rs:229-261` |
+| `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25） | `portal.rs:264-281` |
+| `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略——可达性提示由前端按 `AppItem.access` 分级给出） | `portal.rs:284-301` |
 
 约定：业务失败一律 `Ok(CommandResult::err(中文消息))`，`Err(String)` 仅限 IPC 框架层错误（`auth.rs` 注释冻结此口径）。头像五命令统一返回 `AvatarData`（键恒在、值可 null，`profile.rs:33-38`）。
 
@@ -77,13 +78,14 @@ tags:
 - **`get_info_detail`**：透传协议层三分类（正常 HTML / `needsBrowser=true` 引导浏览器 / 真错误），`needsBrowser` 是正常返回非错误；正文已由 campus-portal 白名单清洗，命令层不做二次处理。背景见 [[learnings/cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级]]。
 - **CSP 配套**：`tauri.conf.json:26` 的 `img-src` 在 `'self' data:` 基础上增加 `https://*.cwxu.edu.cn http://*.cwxu.edu.cn`——内嵌正文官网图片显示的必要配套，域名仍限校园官网。
 
-## 应用/日程命令与 open_app（M2 批次 3，2026-09-18）
+## 应用/日程命令与 open_app（M2 批次 3 + 遗留项会议并入）
 
-四个新命令（`portal.rs:194-279`）延续批次 2 的单接口透传模式（`portal_of` helper + 无会话 err「请先登录」）：
+四个新命令（`portal.rs:194-301`）延续批次 2 的单接口透传模式（`portal_of` helper + 无会话 err「请先登录」）；遗留项批次补 `get_schedule_day_counts`（命令数 24 → 25）并扩展 `get_schedule_month`：
 
-- **`get_app_catalog`**（`portal.rs:199-210`）：透传协议层 `AppCatalog{groups, pinned}`，图标 data URL 已在协议层代拉拼好，命令层零处理。
-- **`get_schedule_classify`** / **`get_schedule_month`**（`portal.rs:214-248`）：日程分类与区间明细透传；`get_schedule_month` 对 `endMs <= startMs` 直接 err「日程区间无效」（前端 bug 防御，不透传服务端）。
-- **`open_app(url, isCas)`**（`portal.rs:264-279`）：校验用**协议白名单** `campus_portal::is_http_url`（仅 http/https），而非 `open_url_in_browser` 的域名白名单——该 URL 来自校方应用目录（受信来源）、后端不抓取它（无 SSRF 面）、只在系统浏览器打开；实测 30 条目录数据中 16 条为非校园域，域名白名单会把学校自己的合法应用全部拦掉。打开动作复用官方 `tauri-plugin-opener` Rust API。**`isCas` 是契约保留字段，当前不影响打开策略**（`let _ = is_cas`）；⚠️ WebVPN B 类包装未实现（WebVPN 会话属 M4，届时按 isCas/link 分类包装，doc comment 已记录残留）。分工原则与数据分布见 [[learnings/portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工]]。
+- **`get_app_catalog`**：透传协议层 `AppCatalog{groups, pinned}`，图标 data URL 已在协议层代拉拼好，命令层零处理；`AppItem.access` 可达性分类由协议层按附录 A 实测表推导，命令层透传。
+- **`get_schedule_classify` / `get_schedule_month`**：日程分类与区间明细透传；`get_schedule_month` 对 `endMs <= startMs` 直接 err「日程区间无效」（前端 bug 防御，不透传服务端）。**会议并入（M2 遗留项）**：课表明细 Ok 时 `extend(query_meetings_for_range(...))`——codes 含 `Default-Meeting` 才并入；会议链路任一环节失败为空贡献（**降级承诺：不影响课表日程与日历**），失败环节在协议层留 `[meeting-diag]` stderr 打点（只打失败，成功静默），命令层零打点。
+- **`get_schedule_day_counts`**（遗留项新增）：月视图角标取数，区间倒挂防御同上；透传 bs-schedule `getCountBetweenTime`（**无分类参数，计数为当日全量**）。
+- **`open_app(url, isCas)`**：校验用**协议白名单** `campus_portal::is_http_url`（仅 http/https），而非 `open_url_in_browser` 的域名白名单——该 URL 来自校方应用目录（受信来源）、后端不抓取它（无 SSRF 面）、只在系统浏览器打开；实测 30 条目录数据中 16 条为非校园域，域名白名单会把学校自己的合法应用全部拦掉。打开动作复用官方 `tauri-plugin-opener` Rust API。**`isCas` 是契约保留字段，当前不影响打开策略**（`let _ = is_cas`）——可达性提示由前端按 `AppItem.access` 分级给出（webvpn 提示后仍打开 / unavailable 只提示不打开）。⚠️ WebVPN B 类包装未实现（实测网关对未登录请求一律回落、明文包装无法验证，会话打通 + 包装 + A 类 CAS 直达签发归 M4）。分工原则与数据分布见 [[learnings/portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工]]。
 
 ## 登录重试状态机
 
@@ -139,4 +141,4 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 **90 passed / 3 ignored**（2026-09-18 M2 批次 3 校验；campus-auth 26 + campus-hub 15 + campus-schedule 12 + campus-portal 37，另有 3 个 ignored 待真机样本/凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约。`cargo test --workspace` 全量 **102 passed / 3 ignored**（2026-09-18 M2 遗留项批次校验；campus-auth 26 + campus-hub 15 + campus-schedule 12 + campus-portal 49，另有 3 个 ignored 待真机样本/凭据）。

@@ -43,7 +43,7 @@ tags:
 ## IPC 出口与契约类型（shared/）
 
 - `tauriApi.ts:8-17`：`invokeCommand<T>(cmd, args)` 是**唯一 IPC 出口**，invoke 抛错包装为 `{ success:false, message:String(e) }`，调用方只处理 CommandResult（契约详见 [[modules/campus-hub-tauri|接线层]] 与 [[_architecture|架构总览]]）。
-- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:128-179`：M2 批次 3 契约 6 接口（`AppItem` / `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
+- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:127-177`：M2 批次 3 契约 7 接口（`AppAccess` 四值联合类型 + `AppItem`（含 `access`，M2 遗留项新增）/ `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全，`extra` 承载会议附加信息）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` 冻结 8 项（today/info/todo/schedule/apps/wallet/power/settings），注释明示 M2.5 追加 `"timetable"` 时须同步改 types + DOCK_ITEMS + persist 兼容。
 - `cn.ts:3-5`：clsx + tailwind-merge 的 `cn()`。
 
 ## authStore：登录态单一来源（zustand + persist）
@@ -140,21 +140,24 @@ tags:
 - **列表**：`get_todo_list`（pageSize=10），标题 + 副行元信息 `metaLine`（申请人 · 申请时间 · 节点 · 紧急度，空段省略、全空回落 source 或 "—"，`TodoPanel.tsx:32-34,178-188`）；空态「暂无事项」（账号无待办时的常态）、错误可重试；分页同资讯页满页判断。
 - 分栏名称与待办数取 `get_todo_tabs`（增强信息），与列表取数解耦——分栏接口失败只影响 rail 文案与徽标，列表照常。
 
-## AppsPanel：应用页真实数据（M2 批次 3）
+## AppsPanel：应用页真实数据（M2 批次 3 + 遗留项可达性）
 
-- **四态**：`CatalogState`（`AppsPanel.tsx:13-18`，loading/ready/empty/error），`get_app_catalog` 单命令取数；empty = 分组与钉选全空。
-- **常用钉选区**：`AppCatalog.pinned` 横向置顶（`AppsPanel.tsx:181-190`），为空时整区不渲染。
-- **按部门分组网格**：`AppCatalog.groups` 按服务端组序渲染，组名即部门名（`AppsPanel.tsx:194` 起）；卡片 = 图标 + 应用名。
-- **图标**：`AppIcon` 有 `iconUrl`（后端代拉的 data URL）用 `<img>`，否则占位图标（`AppsPanel.tsx:20-27`）——不伪造图片。
-- **打开**：点击卡片经 `open_app`（`url` + `isCas`）在系统浏览器打开（`AppsPanel.tsx:119`），协议白名单与打开策略在后端强制；失败内联红字，不弹错误态。
+- **四态**：`CatalogState`（`AppsPanel.tsx:14-19`，loading/ready/empty/error），`get_app_catalog` 单命令取数；empty = 分组与钉选全空。
+- **常用钉选区**：`AppCatalog.pinned` 横向置顶，为空时整区不渲染。
+- **按部门分组网格**：`AppCatalog.groups` 按服务端组序渲染，组名即部门名；卡片 = 图标 + 应用名（+ 可达性徽标）。
+- **图标**：`AppIcon` 有 `iconUrl`（后端代拉的 data URL）用 `<img>`，否则占位图标——不伪造图片。
+- **可达性徽标与分级点击**（M2 遗留项，2026-09-18）：`accessBadge`（`AppsPanel.tsx:42`）按后端附录 A 实测表推导的 `item.access` 显示徽标——`webvpn` → 「需校园网/WebVPN」、`unavailable` → 「暂不可用」，cas/external 不标注；点击策略 `openApp`（`AppsPanel.tsx:147`）：**webvpn 提示后仍打开原链接**（校内无感直达、校外失败有解释）、**unavailable 只提示不打开**（实测死链/自有登录，打开无意义）、cas/external 直开不变；提示经 `accessHint` 内联条呈现（`AppsPanel.tsx:115,185`），与打开失败提示分开。
+- **打开**：点击卡片经 `open_app`（`url` + `isCas`）在系统浏览器打开，协议白名单与打开策略在后端强制；失败内联红字，不弹错误态。
 
-## SchedulePanel：日程页真实数据（M2 批次 3）
+## SchedulePanel：日程页真实数据（M2 批次 3 + 遗留项月视图/会议）
 
-- **周区间计算**：`weekRange(offset)`（`SchedulePanel.tsx:45`）取第 offset 周的 `[周一 00:00.000, 周日 23:59.999]` 本地毫秒区间；列序周一为 0（`getDay()` 周日=0 折算到第 6 列）。周切换器头部显示日期区间（如 `9.14 – 9.20`）。
-- **取数**：切周 / 切分类过滤触发 `get_schedule_month`（`startMs/endMs/codes`，`SchedulePanel.tsx:126-146`）；**全不选分类时不发请求**（服务端空 codes 语义未实测，前端规避）；事件四态（`SchedulePanel.tsx:23`，周内该筛选下无日程为 empty 态）。
-- **5 类彩色过滤 chips**：`get_schedule_classify` 取分类与**服务端色值**（chip 与日程块色标同源）；点击 toggle（`SchedulePanel.tsx:150`）；chips 自带加载骨架与出错重试（`SchedulePanel.tsx:210`）。
-- **落列与高亮**：事件按开始时间落列（`dayIndexOf`，`SchedulePanel.tsx:54`，跨周事件忽略）；**今日列高亮仅当前周生效**（`SchedulePanel.tsx:250,268`）。
-- **详情卡**：点击日程块在下方显示时间 / 地点 / 分类（`SchedulePanel.tsx:294` 起）；未选中时显示「点击日程块查看详情」操作提示（`SchedulePanel.tsx:318`）。
+- **周区间计算**：`weekRange(offset)`（`SchedulePanel.tsx:81`）取第 offset 周的 `[周一 00:00.000, 周日 23:59.999]` 本地毫秒区间；列序周一为 0（`getDay()` 周日=0 折算到第 6 列）。周切换器头部显示日期区间（如 `9.14 – 9.20`）。
+- **周/月双视图**（M2 遗留项）：头部 `periodSwitcher`（`SchedulePanel.tsx:272`）= 周/月 toggle + 箭头（`shiftPeriod` 按视图切周/切月，月标题 `YYYY年M月`）；切视图清详情。
+- **月视图与角标**：`monthGrid(offset)`（`SchedulePanel.tsx:63`）自然月网格（首格 = 当月 1 日所在周的周一，列序与周视图一致）；角标数据 `get_schedule_day_counts`（`SchedulePanel.tsx:213`，独立 `CountsState` 四态）——⚠️ **角标为当日全量日程数**（bs-schedule 计数接口无分类过滤参数，会议不计入，如实呈现不伪造）；今日格高亮；`gotoWeek`（`SchedulePanel.tsx:253`）点击某天跳到该天所在周（明细按当前过滤取数）；全不选分类时月视图同样不发请求（与周视图一致）；计数失败只降级角标（错误条 + 重试），日历不受影响。
+- **取数**：切周 / 切分类过滤触发 `get_schedule_month`（`startMs/endMs/codes`，周视图 effect `SchedulePanel.tsx:180`；**月视图不发明细请求**）；**全不选分类时不发请求**（服务端空 codes 语义未实测，前端规避）；事件四态与计数四态各自独立。
+- **5 类彩色过滤 chips**：`get_schedule_classify` 取分类与**服务端色值**（chip 与日程块色标同源）；点击 toggle；chips 自带加载骨架与出错重试。
+- **会议块与单时刻**：会议由后端并入 `get_schedule_month` 响应（`classifyCode=Default-Meeting`）；**服务端无结束时刻 → `endMs=startMs`**，`fmtTimeRange`（`SchedulePanel.tsx:98`）对等值显示单时刻（不伪造时间段）；详情卡 `extra` 非空时追加一行附加信息（主持人/参会人员/承办单位）。
+- **落列与高亮**：事件按开始时间落列（`dayIndexOf`，跨周事件忽略）；**今日列/今日格高亮仅当前周/当月生效**。
 
 ## DockNav：悬浮 Dock 导航（未改）
 

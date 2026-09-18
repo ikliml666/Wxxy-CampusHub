@@ -14,8 +14,8 @@ use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use campus_portal::{
     is_allowed_info_url, is_http_url, next_course_from_now, AppCatalog, CourseBrief, InfoColumn,
-    InfoDetail, InfoPage, PortalClient, ScheduleClassify, ScheduleEvent, SemesterInfo, TodoPage,
-    TodoTab, WalletSummary,
+    InfoDetail, InfoPage, PortalClient, ScheduleClassify, ScheduleDayCount, ScheduleEvent,
+    SemesterInfo, TodoPage, TodoTab, WalletSummary,
 };
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -226,6 +226,10 @@ pub async fn get_schedule_classify(
 
 /// 日程区间明细（周/月视图取数；startMs/endMs 为本地周（月）首尾毫秒时间戳，
 /// codes 为选中的分类 code 列表）。
+///
+/// **校级会议并入**（M2 遗留 A2）：codes 含「会议」分类时，按区间起点所在教学
+/// 周次并入会议卡日程（classifyCode=Default-Meeting，主持人/参会人员等在
+/// `extra`）。会议拉取失败/0 条 → 空贡献，不影响课表日程；课表明细失败才报错。
 #[tauri::command]
 pub async fn get_schedule_month(
     state: State<'_, AppState>,
@@ -240,8 +244,35 @@ pub async fn get_schedule_month(
     let Some(portal) = portal_of(&state).await else {
         return Ok(CommandResult::err(ERR_NO_SESSION));
     };
+    match portal.query_schedule_events(start_ms, end_ms, &codes).await {
+        Ok(mut list) => {
+            // 校级会议并入（M2 遗留 A2）：codes 含「会议」分类时按区间起点所在
+            // 教学周次并入会议卡日程；拉取失败/0 条为空贡献，不影响课表日程
+            //（失败时 stderr 有 [meeting-diag] 打点，成功路径静默）
+            list.extend(portal.query_meetings_for_range(start_ms, end_ms, &codes).await);
+            Ok(CommandResult::ok(list))
+        }
+        Err(e) => Ok(CommandResult::err(&e.to_string())),
+    }
+}
+
+/// 每日日程计数（月视图角标）。⚠️ bs-schedule 的 getCountBetweenTime 无分类
+/// 过滤参数——角标为当日**全量**日程数，如实呈现服务端计数（不伪造过滤后
+/// 的计数）；「5 类过滤」作用于周视图明细与从月视图跳转后的展示。
+#[tauri::command]
+pub async fn get_schedule_day_counts(
+    state: State<'_, AppState>,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<CommandResult<Vec<ScheduleDayCount>>, String> {
+    if end_ms <= start_ms {
+        return Ok(CommandResult::err("日程区间无效"));
+    }
+    let Some(portal) = portal_of(&state).await else {
+        return Ok(CommandResult::err(ERR_NO_SESSION));
+    };
     Ok(portal
-        .query_schedule_events(start_ms, end_ms, &codes)
+        .query_schedule_day_counts(start_ms, end_ms)
         .await
         .map(CommandResult::ok)
         .unwrap_or_else(|e| CommandResult::err(&e.to_string())))

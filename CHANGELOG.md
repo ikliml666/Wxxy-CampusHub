@@ -1,5 +1,29 @@
 # 更新日志
 
+## 2026-09-18 · M2 遗留项：日程月视图/会议并入与应用可达性元数据
+
+- **模块**：`crates/campus-portal`（新增 access 可达性模块、会议解析纯函数、会议查询与学期缓存）、`tauri-app/src-tauri`（1 新命令 **24 → 25**，`get_schedule_month` 并入会议）、`tauri-app/frontend`（SchedulePanel 月视图/角标、AppsPanel 可达性徽标与分级点击）、`docs/`、`.codewiki/`
+- **依据**：计划 `docs/superpowers/plans/2026-09-18-m2-portal-pages.md`（接口通则 §1.1、冻结契约 §2.1，本条不重复抄表）；B 块以设计文档**附录 A**（应用中心 30 应用 SSO 实测矩阵）为唯一事实来源。最终形态见设计文档**附录 H**。
+- **A1 日程月视图 + 每日计数角标**：
+  - 新命令 `get_schedule_day_counts(startMs, endMs)` 透传协议层 `query_schedule_day_counts`（`getCountBetweenTime`，bs-schedule 独立信封）——前批已就绪的协议能力本轮补上 IPC 与前端消费。
+  - 前端 `SchedulePanel`：头部新增 周/月 视图切换（切换器 + 箭头按视图切周/切月，月标题显示 `YYYY年M月`）；月视图 = 自然月网格（首格 = 当月 1 日所在周的周一，列序与周视图一致，5 或 6 行），日期格显示**每日日程数角标**（服务端 `count`），今日格高亮；**点击某天跳到该天所在周**（明细按当前 5 类过滤取数）。
+  - ⚠️ **角标口径（如实）**：bs-schedule 计数接口**无分类过滤参数**，角标 = 当日全量日程数（不伪造过滤后计数，会议卡来源亦不计入）；「5 类过滤生效」体现为全不选时月视图同样不发请求显示空态、点击日期跳周后明细按 codes 过滤。
+  - 降级：月视图计数失败只降级角标（错误条 + 重试），日历网格与跳转不受影响，不白屏。
+- **A2 校级会议并入（日程页）**：
+  - 接口：`GET api/uppexcard/ext/dynamicData/10.1.90.34/ZCHY?DJZ=<周次会议标题>&pageNum=1&pageSize=20`，门户信封 `meta.success`。
+  - **DJZ 按周过滤（实测四组对照）**：`第二周会议日程安排表`→6 条、`第一周…`→3 条、`第九周…`→0 条、**无周次前缀→0 条**——标题必须由教学周次构造：`meeting_query_title(week)` = `第<中文数字>周会议日程安排表`（`week_to_chinese` 纯函数覆盖 1–99）；教学周次由区间起点与学期开学日推算（`teaching_week_of`，开学当周 = 第 1 周，开学前返回 None 走降级）。
+  - 字段映射：`title=HYMC`、`place=DD`、`classifyCode="Default-Meeting"`（名称/色值由分类列表按 code 映射）；日期由 `NF`(年份)+`RQ`("9月15日") 推出、时间由 `SJ`("下午3:00") 转 24h——全角冒号归一、跳过前导非数字取段首数字、「下午/晚上」且 <12 加 12；**SJ 解析不出按全天（00:00–23:59:59.999），解析出则 `endMs=startMs`**（服务端只给开始时刻，不伪造结束时间，前端对等值显示单时刻）；NF/RQ 缺失或推不出日期的条目跳过。`ZCR`/`CXRY`/`CBDW`（主持人/参会人员/承办单位）拼进 `ScheduleEvent.extra`，前端详情卡展示。
+  - **降级承诺**：并入在命令层 `get_schedule_month` 内完成——codes 未含「会议」分类 / 学期信息失败 / 周次推算失败 / 拉取或解析失败 / 0 条 → **空贡献，绝不影响课表日程与日历本身**；会议按教学周次会话内缓存（确认 0 条同样缓存、传输/解析失败不缓存下次重试）；`query_semester_info` 改会话内缓存（今日页与周次推算共用，数据会话内恒定）。
+  - **可观测化（工程改进，事后补的教训）**：链路最初把失败全吞成空 Vec——真机出现「会议 0 条且无错误态」时无法定位。现每个失败点留一行 `[meeting-diag]` stderr（学期信息失败 / 周次推算失败 / 请求失败 / 解析失败，client.rs:540/546/580/594），只含环节 + 周次 + HTTP 状态 + 错误类别，**不含 JWT/cookie/响应体**；**成功路径零输出**。完整教训见 `.codewiki/learnings/meeting-proxy-week-title-and-observable-degradation.md`。
+  - 离线定位记录：以真机捕获样本验证解析层（6 条解析成功）与 URL 编码层（`Url::parse` 对中文 query 自动 percent-encode，与官方请求逐字节一致），从而把真因范围收窄到网络响应/运行时输入；**早前那次静默 0 条的真因未留证据**（诊断是事后补的），失败路径可观测化作为本轮工程改进保留。
+- **B 应用可达性元数据与提示（不实现 URL 包装）**：
+  - 新模块 `access.rs`：附录 A 实测矩阵代码化 `ACCESS_TABLE`（`access.rs:31`——**cas 8 host**：whall/cxcyjy/jwgl/yd/`10.3.100.110`/fysso.chaoxing/lib/wanfang；**webvpn 7 host**：jxzlbz1/cwbx/tsgcnki/tsgieee/tsgscid/tsgwebof/tsgkjyy；**unavailable 2 host**：lw（SSO 断停自家登录页）/cwxu.flyread.com.cn（自有登录非 CAS））+ `classify_app_access`（`access.rs:56`，host 精确或子域后缀匹配、前缀伪造不命中，未命中回落 `external`）。仅收录有实测结论的 host——`sygl`/`tsggcszh`/`tsgzzwy`/`www1` 附录 A 无结论，按回落规则 `external`；「联创文印/馆藏数字化」host 未出现在目录 30 条 appLink 中，不编造进表。
+  - `AppItem.access`（`"cas" | "webvpn" | "external" | "unavailable"`，`lib.rs:191`）在解析层推导——**不信任门户 isCas 字段**（附录 A：有标 cas 实则停自家登录页/仅 WebVPN 可达的），单测 `access_overrides_portal_iscas` 钉死「isCas=1 但表归 webvpn → 以表为准」。
+  - 前端 `AppsPanel`：`accessBadge`（`AppsPanel.tsx:42`）webvpn → 「需校园网/WebVPN」、unavailable → 「暂不可用」徽标；点击策略（`openApp`，`AppsPanel.tsx:147`）——**webvpn 提示后仍打开原链接**（校内无感直达、校外失败有解释）、**unavailable 只提示不打开**（实测死链/自有登录，打开无意义）、cas/external 直开不变。
+  - **WebVPN URL 包装未做（实测依据，归 M4）**：网关对未登录请求一律回落——会议代理端点实测无凭据 GET 返回 302 → `Location: 首页`；应用域名的三种明文包装形式（`/http/<host>`、`/https/<host>`、内网 IP）最终 URL **完全相同**（网关丢弃目标路径）。包装格式在无 WebVPN 会话前提下**无法验证**，故不写推测实现；「WebVPN 会话打通 + URL 包装 + A 类 CAS 直达签发」整体归 M4（论证见附录 H）。
+- **验证**：`cargo test --workspace` → **102 passed / 0 failed / 3 ignored**（campus-portal **49**，本批新增 12：周次中文数字、自然语言时间 24h 转换、日期区间回读、教学周次推算、会议字段映射与降级、会议标题构造回归、区间保留回归、可达性精确/子域/回落归类、小写序列化、不信任 isCas 回归）；`cargo check -p campus-hub` 通过；`tsc --noEmit` 0 错误；`vite build` 通过；诊断收敛后复跑全绿（成功路径零 stderr 输出）。**真机验收**：月视图角标与周/月切换正常；周视图 4 课程块 + **6 会议块**同屏渲染（周二两场 / 周三 / 周四两场 / 周五，时刻与 `SJ` 解析一致）；应用页徽标与分级点击提示符合预期。
+- **遗留**：① WebVPN B 类包装（M4，依据见上）；② 月视图角标为 bs-schedule 全量计数（无分类参数、不含会议，如实呈现）；③ 待办列表「有数据」路径仍未真机验证（沿用批次 2 遗留）；④ 慧新E校实时直连（可选增强，未做）。
+
 ## 2026-09-18 · M2 批次 3：应用页 + 日程页数据接线（M2 完成）
 
 - **模块**：`crates/campus-portal`（应用/日程 DTO 与解析、图标代拉、URL 校验分工扩展）、`tauri-app/src-tauri`（4 新命令，20 → 24）、`tauri-app/frontend`（AppsPanel/SchedulePanel 接真实数据 + TS 契约）、`.codewiki/`、`docs/`

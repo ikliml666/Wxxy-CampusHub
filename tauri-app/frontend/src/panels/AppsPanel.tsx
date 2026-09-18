@@ -38,7 +38,15 @@ function AppIcon({ item }: { item: AppItem }) {
   );
 }
 
-/** 单个应用卡：点击经后端 open_app 在系统浏览器打开（域名白名单在后端强制）。 */
+/** 可达性徽标：webvpn / unavailable 给出可见徽标，cas / external 不标注（直开）。 */
+function accessBadge(access: AppItem["access"]): { label: string; muted: boolean } | null {
+  if (access === "webvpn") return { label: "需校园网/WebVPN", muted: false };
+  if (access === "unavailable") return { label: "暂不可用", muted: true };
+  return null;
+}
+
+/** 单个应用卡：点击经后端 open_app 在系统浏览器打开（协议白名单在后端强制）；
+ * 可达性徽标按后端附录 A 实测表推导。 */
 function AppCard({
   item,
   onOpen,
@@ -46,6 +54,7 @@ function AppCard({
   item: AppItem;
   onOpen: (item: AppItem) => void;
 }) {
+  const badge = accessBadge(item.access);
   return (
     <button
       type="button"
@@ -54,7 +63,21 @@ function AppCard({
     >
       <Surface hover className="flex items-center gap-3 px-3.5 py-3">
         <AppIcon item={item} />
-        <p className="min-w-0 truncate text-body font-medium text-text">{item.name}</p>
+        <div className="min-w-0">
+          <p className="truncate text-body font-medium text-text">{item.name}</p>
+          {badge && (
+            <span
+              className={cn(
+                "mt-0.5 inline-block rounded-control border px-1.5 text-caption leading-4",
+                badge.muted
+                  ? "border-line bg-line/40 text-text-2"
+                  : "border-sched/30 bg-sched/10 text-sched",
+              )}
+            >
+              {badge.label}
+            </span>
+          )}
+        </div>
       </Surface>
     </button>
   );
@@ -89,6 +112,8 @@ export function AppsPanel() {
   const [catalog, setCatalog] = useState<CatalogState>({ phase: "loading" });
   // 打开失败的即时反馈（成功时系统浏览器直接弹出，无需状态）
   const [openErr, setOpenErr] = useState<string | null>(null);
+  // 可达性提示（webvpn：提示后仍打开原链接；unavailable：只提示不打开）
+  const [accessHint, setAccessHint] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
   // 目录加载：登录后取一次（失败可重试）
@@ -114,8 +139,25 @@ export function AppsPanel() {
     };
   }, [authed, reloadTick]);
 
+  // 打开策略（可达性元数据，后端按附录 A 实测表推导）：
+  // - cas / external：直开（现状不变）；
+  // - webvpn：给出明确提示（需校园网或 WebVPN）后仍打开原链接——校内用户
+  //   无感直达，校外用户打开失败时已有解释；
+  // - unavailable（实测死链/需自有登录）：只提示不打开（打开无意义）。
   const openApp = (item: AppItem) => {
     setOpenErr(null);
+    setAccessHint(null);
+    if (item.access === "unavailable") {
+      setAccessHint(
+        `「${item.name}」暂不可用：该应用链接失效或需自有账号登录，未在浏览器打开。`,
+      );
+      return;
+    }
+    if (item.access === "webvpn") {
+      setAccessHint(
+        `「${item.name}」需校园网或 WebVPN 环境：校外网络下可能无法访问，已尝试打开原链接。`,
+      );
+    }
     invokeCommand("open_app", { url: item.link, isCas: item.isCas }).then((r) => {
       if (!r.success) setOpenErr(`「${item.name}」打开失败：${r.message ?? "未知原因"}`);
     });
@@ -139,6 +181,13 @@ export function AppsPanel() {
         </Surface>
       ) : (
         <>
+          {/* 可达性提示（点击其他应用后清除） */}
+          {accessHint && (
+            <Surface accent="sched" className="px-4 py-3">
+              <p className="text-caption text-text-2">{accessHint}</p>
+            </Surface>
+          )}
+
           {/* 打开失败提示（点击其他应用或重试后清除） */}
           {openErr && (
             <Surface accent="sched" className="px-4 py-3">

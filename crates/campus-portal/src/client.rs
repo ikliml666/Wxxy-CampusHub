@@ -7,9 +7,10 @@
 
 use crate::article::{extract_article, is_allowed_info_url, is_auth_wall};
 use crate::parse::{
-    guess_image_mime, parse_app_groups, parse_app_items, parse_info_columns, parse_info_list,
-    parse_schedule_classify, parse_schedule_day_counts, parse_schedule_events, parse_semester_info,
-    parse_todo_list, parse_todo_tabs, parse_wallet_summary, parse_week_schedule,
+    guess_image_mime, meeting_query_title, parse_app_groups, parse_app_items, parse_info_columns,
+    parse_info_list, parse_meeting_events, parse_schedule_classify, parse_schedule_day_counts,
+    parse_schedule_events, parse_semester_info, parse_todo_list, parse_todo_tabs,
+    parse_wallet_summary, parse_week_schedule, teaching_week_of,
 };
 use crate::{
     AppCatalog, AppItem, InfoColumn, InfoDetail, InfoPage, PortalError, ScheduleClassify,
@@ -57,6 +58,11 @@ const EP_SCHEDULE_BETWEEN: &str =
 /// 每日日程计数端点（POST；月视图角标用）。
 const EP_SCHEDULE_COUNT: &str =
     "api/bs-schedule/innerPlaintext/scheduleRpcManage/getCountBetweenTime";
+/// 校级会议卡端点（`DJZ` 参数实测按周过滤：`第<中文数字>周会议日程安排表`；
+/// `10.1.90.34` 是门户代理的内部主机。2026-09-18 实测第二周 6 条/第一周 3 条）。
+const EP_MEETING: &str = "api/uppexcard/ext/dynamicData/10.1.90.34/ZCHY";
+/// 会议并入日程使用的分类 code（与 5 类过滤的「会议日程」对齐）。
+const MEETING_CODE: &str = "Default-Meeting";
 /// 门户文档库图标下载（相对 `<base>/`；`appIcon` 字段即 attachmentId UUID，
 /// 2026-09-18 实测形态）。图标是同源受保护资源，需带会话 Cookie 由后端代拉。
 const EP_DOCREPO: &str = "zuul/docrepo/download?attachmentId=";
@@ -110,6 +116,11 @@ pub struct PortalClient {
     icons: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// 日程分类缓存（实测 5 类静态数据，会话内拉一次）。
     classify: Arc<Mutex<Option<Vec<ScheduleClassify>>>>,
+    /// 学期信息缓存（会话内恒定：教学周次推算与今日页共用，省重复请求）。
+    semester: Arc<Mutex<Option<SemesterInfo>>>,
+    /// 会议日程缓存，键 = 教学周次；值 None = 服务端确认 0 条（不再重试）。
+    /// 传输/解析失败不缓存（下次刷新重试）——与图标缓存同一模式。
+    meetings: Arc<Mutex<HashMap<u32, Option<Vec<ScheduleEvent>>>>>,
 }
 
 /// 当前 epoch 毫秒（系统时钟回拨时为 0，仅影响 csrf 头，服务端会拒绝并报错）。
@@ -135,6 +146,8 @@ impl PortalClient {
             auth: Arc::new(Mutex::new(None)),
             icons: Arc::new(Mutex::new(HashMap::new())),
             classify: Arc::new(Mutex::new(None)),
+            semester: Arc::new(Mutex::new(None)),
+            meetings: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -275,9 +288,16 @@ impl PortalClient {
         Ok(outcome)
     }
 
-    /// 学期与当前周。
+    /// 学期与当前周（**会话内缓存**：教学周次推算与今日页共用，数据会话内恒定）。
     pub async fn query_semester_info(&self) -> Result<SemesterInfo, PortalError> {
-        parse_semester_info(&self.get(EP_SEMESTER).await?)
+        if let Some(hit) = self.semester.lock().ok().and_then(|g| g.clone()) {
+            return Ok(hit);
+        }
+        let info = parse_semester_info(&self.get(EP_SEMESTER).await?)?;
+        if let Some(mut g) = self.semester.lock().ok() {
+            *g = Some(info.clone());
+        }
+        Ok(info)
     }
 
     /// 钱包三卡摘要（余额 / 在借图书 / 未读邮件）。
@@ -475,7 +495,7 @@ impl PortalClient {
         parse_schedule_events(&self.post_json(EP_SCHEDULE_BETWEEN, body).await?, &classify)
     }
 
-    /// 每日日程计数（月视图角标用；当前批次前端未消费，能力先落协议层）。
+    /// 每日日程计数（月视图角标用；bs-schedule 接口无分类过滤参数，计数为当日全量）。
     pub async fn query_schedule_day_counts(
         &self,
         start_ms: u64,
@@ -488,5 +508,92 @@ impl PortalClient {
             )
             .await?;
         parse_schedule_day_counts(&body)
+    }
+
+    /// 校级会议日程并入（M2 遗留 A2）。
+    ///
+    /// 由 `start_ms`（前端所取周/月区间起点）推算教学周次，以标题
+    /// `第<中文数字>周会议日程安排表` 调会议卡接口（DJZ 实测按周过滤，无周次
+    /// 前缀返回 0 条）。
+    ///
+    /// **降级承诺（绝不影响课表日程与日历本身）**：codes 未选「会议」分类 /
+    /// 学期信息不可用 / 周次推算不出（开学前）/ 拉取或解析失败 / 0 条 → 一律
+    /// 返回空切片，本方法永不 Err。仅保留起点落在 `[start_ms, end_ms]` 内的
+    /// 条目（防御性；同周会议按构造必在区间内）。
+    ///
+    /// 可观测性：**只在降级/失败时**输出一行 `[meeting-diag]` 到 stderr（环节 +
+    /// 周次/HTTP 状态/错误类别；不含 JWT/cookie/响应体——错误消息仅含 URL、
+    /// HTTP 状态与服务端 message，均无敏感字段），供真机 `tauri dev` 排障；
+    /// 成功路径静默（正常刷新零输出）。
+    pub async fn query_meetings_for_range(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+        codes: &[String],
+    ) -> Vec<ScheduleEvent> {
+        if !codes.iter().any(|c| c == MEETING_CODE) {
+            return Vec::new();
+        }
+        let sem = match self.query_semester_info().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[meeting-diag] 学期信息失败: {e}");
+                return Vec::new();
+            }
+        };
+        let Some(week) = teaching_week_of(start_ms, &sem.start_date) else {
+            eprintln!(
+                "[meeting-diag] 周次推算失败: start_date={} startMs={start_ms}",
+                sem.start_date
+            );
+            return Vec::new();
+        };
+        match self.query_meeting_events(week).await {
+            // 请求失败/解析失败已在 query_meeting_events 内打点，此处静默降级
+            Ok(events) => events
+                .into_iter()
+                .filter(|e| e.start_ms >= start_ms && e.start_ms < end_ms)
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 按教学周次拉会议日程（**会话内缓存**：确认 0 条同样缓存；传输/解析失败
+    /// 不缓存，下次刷新重试）。URL 中文 query 由 url 层自动 percent-encode
+    ///（离线已验证与官方请求逐字节一致），与官方前端请求形态一致。
+    async fn query_meeting_events(&self, week: u32) -> Result<Vec<ScheduleEvent>, PortalError> {
+        if let Some(hit) = self.meetings.lock().ok().and_then(|g| g.get(&week).cloned()) {
+            return Ok(hit.unwrap_or_default());
+        }
+        let Some(title) = meeting_query_title(week) else {
+            return Err(PortalError::Parse(format!(
+                "教学周次 {week} 无法构造查询标题"
+            )));
+        };
+        let classify = self.query_schedule_classify().await?;
+        let endpoint = format!("{EP_MEETING}?DJZ={title}&pageNum=1&pageSize=20");
+        let body = match self.get(&endpoint).await {
+            Ok(b) => b,
+            Err(e) => {
+                // {e} 含 URL（DJZ 为周次会议标题，公开信息；无凭据参数）、
+                // HTTP 状态或传输错误类别
+                eprintln!("[meeting-diag] 第{week}周 请求失败: {e}");
+                return Err(e);
+            }
+        };
+        match parse_meeting_events(&body, &classify) {
+            Ok(events) => {
+                if let Some(mut g) = self.meetings.lock().ok() {
+                    g.insert(week, Some(events.clone()));
+                }
+                Ok(events)
+            }
+            // 信封失败形态含服务端 message（如「请重新登录」）、JSON 形态错误
+            // 为 serde 类别信息，均不含响应体内容
+            Err(e) => {
+                eprintln!("[meeting-diag] 第{week}周 解析失败: {e}");
+                Err(e)
+            }
+        }
     }
 }
