@@ -340,3 +340,49 @@
 **上游完整克隆**：`E:\ik\Documents\trae_projects\1\shiguangschedule`（工作区平级参考仓库，不进本项目 git）。
 
 **仍待建（M2.5 后续）**：调课通知 L1 规则解析引擎（消费 `CourseOverride` 模型）、自动更新 diff 快照逻辑、教师身份课表端点侦察、ICS 导出（模板已定位上游 `IcsExportTool.kt:107-201`）。
+
+## 附录 C · 2026-09-18 复查：外壳视觉重设计 / 游客模式 / 右上角账号系统与头像
+
+**触发**：用户反馈三条——「前端设计太丑」「未登录不得锁死主界面，登录收进右上角账号系统」「账号头像没有」。同轮对融合门户做了一次实机复查（真实账号登录，截图 + resource timing + 接口响应取证）。
+
+### C1 门户复查事实（本轮新增/确认）
+
+| 项 | 实测结论 | 对设计的影响 |
+|---|---|---|
+| 顶栏账号菜单 | 头像 + 问候语 → 下拉 **我的账号 / 上传头像 / 退出** | 客户端账号菜单升级为：未登录=引导+登录+已保存账号；已登录=身份头 + 上传头像 / 同步学校头像 / 切换账号 / 外观 / 设置 / 退出 |
+| 官方头像可取回 | `GET /api/upp/userControl/getLoginInfo` → `data.headPortrait`（base64 PNG data URL，实测 ~38KB） | **新增能力**：登录后一键同步学校头像，用户不必重传（§3.1 的上传路径仍保留给本地覆盖） |
+| 官方上传头像 | 仍为裸文件框 + 三条红字（≤200KB / png-jpg / 1:1）+ 删除头像，无裁切/压缩/预览 | §3.1 的「上传即服务」差异化依旧成立（P0 痛点 #1 未变） |
+| 真实姓名来源 | `POST /tryLoginUserInfo`（GET 405）→ `data.userName`（姓名）、`data.departmentName`（院系）、`data.userId` | 客户端显示名不再只有学号：登录时顺带取姓名落库（失败回退学号，不阻断登录） |
+| 消息铃铛 | 未读数 + 全部标记已读 + 四类（系统/办事/资讯/日程）彩色圆标 | 与域色编码同源，M5 通知中心按此分类对齐 |
+| 门户无游客态 | 未登录直接跳 CAS（`isGuest` 仅配置位） | 「游客可进主界面」是客户端独有设计，各页空态自定义（见 C3） |
+| 首页接口全景 | `layout/getPageContent`、`uppinfo/infoCenter/querySimpleInfoCenter`（`columnIds` 分栏，通知公告=9）、`uppflow/affairCenter/queryTabItems` + `uppflow/process/querySimpleFlowItems?tabId=todo\|done`、`uppcard/kbsz/queryAWeekSchedule`、`upp/config/querySemesterInfo`、`uppmessage/message/queryBriefMessage` + `uppmessage/polling/getLocalAlert`、`upp/appStore/queryMyStore`、`uppcard/serviceTypeShow/selectAppByCardId`、`upp/contentDisplay/queryAppointCard/<id>`、`upp/extCardAttachment/download/<id>` | M2 门户各页直接复用（本清单为实测 URL，无需再侦察） |
+
+### C2 头像落地形态（本次实现）
+
+三态优先级 **本地 > 官方 > 首字默认**：
+
+1. **默认**：品牌渐变底 + 首字（`锡`）；游客态恒用此态（不展示账号头像）。
+2. **官方同步**：登录后自动尝试一次（`sync_official_avatar`）；账号菜单内可手动重同步。无会话时命令返回「请先登录」。
+3. **本地上传**：`<input type=file>` / 拖拽 → **中心裁方 → 256×256**（含透明通道输出 PNG，否则 JPEG q0.9）→ 显示「原 X → Y」→ 落盘 `%APPDATA%/campushub/profile.json`（明文 base64，头像非凭据；单图上限 512KB）。
+   - **延后**：react-easy-crop 的拖拽/缩放裁切器（§3.1 完整形态）与「上传回学校」（改动校方资料，需用户授权）本轮不做。
+
+### C3 游客模式行为（本次实现）
+
+| 区域 | 游客态 |
+|---|---|
+| 启动 | 不再被登录页拦截；壳与各面板直接可用；`check_session` 非阻塞后台探测 |
+| 顶栏账号区 | 头像回落「锡」+「未登录」+ 下拉（登录 / 已保存账号免密登录 / 深色模式 / 设置） |
+| 今日页 | 问候「你好，同学」+ 单行登录引导条（可关闭）+ 钱包三卡显示 `—`（不伪造数据） |
+| 资讯/待办/日程/应用/钱包/电费 | `EmptyState`「登录后查看×××」+ 登录按钮 |
+| 设置 | 外观/关于可用；账号区显示登录入口 |
+
+登录入口收敛到三处：账号菜单、今日页引导条、各页空态按钮——均调用同一个登录弹层（含手动验证码兜底与已保存账号免密登录）。
+
+### C4 视觉执行层（本轮重做，域色系统不变）
+
+- 排版：新增字号阶 `display 28 / display-s 22 / title 18 / body 14 / caption 12`；数字统一 Outfit + `tabular-nums`
+- 表面：卡片圆角 14、内层 10；**域色染色阴影**（`rgb(91 46 144 / …)`，不用纯黑低透明）；body 顶部一层 ≤5% 域色径向洗
+- 顶栏：品牌块（渐变方标 + 双行标识）+ 搜索胶囊（`⌘K`，M2 接入前显式置灰）+ 铃铛（M5）+ 账号胶囊
+- 状态：交互元素补齐 hover / `:focus-visible`（统一品牌色 2px outline）/ active / disabled / loading；`prefers-reduced-motion` 下降级
+- **一处根因修复**：shadcn 语义 token（`--primary` 等）此前只写在 `:root`、未进 Tailwind v4 `@theme`，导致 `bg-primary / text-primary-foreground / bg-card / border-border` 等工具类**从未生成**（主按钮长期渲染成裸文字）；已用 `@theme inline` 把语义名映射到域色 token 修复
+

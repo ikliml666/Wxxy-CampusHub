@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-18 · 外壳视觉重设计 + 游客模式 + 右上角账号系统与头像
+
+- **模块**：`tauri-app/frontend`（设计系统/壳/8 面板/账号与头像 UI）、`tauri-app/src-tauri`（头像与账号命令、登录显示名）、`crates/campus-auth`（门户资料接口）、`docs/`（计划/设计文档/验收截图）
+- **起因**：用户反馈三条——前端观感廉价、未登录被登录页锁死主界面、账号无头像；并要求「登录收进右上角账号系统」+ 复查融合门户找遗漏
+- **门户复查（真实账号实机）**：顶栏账号菜单=我的账号/上传头像/退出（官方上传头像仍为裸文件框+三行红字，无裁切压缩）；**官方头像可经 `GET /api/upp/userControl/getLoginInfo` → `data.headPortrait` 取回**（base64 PNG，~38KB）；真实姓名经 `POST /tryLoginUserInfo` → `data.userName`/`departmentName`；铃铛=四类消息（系统/办事/资讯/日程）；门户无游客态；首页接口全景（`getPageContent`/`querySimpleInfoCenter`/`querySimpleFlowItems`/`queryAWeekSchedule`/`querySemesterInfo`/`queryBriefMessage`/`queryMyStore` 等）实测 URL 已记入设计文档附录 C（M2 直接复用）
+- **游客模式**：`App.tsx` 去掉登录门禁，壳与各面板恒可进入；启动 `check_session` 非阻塞探测；登录入口收敛到账号菜单 / 今日页引导条 / 各页空态按钮，均调同一登录弹层（四态状态机 + CAPTCHA_MANUAL 手动兜底 + 已保存账号免密）
+- **右上角账号系统**：`AccountMenu`（未登录：登录 + 已保存账号免密/删除 + 外观 + 设置；已登录：身份头 + 上传头像 / 同步学校头像 / 切换账号 / 外观 / 设置 / 退出）；`LoginDialog`（由 LoginPanel 迁移，全屏页删除）；`AvatarDialog`（拖拽/选择 → Canvas 中心裁方 → 256×256 → JPEG q0.9/PNG，显示「原 X → Y」，512KB 上限）
+- **头像三态**：本地 > 官方 > 首字默认；登录后自动同步一次学校头像；游客态不展示账号头像（回落「锡」占位）
+- **后端**：新增 5 条命令 `get_avatar` / `set_avatar` / `clear_avatar` / `sync_official_avatar`（无会话→「请先登录」）/ `remove_account`；头像落盘 `%APPDATA%/campushub/profile.json`（明文 base64，非凭据，≤512KB）；`list_accounts` 增 `displayName`；`campus-auth` 新增 `portal_user_profile()` + 纯函数 `extract_user_profile()`（含 4 个离线单测）；`finish_login` 取真实姓名落库，失败回退学号且不抹旧值
+- **视觉执行层**（域色 token 与底部 Dock 签名保留不变）：新增字号阶（28/22/18/14/12）、圆角阶（14/10/8）、**域色染色阴影**、`surface-2`/`line-strong`、`:focus-visible` 统一品牌色 outline、`prefers-reduced-motion` 降级、body 域色径向氛围底；新建 `PanelHeader`/`EmptyState`/`Avatar`/`Surface` 共享组件；8 面板重做（今日页头像问候 + 登录引导条 + 5/4/3 非对称钱包卡 + 禁用态快捷动作；其余页「数据接入中」职业化空态，不再裸写"建设中"）
+- **根因修复（P0）**：shadcn 语义 token（`--primary` 等）此前只写在 `:root`、未进 Tailwind v4 `@theme`，`bg-primary`/`text-primary-foreground`/`bg-card`/`border-border` 等工具类**从未生成**（主按钮长期渲染为裸文字）；改用 `@theme inline` 映射到域色 token，产物 CSS 已见 `.bg-primary{background-color:var(--color-brand)}`
+- **验证**：`cargo test --workspace` → **47 passed / 3 ignored / 0 failed**（基线 35 → 43 → 47）；`tsc --noEmit` → 0 错误；`vite build` 通过；**真机 `tauri dev` 全流程实测**（补上交接报告欠账）：冷启动落游客态主界面 → 账号菜单 → 已保存账号免密登录 → 学校头像自动同步 + 门户真实姓名落库 → 退出登录回落游客态；验收截图 `docs/verify/ui2-*.png` 8 张（游客今日/游客菜单/游客待办/登录弹窗/头像弹窗/登录态今日/登录态菜单/登录态待办）
+- **延后**：react-easy-crop 拖拽缩放裁切器、头像上传回学校（需授权）、教学周与真实数据接线（M2/M2.5/M5）
+
 ## 2026-09-18 · 交接报告 HANDOFF.md（面向 M2 接手方）
 
 - **模块**：文档（无代码行为改动）：新增 `docs/HANDOFF.md`；`crates/campus-auth/tests/captcha_solve.rs` 注释同步；`.codewiki/` 索引与基线

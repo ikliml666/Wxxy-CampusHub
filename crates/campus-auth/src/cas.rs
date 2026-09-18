@@ -50,6 +50,16 @@ pub struct CasLoginOk {
     pub ticket: String,
 }
 
+/// 门户用户资料（`POST /tryLoginUserInfo`，2026-09-18 实测：GET 返回 405，
+/// 带门户会话 Cookie + JSON body `{}`，响应 `data.userName` 为真实姓名）。
+#[derive(Debug, Clone)]
+pub struct PortalProfile {
+    /// 真实姓名（`data.userName`）。
+    pub name: String,
+    /// 院系/专业（`data.departmentName`），缺失/空为 None。
+    pub department: Option<String>,
+}
+
 /// CAS 登录失败（错误码全集与映射以 REPORT.md 为准）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasLoginError {
@@ -136,8 +146,7 @@ impl CasClient {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| CasLoginError::Network(e.to_string()))?
             .as_millis() as u64;
-        let token =
-            cas_token_header(now_ms).map_err(|e| CasLoginError::Network(e.to_string()))?;
+        let token = cas_token_header(now_ms).map_err(|e| CasLoginError::Network(e.to_string()))?;
         let body = build_login_body(
             username,
             password_rsa_hex,
@@ -210,7 +219,9 @@ impl CasClient {
         }
         // REPORT.md 三节实测：门户 302 落点是 http:// 明文，客户端应替换为 https
         if final_url.scheme() == "http"
-            && final_url.host_str().is_some_and(|h| h.ends_with(".cwxu.edu.cn"))
+            && final_url
+                .host_str()
+                .is_some_and(|h| h.ends_with(".cwxu.edu.cn"))
         {
             final_url
                 .set_scheme("https")
@@ -243,6 +254,96 @@ impl CasClient {
             SessionState::Alive
         }
     }
+
+    /// GET 门户 `/api/upp/userControl/getLoginInfo` → `data.headPortrait` 裸 base64。
+    ///
+    /// 复用 [`Self::http`]（与登录/探测同 jar、同 UA），门户 base 由 [`PORTAL_PROBE`]
+    /// 派生（不另设常量）；解析见 [`extract_head_portrait`]（纯函数，离线单测覆盖）。
+    /// 会话过期时服务端返回非预期结构 → Parse 错误，上层据此提示重新登录。
+    pub async fn portal_login_info(&self) -> Result<String, CampusAuthError> {
+        let base = PORTAL_PROBE.trim_end_matches('/');
+        let body = self
+            .http
+            .get(format!("{base}/api/upp/userControl/getLoginInfo"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        extract_head_portrait(&body)
+    }
+
+    /// POST 门户 `/tryLoginUserInfo` → 真实姓名与院系（[`PortalProfile`]）。
+    ///
+    /// 复用 [`Self::http`]（与登录/探测同 jar、同 UA），门户 base 由 [`PORTAL_PROBE`]
+    /// 派生（不另设常量）；解析见 [`extract_user_profile`]（纯函数，离线单测覆盖）。
+    /// 2026-09-18 实测：GET 返回 405，须 POST JSON `{}`；会话失效时响应缺 userName
+    /// → Parse 错误，上层尽力而为降级，不影响登录主流程。
+    pub async fn portal_user_profile(&self) -> Result<PortalProfile, CampusAuthError> {
+        let base = PORTAL_PROBE.trim_end_matches('/');
+        let body = self
+            .http
+            .post(format!("{base}/tryLoginUserInfo"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await?
+            .text()
+            .await?;
+        extract_user_profile(&body)
+    }
+}
+
+/// 从 getLoginInfo 响应提取 `data.headPortrait` 裸 base64（纯函数供离线单测）。
+///
+/// 实测形态为完整 data URL（`data:image/png;base64,iVBOR…`），同时容忍裸 base64：
+/// 以 `data:` 开头则剥掉首个 `,` 之前的前缀（不限于 png，jpeg/webp 同理），否则原样返回。
+/// data 缺失 / headPortrait 为 null / 非法 JSON / 剥离后为空 → [`CampusAuthError::Parse`]。
+/// 若将来 headPortrait 改为 CDN URL，在 `data:` 分支处加「http 开头 → 原样透传」分支即可。
+pub fn extract_head_portrait(body: &str) -> Result<String, CampusAuthError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CampusAuthError::Parse(format!("getLoginInfo 响应解析失败: {e}")))?;
+    let raw = v
+        .get("data")
+        .and_then(|d| d.get("headPortrait"))
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| CampusAuthError::Parse("getLoginInfo 缺少 headPortrait".to_string()))?;
+    let bare = match raw.strip_prefix("data:") {
+        Some(rest) => rest.split_once(',').map(|(_, b)| b).ok_or_else(|| {
+            CampusAuthError::Parse("headPortrait data URL 缺少 , 分隔".to_string())
+        })?,
+        None => raw,
+    };
+    if bare.is_empty() {
+        return Err(CampusAuthError::Parse("headPortrait 为空".to_string()));
+    }
+    Ok(bare.to_string())
+}
+
+/// 从 tryLoginUserInfo 响应提取用户资料（纯函数供离线单测）。
+///
+/// 实测形态：`{"meta":...,"data":{"userId":"...","userName":"张三","departmentName":"…","email":"…"}}`。
+/// `userName` 缺失 / null / 空串（trim 后）→ [`CampusAuthError::Parse`]（上层据此回退学号）；
+/// `departmentName` 缺失 / null / 空串 → `None`。姓名与院系不进日志（敏感纪律）。
+pub fn extract_user_profile(body: &str) -> Result<PortalProfile, CampusAuthError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CampusAuthError::Parse(format!("tryLoginUserInfo 响应解析失败: {e}")))?;
+    let data = v
+        .get("data")
+        .ok_or_else(|| CampusAuthError::Parse("tryLoginUserInfo 缺少 data".to_string()))?;
+    let name = data
+        .get("userName")
+        .and_then(|n| n.as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| CampusAuthError::Parse("tryLoginUserInfo 缺少 userName".to_string()))?
+        .to_string();
+    let department = data
+        .get("departmentName")
+        .and_then(|n| n.as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    Ok(PortalProfile { name, department })
 }
 
 /// 构造 CAS 登录请求体（application/x-www-form-urlencoded），纯函数供离线单测。
@@ -352,5 +453,89 @@ fn map_error_code(code: &str, data_raw: &str) -> CasLoginError {
         "USERLOCK" => CasLoginError::UserLocked,
         "TWOVERIFY" => CasLoginError::NeedTwoVerify(data_raw.to_string()),
         other => CasLoginError::Unknown(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 实测响应形态：headPortrait 为完整 data URL（2026-09-18 门户实机取证）。
+    #[test]
+    fn head_portrait_with_data_url_prefix() {
+        let body = r#"{"meta":{"code":0},"data":{"firLogin":"0","guideUsed":"0","headPortrait":"data:image/png;base64,iVBORw0KGgo=","strategy":"0","userId":"2023001"}}"#;
+        assert_eq!(extract_head_portrait(body).unwrap(), "iVBORw0KGgo=");
+    }
+
+    /// 容忍裸 base64（无 data: 前缀）。
+    #[test]
+    fn head_portrait_bare_base64() {
+        let body = r#"{"data":{"headPortrait":"iVBORw0KGgo="}}"#;
+        assert_eq!(extract_head_portrait(body).unwrap(), "iVBORw0KGgo=");
+    }
+
+    /// 非 png 的 data URL 前缀同样按 `data:` → `,` 通用剥离。
+    #[test]
+    fn head_portrait_other_mime_prefix() {
+        let body = r#"{"data":{"headPortrait":"data:image/jpeg;base64,/9j/4AAQ"}}"#;
+        assert_eq!(extract_head_portrait(body).unwrap(), "/9j/4AAQ");
+    }
+
+    /// data 缺失 / headPortrait 为 null → Parse 错误。
+    #[test]
+    fn head_portrait_missing_or_null() {
+        assert!(extract_head_portrait(r#"{"meta":{}}"#).is_err());
+        assert!(extract_head_portrait(r#"{"data":{}}"#).is_err());
+        assert!(extract_head_portrait(r#"{"data":{"headPortrait":null}}"#).is_err());
+    }
+
+    /// 非法 JSON / 空 base64 / 残缺 data URL → Parse 错误。
+    #[test]
+    fn head_portrait_invalid_inputs() {
+        assert!(extract_head_portrait("not json").is_err());
+        assert!(extract_head_portrait(r#"{"data":{"headPortrait":""}}"#).is_err());
+        assert!(
+            extract_head_portrait(r#"{"data":{"headPortrait":"data:image/png;base64"}}"#).is_err()
+        );
+    }
+
+    // ---------- extract_user_profile ----------
+
+    /// 实测响应形态：userName（真实姓名）+ departmentName（院系/专业）齐全。
+    #[test]
+    fn user_profile_full() {
+        let body = r#"{"meta":{"code":0},"data":{"userId":"2023001","userName":"张三","departmentName":"示例学院示例专业","email":"x@cwxu.edu.cn","userType":"student"}}"#;
+        let p = extract_user_profile(body).unwrap();
+        assert_eq!(p.name, "张三");
+        assert_eq!(p.department.as_deref(), Some("示例学院示例专业"));
+    }
+
+    /// departmentName 缺失 / null / 空串 → None，不影响 name。
+    #[test]
+    fn user_profile_department_optional() {
+        let p = extract_user_profile(r#"{"data":{"userName":"张三"}}"#).unwrap();
+        assert_eq!(p.name, "张三");
+        assert!(p.department.is_none());
+        let p = extract_user_profile(r#"{"data":{"userName":"张三","departmentName":null}}"#).unwrap();
+        assert!(p.department.is_none());
+        let p = extract_user_profile(r#"{"data":{"userName":"张三","departmentName":""}}"#).unwrap();
+        assert!(p.department.is_none());
+    }
+
+    /// userName 缺失 / null / 空串 → Parse 错误（上层回退学号）。
+    #[test]
+    fn user_profile_name_missing_or_null() {
+        assert!(extract_user_profile(r#"{"meta":{}}"#).is_err());
+        assert!(extract_user_profile(r#"{"data":{}}"#).is_err());
+        assert!(extract_user_profile(r#"{"data":{"userName":null}}"#).is_err());
+        assert!(extract_user_profile(r#"{"data":{"userName":""}}"#).is_err());
+        assert!(extract_user_profile(r#"{"data":{"userName":"  "}}"#).is_err());
+    }
+
+    /// 非法 JSON → Parse 错误。
+    #[test]
+    fn user_profile_invalid_json() {
+        assert!(extract_user_profile("not json").is_err());
+        assert!(extract_user_profile("").is_err());
     }
 }

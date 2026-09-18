@@ -15,7 +15,7 @@ use crate::infra::state::{self, AppState, CasSession};
 use base64::Engine as _;
 use campus_auth::captcha::{self, KaptchaTemplates};
 use campus_auth::cas::{
-    CasClient, CasLoginError, CasLoginOk, CaptchaInfo, SessionState, CAS_BASE, PORTAL_SERVICE,
+    CaptchaInfo, CasClient, CasLoginError, CasLoginOk, SessionState, CAS_BASE, PORTAL_SERVICE,
 };
 use campus_auth::rsa::rsa_encrypt_hex;
 use serde::{Deserialize, Serialize};
@@ -115,6 +115,9 @@ pub struct AccountListData {
 pub struct AccountInfo {
     pub username: String,
     pub last_login: String,
+    /// 显示名（与 store::AccountRecord 对齐；无来源时缺省，前端回退 username）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// login / login_manual / login_saved 参数（前端 camelCase 字段经 serde 映射）。
@@ -156,7 +159,11 @@ fn mask_username(username: &str) -> String {
     match chars.len() {
         0 => "***".to_string(),
         1..=2 => "***".to_string(),
-        n => format!("{}***{}", chars[..2].iter().collect::<String>(), chars[n - 1]),
+        n => format!(
+            "{}***{}",
+            chars[..2].iter().collect::<String>(),
+            chars[n - 1]
+        ),
     }
 }
 
@@ -278,10 +285,12 @@ async fn run_login(
             Ok(CommandResult {
                 success: false,
                 message: Some(CAPTCHA_MANUAL.to_string()),
-                data: manual.map(|i| LoginResultData::ManualNeeded(CaptchaData {
-                    uid: i.uid,
-                    png_base64: i.png_base64,
-                })),
+                data: manual.map(|i| {
+                    LoginResultData::ManualNeeded(CaptchaData {
+                        uid: i.uid,
+                        png_base64: i.png_base64,
+                    })
+                }),
             })
         }
     }
@@ -300,8 +309,27 @@ async fn finish_login(
         return Ok(CommandResult::err(&format!("门户会话建立失败: {e}")));
     }
     let dir = state::data_dir()?;
+    // 尽力而为取门户真实姓名（tryLoginUserInfo）：失败只警告，绝不影响登录成功。
+    // 姓名不进日志（敏感纪律）；失败时保留上次已存的显示名（save_account 为整条
+    // upsert，直接传 None 会把旧 displayName 抹掉）。
+    let display_name: Option<String> = match client.portal_user_profile().await {
+        Ok(profile) => Some(profile.name),
+        Err(e) => {
+            log::warn!(
+                "门户资料获取失败，displayName 回退学号: {e}: user={}",
+                mask_username(username)
+            );
+            store::load_accounts(&dir)
+                .ok()
+                .and_then(|accs| {
+                    accs.into_iter()
+                        .find(|r| r.username == username)
+                        .and_then(|r| r.display_name)
+                })
+        }
+    };
     // 账号存储（DPAPI 加密后落盘 accounts.json）。失败不阻断已建立的会话，降级为日志。
-    if let Err(e) = store::save_account(&dir, username, password, None) {
+    if let Err(e) = store::save_account(&dir, username, password, display_name.as_deref()) {
         log::warn!("账号保存失败（会话已建立，本次登录不受影响）: {e}");
     }
     // 会话落盘（cookie 逐条 DPAPI 加密，P0-3「重启保持」）。
@@ -318,16 +346,21 @@ async fn finish_login(
     Ok(CommandResult::ok(LoginResultData::LoggedIn(LoginData {
         username: username.to_string(),
         // displayName 无来源时用 username（计划 Task 10 Interfaces）
-        display_name: username.to_string(),
+        display_name: display_name.unwrap_or_else(|| username.to_string()),
     })))
 }
 
 // ---------- 内部辅助 ----------
 
 /// 取当前会话 client。锁纪律：锁内只 clone（reqwest::Client 为 Arc 包装，廉价），
-/// drop guard 后再 await。
-async fn session_client(state: &State<'_, AppState>) -> Option<CasClient> {
-    state.session.lock().await.as_ref().map(|s| s.client.clone())
+/// drop guard 后再 await。profile 模块的 sync_official_avatar 同样取用。
+pub(crate) async fn session_client(state: &State<'_, AppState>) -> Option<CasClient> {
+    state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .map(|s| s.client.clone())
 }
 
 /// 已存密码取用（login_saved 前置；解密失败返回明确中文错误，路径有单测）。
@@ -362,7 +395,13 @@ pub async fn login(
     state: State<'_, AppState>,
     account: LoginArgs,
 ) -> Result<CommandResult<LoginResultData>, String> {
-    run_login(&state, &account.username, &account.password, CaptchaMode::Auto).await
+    run_login(
+        &state,
+        &account.username,
+        &account.password,
+        CaptchaMode::Auto,
+    )
+    .await
 }
 
 /// 手动验证码登录（自动识别穷尽后前端切此模式）。
@@ -446,9 +485,20 @@ pub async fn list_accounts() -> Result<CommandResult<AccountListData>, String> {
                 .map(|r| AccountInfo {
                     username: r.username,
                     last_login: r.last_login,
+                    display_name: r.display_name,
                 })
                 .collect(),
         })),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+/// 删除已保存账号（复用 store::remove_account，错误原文为中文，透传）。
+#[tauri::command]
+pub async fn remove_account(username: String) -> Result<CommandResult<()>, String> {
+    let dir = state::data_dir()?;
+    match store::remove_account(&dir, &username) {
+        Ok(()) => Ok(CommandResult::empty()),
         Err(e) => Ok(CommandResult::err(&e)),
     }
 }
@@ -476,12 +526,21 @@ mod tests {
             login_error_message(&CasLoginError::WrongUserOrPwd),
             "账号或密码错误"
         );
-        assert_eq!(login_error_message(&CasLoginError::UserLocked), "账号已锁定");
-        assert_eq!(login_error_message(&CasLoginError::WrongCaptcha), "验证码错误");
-        assert!(login_error_message(&CasLoginError::Unknown("ISMODIFYPASS".into()))
-            .contains("ISMODIFYPASS"));
-        assert!(login_error_message(&CasLoginError::Network("timeout".into()))
-            .contains("网络错误"));
+        assert_eq!(
+            login_error_message(&CasLoginError::UserLocked),
+            "账号已锁定"
+        );
+        assert_eq!(
+            login_error_message(&CasLoginError::WrongCaptcha),
+            "验证码错误"
+        );
+        assert!(
+            login_error_message(&CasLoginError::Unknown("ISMODIFYPASS".into()))
+                .contains("ISMODIFYPASS")
+        );
+        assert!(
+            login_error_message(&CasLoginError::Network("timeout".into())).contains("网络错误")
+        );
         // 消息不泄露原文 data（敏感纪律）
         let msg = login_error_message(&CasLoginError::NeedTwoVerify("anything".into()));
         assert!(!msg.contains("anything"));
@@ -495,26 +554,42 @@ mod tests {
             assert!(should_retry(&CasLoginError::WrongCaptcha, attempt));
         }
         // 第 3 次失败后穷尽，不再重试
-        assert!(!should_retry(&CasLoginError::WrongCaptcha, MAX_LOGIN_ATTEMPTS));
+        assert!(!should_retry(
+            &CasLoginError::WrongCaptcha,
+            MAX_LOGIN_ATTEMPTS
+        ));
         // 其余错误一律立即终止
         assert!(!should_retry(&CasLoginError::WrongUserOrPwd, 1));
         assert!(!should_retry(&CasLoginError::UserLocked, 1));
         assert!(!should_retry(&CasLoginError::NeedTwoVerify("y".into()), 1));
-        assert!(!should_retry(&CasLoginError::Unknown("NOAUTHORIZATION".into()), 1));
+        assert!(!should_retry(
+            &CasLoginError::Unknown("NOAUTHORIZATION".into()),
+            1
+        ));
         assert!(!should_retry(&CasLoginError::Network("x".into()), 1));
     }
 
     /// 连续错误计数提示解析（REPORT.md：data 如 "已连续错误N次,阈值M"）与接近阈值文案。
     #[test]
     fn error_count_hint_parsing_and_threshold_message() {
-        assert_eq!(parse_error_count_hint("\"已连续错误2次,阈值5\""), Some((2, 5)));
-        assert_eq!(parse_error_count_hint("已连续错误10次,阈值10"), Some((10, 10)));
+        assert_eq!(
+            parse_error_count_hint("\"已连续错误2次,阈值5\""),
+            Some((2, 5))
+        );
+        assert_eq!(
+            parse_error_count_hint("已连续错误10次,阈值10"),
+            Some((10, 10))
+        );
         assert_eq!(parse_error_count_hint("无提示"), None);
         assert_eq!(parse_error_count_hint("已连续错误2次,缺阈值"), None);
         // 接近阈值（n+1 >= m）→ 明确提示停止自动重试
-        let near = login_error_message(&CasLoginError::NeedTwoVerify("\"已连续错误4次,阈值5\"".into()));
+        let near = login_error_message(&CasLoginError::NeedTwoVerify(
+            "\"已连续错误4次,阈值5\"".into(),
+        ));
         assert!(near.contains("阈值"));
-        let far = login_error_message(&CasLoginError::NeedTwoVerify("\"已连续错误1次,阈值5\"".into()));
+        let far = login_error_message(&CasLoginError::NeedTwoVerify(
+            "\"已连续错误1次,阈值5\"".into(),
+        ));
         assert!(far.contains("二次验证"));
     }
 
@@ -528,9 +603,14 @@ mod tests {
 
         // 坏密文 → 解密报错（DPAPI/Base64 层）
         let err = saved_password(&dir, "2023999").unwrap_err();
-        assert!(err.contains("Base64") || err.contains("解密"), "实际错误: {err}");
+        assert!(
+            err.contains("Base64") || err.contains("解密"),
+            "实际错误: {err}"
+        );
         // 账号不存在 → 明确错误
-        assert!(saved_password(&dir, "nobody").unwrap_err().contains("不存在"));
+        assert!(saved_password(&dir, "nobody")
+            .unwrap_err()
+            .contains("不存在"));
 
         fs::remove_dir_all(&dir).ok();
     }

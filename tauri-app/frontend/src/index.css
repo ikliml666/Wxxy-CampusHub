@@ -4,6 +4,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
+  /* ── 域色（锁定，不推翻）── */
   --color-brand: #5b2e90;      /* 锡院紫 */
   --color-bg: #f7f6f9;         /* 纸灰页底 */
   --color-surface: #ffffff;    /* 卡片 */
@@ -15,8 +16,66 @@
   --color-todo: #d9822b;       /* 域琥珀：待办 */
   --color-sched: #2b7dbf;      /* 域湖蓝：日程/会议 */
   --color-alert: #d9455b;      /* 低余额/告警 */
+  --color-surface-2: #fbfafc;  /* 卡片内嵌区/骨架底 */
+  --color-line-strong: rgb(31 27 41 / 0.10); /* hover 加深边线 */
+
+  /* ── 字号阶（排版分级）── */
+  --text-display: 28px;
+  --text-display--line-height: 1.15;
+  --text-display--letter-spacing: -0.02em;
+  --text-display-s: 22px;
+  --text-display-s--line-height: 1.2;
+  --text-display-s--letter-spacing: -0.015em;
+  --text-title: 18px;
+  --text-title--line-height: 1.3;
+  --text-body: 14px;
+  --text-body--line-height: 1.6;
+  --text-caption: 12px;
+  --text-caption--line-height: 1.4;
+  --text-caption--letter-spacing: 0.01em;
+
+  /* ── 圆角阶（--radius 保留给 shadcn 映射）── */
+  --radius-card: 14px;
+  --radius-inner: 10px;
+  --radius-control: 8px;
+
+  /* ── 染色阴影（域色紫染，非纯黑）── */
+  --shadow-card: 0 1px 2px rgb(31 27 41 / 0.04), 0 8px 24px -12px rgb(91 46 144 / 0.18);
+  --shadow-lift: 0 2px 4px rgb(31 27 41 / 0.05), 0 14px 32px -14px rgb(91 46 144 / 0.26);
+  --shadow-pop: 0 12px 40px -12px rgb(31 27 41 / 0.22);
+
+  /* ── 动效 token ── */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+
   --font-sans: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   --font-num: "Outfit", "Segoe UI", sans-serif;
+}
+
+/* shadcn 语义 token → 域色映射（Task 4 组件源码消费这些工具类名）。
+   必须用 @theme inline：值以 var() 内联进工具类，.dark 里重定义 --color-brand
+   等域色时语义类（bg-primary 等）才能跟随切换；:root 里的同名普通变量保留给
+   直接引用 var(--primary) 的场景。 */
+@theme inline {
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-text);
+  --color-card: var(--color-surface);
+  --color-card-foreground: var(--color-text);
+  --color-popover: var(--color-surface);
+  --color-popover-foreground: var(--color-text);
+  --color-primary: var(--color-brand);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--color-bg);
+  --color-secondary-foreground: var(--color-text);
+  --color-muted: var(--color-bg);
+  --color-muted-foreground: var(--color-text-2);
+  --color-accent: var(--color-bg);
+  --color-accent-foreground: var(--color-text);
+  --color-destructive: var(--color-alert);
+  --color-border: var(--color-line);
+  --color-input: var(--color-line);
+  --color-ring: var(--color-brand);
 }
 
 :root {
@@ -53,9 +112,50 @@
   --color-todo: #eda45c;
   --color-sched: #5da3e0;
   --color-alert: #e56b7d;
+  --color-surface-2: #252230;
+  --color-line-strong: rgb(255 255 255 / 0.14);
+  /* 深档阴影：冷色系（深紫染）且减淡，避免灰底上发脏 */
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.40), 0 8px 24px -12px rgb(139 92 246 / 0.10);
+  --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.45), 0 14px 32px -14px rgb(139 92 246 / 0.16);
+  --shadow-pop: 0 12px 40px -12px rgb(0 0 0 / 0.60);
 }
-body { @apply bg-bg text-text font-sans antialiased; }
+
+body {
+  @apply bg-bg text-text font-sans antialiased;
+  /* 氛围底：顶部一层极淡域色径向洗（≤5%） */
+  background-image: radial-gradient(1200px 400px at 50% -10%, rgb(91 46 144 / 0.05), transparent);
+}
+.dark body {
+  background-image: radial-gradient(1200px 400px at 50% -10%, rgb(139 92 246 / 0.05), transparent);
+}
 .tabular-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+/* 噪点覆盖层（可选工具类）：2% 透明度，纯内联 SVG，无资源文件 */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0.02;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+}
+
+@layer base {
+  /* 统一焦点环：品牌色 2px outline，无动画入场；对比度 ≥3:1（紫/墨紫对两套底均达标） */
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+  /* 降级动效：过渡压到 ≤150ms 且只留 opacity（功能性 spinner 等动画由调用方自理） */
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after {
+      transition-property: opacity !important;
+      transition-duration: 120ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
 
 /* Outfit（数字/金额等宽显示用，latin 子集，OFL 许可） */
 @font-face {

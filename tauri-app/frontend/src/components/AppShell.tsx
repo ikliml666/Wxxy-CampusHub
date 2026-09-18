@@ -1,10 +1,17 @@
-import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { useDeferredValue, useEffect } from "react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bell, LogOut, Moon, Search, Sun, UserRound } from "lucide-react";
+import { Bell, Search } from "lucide-react";
 import type { PanelId } from "@/shared/types";
 import { useUiStore } from "@/stores/uiStore";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import AccountMenu from "@/components/AccountMenu";
 import DockNav from "@/components/DockNav";
 import { TodayPanel } from "@/panels/TodayPanel";
 import { InfoPanel } from "@/panels/InfoPanel";
@@ -26,112 +33,103 @@ const PANEL_MAP: Record<PanelId, ComponentType> = {
   settings: SettingsPanel,
 };
 
-export default function AppShell({ onLogout }: { onLogout: () => void }) {
+export default function AppShell() {
   const activePanel = useUiStore((s) => s.activePanel);
+  const theme = useUiStore((s) => s.theme);
   // 快速连切时 useDeferredValue 只渲染最终面板，AnimatePresence 不闪烁
   const deferredPanel = useDeferredValue(activePanel);
   const ActivePanel = PANEL_MAP[deferredPanel];
-  const [dark, setDark] = useState(() =>
-    document.documentElement.classList.contains("dark"),
-  );
 
-  const toggleDark = () => {
-    const next = document.documentElement.classList.toggle("dark");
-    setDark(next);
-  };
-
-  // 头像下拉：极简实现（不引 DropdownMenu 依赖）；打开期间点外部关闭
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const userMenuRef = useRef<HTMLDivElement>(null);
-
+  // 主题 → DOM 单向同步（开关入口在账号菜单的外观行）
   useEffect(() => {
-    if (!userMenuOpen) return;
-    const onDocMouseDown = (e: MouseEvent) => {
-      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
-        setUserMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [userMenuOpen]);
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
 
   return (
-    <div className="min-h-screen">
-      <header className="flex items-center justify-between px-5 py-3">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="gap-2 text-text-2"
-          aria-label="全局搜索（占位）"
-        >
-          <Search className="size-4" />
-          <span>搜索</span>
-          <kbd className="rounded border border-line px-1 text-[10px] leading-4">
-            ⌘K
-          </kbd>
-        </Button>
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon-sm" aria-label="通知（占位）">
-            <Bell className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="切换深浅主题"
-            onClick={toggleDark}
-          >
-            {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-          </Button>
-          <div className="relative" ref={userMenuRef}>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="账号菜单"
-              aria-haspopup="menu"
-              aria-expanded={userMenuOpen}
-              onClick={() => setUserMenuOpen((v) => !v)}
-            >
-              <UserRound className="size-4" />
-            </Button>
-            {userMenuOpen && (
-              <div
-                role="menu"
-                className="absolute right-0 top-full z-40 mt-2 w-36 rounded-[10px] border border-line bg-surface p-1 shadow-[0_8px_30px_rgb(0_0_0/0.12)]"
+    <TooltipProvider delayDuration={250}>
+      <div className="min-h-screen">
+        <header className="sticky top-0 z-40 border-b border-line bg-bg/85">
+          <div className="flex h-14 items-center gap-4 px-5">
+            {/* 左：品牌块（渐变方标 + 双行标识，收紧行高） */}
+            <div className="flex shrink-0 items-center gap-2.5">
+              <span
+                aria-hidden="true"
+                className="flex size-7 select-none items-center justify-center rounded-[9px] text-[15px] font-bold text-white"
+                style={{
+                  backgroundImage:
+                    "linear-gradient(140deg, var(--color-brand), var(--color-info))",
+                }}
               >
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setUserMenuOpen(false);
-                    onLogout();
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-text hover:bg-bg"
-                >
-                  <LogOut className="size-4" aria-hidden="true" />
-                  退出登录
-                </button>
+                锡
+              </span>
+              <div className="leading-[1.2]">
+                <p className="text-body font-semibold text-text">锡院助手</p>
+                <p className="text-caption text-text-2">校园工作台</p>
               </div>
-            )}
+            </div>
+
+            {/* 中：搜索胶囊（命令面板 M2 接入，aria-disabled 占位、不做假交互） */}
+            <div className="flex min-w-0 flex-1 justify-center">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-disabled="true"
+                    aria-label="搜索或跳转（命令面板 · M2 接入）"
+                    className="flex h-9 w-full max-w-md items-center gap-2.5 rounded-full border border-line bg-surface px-4 text-caption text-text-2 transition-all duration-[var(--dur-fast)] ease-out-soft hover:-translate-y-px hover:border-line-strong hover:shadow-card"
+                  >
+                    <Search className="size-4 shrink-0" aria-hidden="true" />
+                    <span className="flex-1 truncate text-left">
+                      搜索或跳转…
+                    </span>
+                    <kbd className="shrink-0 rounded-[5px] border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-text-2 tabular-num">
+                      ⌘K
+                    </kbd>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>命令面板 · M2 接入</TooltipContent>
+              </Tooltip>
+            </div>
+
+            {/* 右：铃铛占位（M5 接入）+ 账号区 */}
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="通知"
+                    aria-disabled="true"
+                  >
+                    <Bell className="size-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>通知中心 · M5 接入</TooltipContent>
+              </Tooltip>
+              <AccountMenu />
+            </div>
           </div>
-        </div>
-      </header>
-      <main className="pb-28">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={deferredPanel}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{
-              opacity: 1,
-              y: 0,
-              transition: { type: "spring", stiffness: 400, damping: 40 },
-            }}
-            exit={{ opacity: 0, transition: { duration: 0.04 } }}
-          >
-            <ActivePanel />
-          </motion.div>
-        </AnimatePresence>
-      </main>
-      <DockNav />
-    </div>
+        </header>
+
+        <main className="pb-28">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={deferredPanel}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{
+                opacity: 1,
+                y: 0,
+                transition: { type: "spring", stiffness: 400, damping: 40 },
+              }}
+              exit={{ opacity: 0, transition: { duration: 0.04 } }}
+            >
+              <ActivePanel />
+            </motion.div>
+          </AnimatePresence>
+        </main>
+
+        <DockNav />
+      </div>
+    </TooltipProvider>
   );
 }
