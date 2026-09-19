@@ -33,7 +33,7 @@ pub use model::{
     expand_week_mask, Course, CourseOverride, CourseSource, CourseTableConfig, OverrideKind,
     TimeSlot, Timetable,
 };
-pub use notice::{notice_id_for, parse_notice_text, NoticeCandidate, NoticeConfidence};
+pub use notice::{notice_id_for, parse_notice_text, parse_notice_with_semester, NoticeCandidate, NoticeConfidence};
 pub use occurrence::{expand_occurrences, CourseOccurrence, OccurrenceKind};
 pub use timeslots::default_time_slots;
 pub use weeks::{

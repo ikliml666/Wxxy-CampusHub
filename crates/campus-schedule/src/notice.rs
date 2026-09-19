@@ -12,6 +12,7 @@
 //!   去重与撤销键；M5 接公告流时改用公告 id）。
 
 use crate::model::{Course, OverrideKind};
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -323,6 +324,240 @@ fn extract_bracketed(text: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+// ---------------- L2 前置：全校日期置换（2026-09-19 真实公告形态） ----------------
+
+/// 一次「N月N日（星期X）」日期命中。置换型公告（「9月20日（星期日）补
+/// 9月28日（星期一）课程」）不含课程名与节次，是课表层置换而非单课调课，
+/// 早于 [`parse_notice_text`] 识别（否则书名号《关于…放假安排的通知》会被
+/// 误提为课程名，摘录也锚不到有效行）。
+#[derive(Debug, Clone)]
+struct DateHit {
+    month: u32,
+    day: u32,
+    /// 日期后紧跟的括号内「星期X」提示（可缺，缺失时由学期锚点推算）。
+    weekday: Option<u8>,
+    /// 日期段起始/结束字节位（置换对之间夹的连接词用它切 gap）。
+    start: usize,
+    end: usize,
+}
+
+/// 「月」字之前 / 之后的连续 ASCII 数字（复用 [`digits_before`] 的字节安全前提：
+/// UTF-8 多字节字符各字节 ≥0x80，不会与 ASCII 混淆）。
+fn digits_after(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut e = start;
+    while e < bytes.len() && bytes[e].is_ascii_digit() {
+        e += 1;
+    }
+    if e == start {
+        return None;
+    }
+    std::str::from_utf8(&bytes[start..e])
+        .ok()?
+        .parse()
+        .ok()
+        .map(|v| (v, e))
+}
+
+/// 日期后紧跟的「（…）」/「(…)」括号段：跳过空白后必须是开括号，
+/// 返回 `(括号内文本, 闭括号后的字节偏移)`。
+fn paren_after(s: &str) -> Option<(&str, usize)> {
+    let mut chars = s.char_indices();
+    let content_start = loop {
+        let (i, ch) = chars.next()?;
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '（' || ch == '(' {
+            break i + ch.len_utf8();
+        }
+        return None;
+    };
+    let rest = &s[content_start..];
+    let close = rest.find(['）', ')'])?;
+    let close_len = rest[close..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+    Some((&rest[..close], content_start + close + close_len))
+}
+
+/// 扫描全部「N月N日（星期X）」命中（月 1..=12、日 1..=31 过滤误命中）。
+fn scan_dates(text: &str) -> Vec<DateHit> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    for (p, _) in text.match_indices('月') {
+        let Some((month, ms)) = digits_before(b, p) else { continue };
+        if !(1..=12).contains(&month) {
+            continue;
+        }
+        let Some((day, mut de)) = digits_after(b, p + '月'.len_utf8()) else { continue };
+        if !(1..=31).contains(&day) {
+            continue;
+        }
+        // 跳过日期尾缀「日」（「9月20日（星期日）」的括号提示在「日」之后）
+        if text[de..].starts_with('日') {
+            de += '日'.len_utf8();
+        }
+        let (weekday, end) = match paren_after(&text[de..]) {
+            Some((inner, off)) => (parse_day(inner), de + off),
+            None => (None, de),
+        };
+        out.push(DateHit { month, day, weekday, start: ms, end });
+    }
+    out
+}
+
+/// 置换对：两个相邻日期中间夹置换连接词（补/上/按/换）。优先取 gap 含「补」
+/// 的相邻对（放假调休正文常混有多组日期，如「10月1日至8日放假」+ 补课日期），
+/// 无「补」时退而取第一组连接词相邻对。
+fn find_swap_pair(text: &str) -> Option<(DateHit, DateHit)> {
+    let dates = scan_dates(text);
+    for w in dates.windows(2) {
+        if text[w[0].end..w[1].start].contains('补') {
+            return Some((w[0].clone(), w[1].clone()));
+        }
+    }
+    dates
+        .windows(2)
+        .find(|w| {
+            text[w[0].end..w[1].start]
+                .chars()
+                .any(|c| matches!(c, '上' | '按' | '换'))
+        })
+        .map(|w| (w[0].clone(), w[1].clone()))
+}
+
+/// 学期锚点下的日期换算：年份取学期年；日期早于开学（寒假补课跨年）顺延一年。
+fn date_in_semester(month: u32, day: u32, semester_start: NaiveDate) -> Option<NaiveDate> {
+    let y = semester_start.year();
+    let d = NaiveDate::from_ymd_opt(y, month, day)?;
+    Some(if d < semester_start {
+        NaiveDate::from_ymd_opt(y + 1, month, day)?
+    } else {
+        d
+    })
+}
+
+/// 带学期锚点的解析入口（公告流）：优先识别**全校日期置换**（如
+/// 「9月20日（星期日）补9月28日（星期一）课程」），对本地「被补日星期」的
+/// 每门未停开课程产出一条 [`OverrideKind::Extra`] 候选——周次=上课日所在
+/// 教学周、星期=上课日当天、节次沿用原课；未命中置换格式回落
+/// [`parse_notice_text`]（常规单课调课/停课/补课解析，签名不变）。
+pub fn parse_notice_with_semester(
+    text: &str,
+    courses: &[Course],
+    current_week: Option<u32>,
+    semester_start: Option<NaiveDate>,
+) -> Vec<NoticeCandidate> {
+    let text = text.trim();
+    if let Some((d1, d2)) = find_swap_pair(text) {
+        return swap_candidates(text, &d1, &d2, courses, semester_start);
+    }
+    parse_notice_text(text, courses, current_week)
+}
+
+fn swap_candidates(
+    text: &str,
+    d1: &DateHit,
+    d2: &DateHit,
+    courses: &[Course],
+    semester_start: Option<NaiveDate>,
+) -> Vec<NoticeCandidate> {
+    // 星期：括号提示优先，缺失时由学期锚点推算（日期换算统一锚 semester_start）
+    let day_of = |h: &DateHit| {
+        h.weekday.or_else(|| {
+            semester_start
+                .and_then(|s| date_in_semester(h.month, h.day, s))
+                .map(|d| d.weekday().number_from_monday() as u8)
+        })
+    };
+    let swap_day = day_of(d1);
+    let target_day = day_of(d2);
+    let swap_week = semester_start.and_then(|s| {
+        date_in_semester(d1.month, d1.day, s).map(|d| ((d - s).num_days() / 7 + 1) as u32)
+    });
+
+    let mut reasons = Vec::new();
+    if swap_week.is_none() {
+        reasons.push("无法确定补课日期所在教学周（未导入课表或未设置学期起始日）".to_string());
+    }
+    if swap_day.is_none() || target_day.is_none() {
+        reasons.push("缺少星期信息，无法确定补哪天的课".to_string());
+    }
+    let confidence = if reasons.is_empty() {
+        NoticeConfidence::High
+    } else {
+        NoticeConfidence::Low
+    };
+    // 摘录锚到被补日期所在行（即「…补…课程」那句，含全部置换要素）
+    let excerpt = excerpt_of(text, Some(&format!("{}月{}日", d2.month, d2.day)));
+
+    let Some(target_day) = target_day else {
+        return vec![NoticeCandidate {
+            notice_id: notice_id_for(text),
+            course_id: None,
+            course_name: String::new(),
+            change_type: OverrideKind::Extra,
+            weeks: Vec::new(),
+            new_day: swap_day,
+            new_start_section: None,
+            new_end_section: None,
+            new_position: None,
+            confidence: NoticeConfidence::Low,
+            reason: reasons.join("；"),
+            excerpt,
+        }];
+    };
+    let out: Vec<NoticeCandidate> = courses
+        .iter()
+        .filter(|c| !c.disabled && c.day == target_day)
+        .map(|c| NoticeCandidate {
+            notice_id: notice_id_for(text),
+            course_id: Some(c.id.clone()),
+            course_name: c.name.clone(),
+            change_type: OverrideKind::Extra,
+            weeks: swap_week.map(|w| vec![w]).unwrap_or_default(),
+            new_day: swap_day,
+            new_start_section: c.start_section,
+            new_end_section: c.end_section,
+            new_position: None,
+            confidence,
+            reason: reasons.join("；"),
+            excerpt: excerpt.clone(),
+        })
+        .collect();
+    if out.is_empty() {
+        // 有完整置换要素但课表该日无课：给一条说明性候选，避免前端静默空态
+        let mut idle = reasons;
+        if idle.is_empty() {
+            idle.push(format!(
+                "课表中星期{}没有课程，无需补课",
+                match target_day {
+                    1 => "一",
+                    2 => "二",
+                    3 => "三",
+                    4 => "四",
+                    5 => "五",
+                    6 => "六",
+                    _ => "日",
+                }
+            ));
+        }
+        return vec![NoticeCandidate {
+            notice_id: notice_id_for(text),
+            course_id: None,
+            course_name: String::new(),
+            change_type: OverrideKind::Extra,
+            weeks: Vec::new(),
+            new_day: swap_day,
+            new_start_section: None,
+            new_end_section: None,
+            new_position: None,
+            confidence: NoticeConfidence::Low,
+            reason: idle.join("；"),
+            excerpt,
+        }];
+    }
+    out
+}
+
 // ---------------- L2：主流程 ----------------
 
 /// 解析通知正文 → 单候选（契约 §2.5：输入通知正文 + 本地课程表 + 当前周次）。
@@ -609,5 +844,83 @@ mod tests {
         assert_eq!(notice_id_for("abc"), notice_id_for("abc"));
         assert_ne!(notice_id_for("abc"), notice_id_for("abd"));
         assert!(parse_notice_text("   \n ", &fixture(), Some(2)).is_empty());
+    }
+
+    // ---------- 全校日期置换（2026-09-19 真实公告） ----------
+
+    /// 真实公告正文（jwc.cwxu.edu.cn/info/1100/5957.htm 取证原文，脱敏前导敬语）。
+    const SWAP_NOTICE: &str = "全体师生：\n\n根据学校《关于2026年中秋、国庆放假安排的通知》要求，\
+9月20日（星期日）补9月28日（星期一）课程。全校所有学生（含2026级新生）按照本方案执行，请全校所有学生按时上课，不得缺勤。\n\
+\n请各教学单位、任课教师、全体学生提前做好上课安排，按时开展教学活动。\n\n教务处\n\n2026年9月17日";
+
+    /// 置换识别：对被补日（周一）的每门课产出 Extra 候选；周次由学期锚点
+    /// 推算（2026-09-20 − 2026-09-07 = 13 天 → 第 2 周）、星期取上课日当天
+    /// （周日=7）、节次沿用原课；书名号《…放假安排的通知》不再被误提为课程名。
+    #[test]
+    fn date_swap_notice_generates_extra_per_target_day_course() {
+        use chrono::NaiveDate;
+        let cands = parse_notice_with_semester(
+            SWAP_NOTICE,
+            &fixture(),
+            None,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+        );
+        assert_eq!(cands.len(), 1, "fixture 中只有 default-a 是周一课");
+        let c = &cands[0];
+        assert_eq!(c.course_id.as_deref(), Some("default-a"));
+        assert_eq!(c.course_name, "信息安全");
+        assert_eq!(c.change_type, OverrideKind::Extra);
+        assert_eq!(c.weeks, vec![2]);
+        assert_eq!(c.new_day, Some(7));
+        assert_eq!(c.new_start_section, Some(1));
+        assert_eq!(c.new_end_section, Some(2));
+        assert_eq!(c.confidence, NoticeConfidence::High);
+        assert!(c.reason.is_empty());
+        assert!(c.excerpt.contains("补9月28日"), "摘录锚到置换句：{}", c.excerpt);
+    }
+
+    /// 缺学期锚点：置换要素不全 → Low（周次算不出、星期只能靠括号提示），
+    /// 每门被补日课程仍产出候选，reason 写明缺口。
+    #[test]
+    fn date_swap_without_semester_anchor_is_low_confidence() {
+        let cands = parse_notice_with_semester(SWAP_NOTICE, &fixture(), Some(2), None);
+        assert_eq!(cands.len(), 1);
+        let c = &cands[0];
+        assert_eq!(c.confidence, NoticeConfidence::Low);
+        assert!(c.weeks.is_empty());
+        assert_eq!(c.new_day, Some(7), "括号内「星期日」提示直接可用");
+        assert!(c.reason.contains("教学周"));
+    }
+
+    /// 课表被补日无课：说明性候选（course_id 为空），不让前端静默空态。
+    #[test]
+    fn date_swap_with_no_matching_course_gives_hint_candidate() {
+        use chrono::NaiveDate;
+        let courses = vec![course("default-b", "密码学", 3, 3, 4, vec![2])];
+        let cands = parse_notice_with_semester(
+            SWAP_NOTICE,
+            &courses,
+            None,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+        );
+        assert_eq!(cands.len(), 1);
+        assert!(cands[0].course_id.is_none());
+        assert_eq!(cands[0].confidence, NoticeConfidence::Low);
+        assert!(cands[0].reason.contains("星期一没有课程"));
+    }
+
+    /// 常规单课通知不受影响：置换分支未命中时回落 parse_notice_text。
+    #[test]
+    fn regular_notice_falls_back_to_plain_parser() {
+        use chrono::NaiveDate;
+        let cands = parse_notice_with_semester(
+            "第5周周四3-4节 信息安全 调整到 D4-305",
+            &fixture(),
+            Some(2),
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+        );
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].course_name, "信息安全");
+        assert_eq!(cands[0].change_type, OverrideKind::Rescheduled);
     }
 }
