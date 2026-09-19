@@ -551,12 +551,6 @@ export interface ElectricityView {
   fields: ElectricityField[];
   money: number | null;
   tip: string | null;
-  /**
-   * 充值 `third_party` 前缀（App 口径：末级 IEC 响应 `map.data` 的 JSON 序列化）。
-   * 该对象含户号等 PII（`charge.rs` 模块头注：crate 层刻意不透出明细），**只能整串由后端给出**，
-   * 前端不自行拼接（见 `components/RechargeFlow.tsx` 的注释）。旧后端不返回 ⇒ undefined。
-   */
-  thirdParty?: string | null;
 }
 
 /** `query_electricity` → data。`options` 为空且 `isFinal === false` ⇒ 该级无下拉（末级输入级）。 */
@@ -616,6 +610,10 @@ export interface RechargePayMethods {
 /**
  * 安全键盘数据。**`keys` 只用于渲染**：提交的是「点击的键位下标序列」而非键上的字符
  * （App 口径 `password = 下标数组.join("")` + `uuid`），见 `RechargeFlow.tsx` 红线注释。
+ *
+ * ⚠️ 服务端 `passwordMap[uuid]` 实测是**10 个字符的字符串**（不是数组），官方前端逐字符渲染；
+ * 批 C 的 crate 已把它按字符拆成数组后下发（`recharge.rs::parse_password_pad`），故这里收到的是
+ * `string[]`，**下标语义不变**（第 i 个元素 = 第 i 个键）。
  */
 export interface PasswordPad {
   uuid: string;
@@ -623,31 +621,25 @@ export interface PasswordPad {
 }
 
 /**
- * 一个可扣款账户类型项。
- * ⚠️ **批 C 的 crate 实际只回类型码字符串**（`recharge.rs::parse_ccctypes` → `Vec<String>`，
- * 注释明说「balance 归官方 UI 展示用，本项目暂不需要」）；计划 §2.2 曾写 `{ccctype,balance}` 形态。
- * 两种都容忍，取值一律走 `ccctypeCode()`（见 `components/RechargeFlow.tsx`）。
- */
-export type RechargeCcctype = string | { ccctype: string; balance?: number | null };
-
-/**
- * `recharge_query_account` → data。
+ * `recharge_query_account` → data。**两步协议**（crate `query_account` 的 `accountno` 参数，
+ * 官方 `getAccountno` → `getAccounttype`）：不带 `accountno` ⇒ 回**账号列表**；带已选 `accountno`
+ * ⇒ 回该账号的**账户类型 + 安全键盘**。故免密分支同样要跑完这两步（提交体必须带 accountno/ccctype）。
  *
- * ⚠️ **协议是两步**（crate `query_account` 的 `accountno` 参数，官方 `getAccountno` → `getAccounttype`）：
- * 不带 `accountno` ⇒ 回**账号列表**；带已选 `accountno` ⇒ 回该账号的**账户类型 + 安全键盘**。
- * 故免密分支同样要跑完这两步（提交体必须带 accountno/ccctype）。
+ * `ccctypes` 是**裸类型码字符串数组**（crate `parse_ccctypes` → `Vec<String>`，命令层同名透出）；
+ * 没有 balance（官方 UI 才用，本项目不展示）。
  */
 export interface RechargeAccounts {
   accounts: string[];
-  ccctypes: RechargeCcctype[];
-  /** 无安全键盘数据时为 null/缺省（免密分支本来就没有） */
+  ccctypes: string[];
+  /** 只有**需密码**且服务端下发键盘时才有值；免密分支为 null/缺省 */
   pad?: PasswordPad | null;
 }
 
-/** `recharge_create` → data。crate 层返回裸 `orderid` 字符串，命令层可能包成对象——两种都容忍。 */
-export type RechargeCreated = { orderId: string } | string;
-
-/** `recharge_status` → data。 */
-export interface RechargeStatus {
-  order: RechargeOrder;
+/** `recharge_create` → data（命令层 `RechargeCreated`）。 */
+export interface RechargeCreated {
+  orderId: string;
 }
+
+/** `recharge_status` → data：与 `recharge_pay_methods` **同一个结构**（同一端点同一解析），
+ *  轮询时只关心 `order.status`。故不另立类型，避免一个 payload 两种形状。 */
+export type RechargeStatus = RechargePayMethods;

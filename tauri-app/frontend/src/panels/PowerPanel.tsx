@@ -488,12 +488,12 @@ export function PowerPanel() {
       </Surface>
 
       {/* 充值（M3.1 批 D）：房间选全且视图无 tip 才出现——金额 → 风险声明 → 支付方式 →
-          免密/安全键盘 → 轮询。thirdParty 只透传后端给的（见 RechargeFlow 头注：前端不拼）。 */}
+          免密/安全键盘 → 轮询。房间路径交给后端合成 third_party（批 C 收口：PII 不出后端）。 */}
       {complete && area && view && !view.tip && (
         <RechargeFlow
           feeitem={area}
           roomLabel={steps.map((s) => s.name || s.value).join(" · ")}
-          thirdParty={view.thirdParty ?? undefined}
+          path={steps}
         />
       )}
 

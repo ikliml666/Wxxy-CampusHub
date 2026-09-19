@@ -9,12 +9,12 @@ import type {
   FeeItem,
   PasswordPad as PasswordPadData,
   RechargeAccounts,
-  RechargeCcctype,
   RechargeCreated,
   RechargeOrder,
   RechargePayMethod,
   RechargePayMethods,
   RechargeStatus,
+  RoomStep,
 } from "@/shared/types";
 
 /**
@@ -34,15 +34,13 @@ import type {
  * - **不实现跳转分支**（`webUrl`/`paysubmit`/`paymentcashierStr`/`qrCodeUrl`）：后端遇到会报错，
  *   这里只把服务端 `msg` 原样展示。
  *
- * # `third_party` 为什么不由前端拼
+ * # `third_party` 与 `path`（批 C 收口后）
  *
- * App 口径下 `third_party = JSON.stringify(末级 IEC 响应 map.data [+ myCustomInfo])`，多房间拆分
- * 缴费时再缀 `-<选中 id 列表>-<金额列表>`（App bundle：`this.third_party + o`）。那段 `map.data`
- * 含户号等 PII，`campus-synjones::charge` 刻意不透出明细，前端**拿不到任何合法输入**，硬拼必被
- * 服务端拒。批 C 的 `recharge::create_order` 也按「调用方给串」实现（`third_party: Option<&str>`）。
- * 故本组件只**透传** `thirdParty` prop（来源：当前房间视图 `ElectricityView.thirdParty`）；
- * 后端没给时不发该字段，并在界面上明说一句（见下面的告警行）。**这条要批 C/主智能体拍板**：
- * 要么在 `query_electricity` 的视图里下发该串，要么在建单命令内部合成。
+ * 房间上下文串 `third_party`（= 末级 IEC 响应 `map.data` 的 JSON，含户号等 PII）**由后端按房间路径
+ * 合成**（`recharge.rs::third_party_for_room`），前端只把**当前级联路径** `path` 交给
+ * `recharge_create(feeitemId, tranamt, path)`。`path` 在命令层是 `Option`（只为兼容旧前端），
+ * 缺失时后端回可读文案（「缺少房间信息，请返回上一步重新选择房间后再试（客户端需更新）」）——
+ * 本组件经 `setMsg(created.message)` **原样展示**，不吞错误。
  */
 
 /** 结果轮询：间隔 2s、上限 15 次（≈30s）。 */
@@ -69,25 +67,16 @@ const RISK_LINES = [
  */
 type Phase = "idle" | "preparing" | "await" | "submitting" | "polling" | "done" | "error";
 
-/** 账户类型项归一：crate 实际回字符串，计划里写过 `{ccctype,balance}`——两种都吃。 */
-function ccctypeCode(c: RechargeCcctype): string {
-  return typeof c === "string" ? c : c.ccctype;
-}
-
-function ccctypeBalance(c: RechargeCcctype): number | null {
-  return typeof c === "string" ? null : (c.balance ?? null);
-}
-
 export function RechargeFlow({
   feeitem,
   roomLabel,
-  thirdParty,
+  path,
 }: {
   feeitem: FeeItem;
   /** 当前房间的人类可读标签（面包屑 name 拼接），仅展示 */
   roomLabel: string;
-  /** 见文件头注：只能由后端给出，前端不构造 */
-  thirdParty?: string;
+  /** 当前房间的完整级联路径（校区 → 楼栋 → 房间）：后端据它合成 `third_party`（PII 不出后端） */
+  path: RoomStep[];
 }) {
   const [amount, setAmount] = useState("");
   /** 风险声明勾选（计划 §2.4：勾选后方可继续） */
@@ -97,7 +86,7 @@ export function RechargeFlow({
   const [order, setOrder] = useState<RechargeOrder | null>(null);
   const [method, setMethod] = useState<RechargePayMethod | null>(null);
   const [accounts, setAccounts] = useState<string[]>([]);
-  const [ccctypes, setCcctypes] = useState<RechargeCcctype[]>([]);
+  const [ccctypes, setCcctypes] = useState<string[]>([]);
   const [accountno, setAccountno] = useState("");
   const [ccctype, setCcctype] = useState("");
   /** 安全键盘数据：只在本笔支付期间存活（见文件头注红线） */
@@ -163,7 +152,7 @@ export function RechargeFlow({
     });
     if (!r.success || !r.data) return r.message ?? "获取扣款账户失败";
     setCcctypes(r.data.ccctypes);
-    setCcctype(ccctypeCode(r.data.ccctypes[0] ?? "") || "");
+    setCcctype(r.data.ccctypes[0] ?? "");
     setPad(r.data.pad ?? null);
     return null;
   };
@@ -179,17 +168,16 @@ export function RechargeFlow({
       feeItemId: feeitem.id,
       // 原样透传用户输入（红线：客户端不改写金额）
       tranamt: amount.trim(),
-      thirdParty,
+      // 房间路径：`third_party` 由后端按它合成（PII 不出后端）。空路径时后端会回可读文案，
+      // 走下面的 setMsg 原样展示。
+      path,
     });
-    // 命令层可能把 crate 的裸 orderid 包成 {orderId}——两种形态都认
-    const createdId =
-      typeof created.data === "string" ? created.data : created.data?.orderId;
-    if (!created.success || !createdId) {
+    if (!created.success || !created.data?.orderId) {
       setPhase("error");
       setMsg(created.message ?? "下单失败");
       return;
     }
-    const orderId = createdId;
+    const orderId = created.data.orderId;
 
     const pm = await invokeCommand<RechargePayMethods>("recharge_pay_methods", { orderId });
     if (!pm.success || !pm.data) {
@@ -233,7 +221,7 @@ export function RechargeFlow({
     setAccountno(acc0);
     // 第一步若已顺带回账户类型/键盘（服务端行为未定），先落上；第二步拿到更准的再覆盖
     setCcctypes(first.data.ccctypes);
-    setCcctype(ccctypeCode(first.data.ccctypes[0] ?? "") || "");
+    setCcctype(first.data.ccctypes[0] ?? "");
     setPad(first.data.pad ?? null);
     if (acc0) {
       const err = await loadAccountTypes(orderId, m, acc0);
@@ -277,7 +265,9 @@ export function RechargeFlow({
     setPhase("polling");
   };
 
-  /** 取消订单（失败/放弃/超时后的清理入口）。 */
+  /** 取消订单（失败/放弃/超时后的清理入口）。
+   *  学校侧事实：`POST /charge/order/deleteOrder` **只有 JSON body 才返回 200**（form/query/GET 恒 500）——
+   *  由 crate 内部按 JSON body 发，故这里「取消成功」的判定依据不变（`r.success`）。 */
   const cancel = async () => {
     if (!order) {
       backToIdle();
@@ -345,14 +335,6 @@ export function RechargeFlow({
         <p className="text-body font-medium text-text">充值</p>
         <span className="min-w-0 truncate text-caption text-text-2">{roomLabel}</span>
       </div>
-
-      {/* 房间支付上下文缺失时的显式告警（见文件头注：前端拼不出，需后端下发） */}
-      {!thirdParty && (
-        <p className="mt-2 text-caption text-alert">
-          本笔没有携带房间支付上下文（后端未下发 third_party）。学校接口若要求该字段，可能拒单或
-          记到默认房间——真机试充前请先把它接上。
-        </p>
-      )}
 
       {/* 金额输入：快捷档取 layout，范围只作提示，不做改写 */}
       <div className="mt-3">
@@ -483,11 +465,8 @@ export function RechargeFlow({
               onChange={(e) => setCcctype(e.target.value)}
             >
               {ccctypes.map((c) => (
-                <option key={ccctypeCode(c)} value={ccctypeCode(c)}>
-                  {ccctypeCode(c)}
-                  {ccctypeBalance(c) != null
-                    ? `（余额 ¥${(ccctypeBalance(c) as number).toFixed(2)}）`
-                    : ""}
+                <option key={c} value={c}>
+                  {c}
                 </option>
               ))}
             </select>
@@ -612,16 +591,21 @@ export function RechargeFlow({
  * 安全键盘（**红线**）：`keys` 只用于渲染按键上的显示字符；回调一律传**键位下标**（第 i 个键 → i），
  * 提交给后端的就是这串下标。绝不把 `keys` 拼成密码、绝不缓存/落盘/打日志/回填输入框。
  * 布局照官方：前 9 键排 3×3，第 10 键前留一空格，末格为删除。
+ *
+ * ⚠️ 学校侧实测：`passwordMap[uuid]` 是 **10 个字符的字符串**（不是数组），官方前端逐字符渲染。
+ * 批 C 的 crate 已按字符拆成数组下发，此处**再兜一层**：真收到整串就逐字符展开——
+ * 两种形态下**下标语义完全一致**（第 i 个字符 = 第 i 个键），所以提交永远是下标。
  */
 function PasswordPad({
-  keys,
+  keys: keysRaw,
   onKey,
   onDelete,
 }: {
-  keys: string[];
+  keys: string[] | string;
   onKey: (index: number) => void;
   onDelete: () => void;
 }) {
+  const keys = typeof keysRaw === "string" ? Array.from(keysRaw) : keysRaw;
   const keyCls =
     "tabular-num h-11 rounded-control border border-line bg-surface text-title font-medium text-text hover:border-line-strong";
   return (
