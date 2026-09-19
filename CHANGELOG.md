@@ -1,5 +1,46 @@
 # 更新日志
 
+## 2026-09-19 · 全量补齐收口：批 10 多课表、批 11 多方案/全局课程管理经用户裁决砍掉（单校定位，无代码改动）
+
+- **模块**：`docs/HANDOFF-timetable-parity.md`（§七终态补记）、`CHANGELOG.md`；批 10 已实现代码**未提交即丢弃**（worktree reset），契约 §16 未合入
+- **裁决**：本仓只绑定无锡学院（单校直连），多课表无使用场景——批 10 存储 v2 已由 glm5-3-flash 实现并通过三件套与回归测试，用户拍板放弃后整批丢弃，未进 master；批 11（多方案编辑 + 全局课程管理）评估为单校场景性价比低（同名多方案概率低、课表仅约 8 门课），一并砍掉
+- **终态**：P1-P5 补齐以 P0 + 批 1-9 为准全部完成；明确不做清单新增「多课表管理」「多方案编辑」「全局课程管理」三项（将来多校/安卓版再议）
+
+## 2026-09-19 · 全量补齐批 9（P5-e）：今日页接本地课表（本地优先、教务兜底）
+
+- **模块**：`commands/timetable.rs`（`get_today_courses` 命令 + `today_courses` 纯函数 7 个单测）、`TodayPanel.tsx`（与门户 overview 并行取数、互不阻塞）、契约 §15
+- **要点**：本地课表（含 override/停开/手动/自定义时间/跳过日）成为「下一节课」与「今日课程」列表的数据源；`has_local=false` 回落门户现状零变化；state 四态（normal/no_semester/vacation/skipped）；ongoing/next 后端按本机时钟算好下发，前端不自算时钟；已结束置灰按「位于 next 之前」推导
+
+## 2026-09-19 · 全量补齐批 8（P5-d）：调课搬迁 + 快速删除
+
+- **模块**：`commands/timetable.rs`（`move_day_courses`、`quick_delete` 两命令 + 6 单测）、设置弹层「批量调整」区块、契约 §14
+- **要点**：搬迁单模式统一走 override（手动+导入，`move:<from>:<to>` 一批、整批可撤销），周次判定走 `week_index_at_date` 对齐口径（R8 禁 epoch 直除）；快删按周次×星期组合移除、weeks 删空删整条（级联清 override）
+
+## 2026-09-19 · 全量补齐批 7（P5-c）：周次选择弹窗 + 顶栏态机 + 非本周降级 + 色板自定义
+
+- **模块**：`commands/timetable.rs`（`week_state` 四态）、`model.rs`（`show_non_current_week`）、`uiStore`（persist v2 + `customCourseColors`）、`TimetablePanel.tsx`（周次弹窗/三态文案/降级渲染/`coursePalette` 合成）、契约 §13
+- **要点**：「第 N 周」点开 1..M 网格跳转；unset（可点开设置）/before（距开学 N 天）/vacation（假期）三态；非本周课开关式降级显示（40% 透明、可点不可拖）；色板 = 8 固定 + 原生取色器自定义段，导入课哈希取色 `% 合成长度`（旧数据 0..7 行为不变）
+
+## 2026-09-19 · 全量补齐批 6（P5-b）：课表 JSON 导入导出 + ICS VALARM
+
+- **模块**：`commands/timetable.rs`（`export_timetable_json`/`import_timetable_json`/`build_ics_with_reminder` + 5 单测）、导出区 UI、契约 §12
+- **要点**：导出含 courses+overrides+config 全量（roundtrip 单测）；导入一次落盘（禁止先清后写两次 IO）、config 非空才覆盖、非法中文报错不落库；VALARM 0-60 分钟可选（`TRIGGER:-PT{n}M`，缺省无、golden 保）
+
+## 2026-09-19 · 全量补齐批 5（P5-a）：手动课程自定义时间等表单五件套
+
+- **模块**：`commands/timetable.rs`（ManualCourseInput 扩 custom 字段 + 备注 300 截断）、`diff.rs`（format_weeks 单双周后缀）、CourseForm/SlotsEditor（按时刻开关、别名输入、dirty 拦截、N/300 计数）、`customBlockRange` 相交落块、契约 §11
+- **要点**：custom 课网格按「与各大节相交的 min..max 大节」渲染（无相交仅列表可见）、不可拖；dirty 时关闭弹 confirm；`1,3,5,7` → `(单周)`、全偶 → `(双周)`（前后端同语义）
+
+## 2026-09-19 · 全量补齐批 4（P4）：网格拖拽改课（交叉复核修复后合入）
+
+- **模块**：`TimetablePanel.tsx`（拖拽状态机 +213 行）、契约 §10；deepseek-flash 复核 + glm5-3-flash 修复 7 项
+- **要点**：4px 阈值区分点击/拖拽、setPointerCapture、suppressClick、落点纯前端几何（跳过日列无效回弹——复核修复 P0：原实现会落 day=0 脏数据并白屏）；落库分叉：多周/导入课 → 单周 Rescheduled override（`drag:<courseId>:<week>` 幂等）、单周手动课直改；跨度换算按**小节差**守恒（复核订正实现误读的大节差）；pointerId 防多指、blur/lostpointercapture/周切换复位
+
+## 2026-09-19 · 全量补齐批 3（P3）：slot_rules 组合作息（冬/夏按日期区间自动切换）
+
+- **模块**：`model.rs`（SlotRule）、`commands/timetable.rs`（`effective_slots_at` 区间命中、`save_slot_rules` + 8 单测）、SlotsEditor 规则区块、契约 §9
+- **要点**：命中含端点、区间重叠取先声明、三段回落链 rules→config.slots→内置；空 slots 规则不算命中（防御手改 JSON）；TimetableView.slots 取「今天」生效作息（跨区间周的已知取舍，注释写明）
+
 ## 2026-09-19 · 批 2 交叉复核修复：extra 覆盖面两处数据丢失 + 前端补调块单位 bug + UID 防撞（deepseek-flash 复核、glm5-3-flash 修复）
 
 - **模块**：`campus-schedule/occurrence.rs`（extra 循环独立化 + P3-c 登记 + 5 个新单测）、`commands/timetable.rs`（ICS 周次并集 + UID 后缀 + 溯源映射 + 4 个新单测）、`TimetablePanel.tsx`（P2 补调块单位修复 + 互锚注释）、契约 §8.4/§8.5 增量、CodeWiki 三篇
