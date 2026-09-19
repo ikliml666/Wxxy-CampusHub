@@ -332,6 +332,96 @@ fn final_query(map: &Value, defs: &[LevelDef]) -> ElectricityQuery {
     }
 }
 
+// ---------------- 余额提取（M4；**严格形态，宁缺勿错**） ----------------
+
+/// 余额关键词候选（**金额类**，按长度降序尝试）。
+///
+/// ⚠️ 刻意**不含**「剩余电量 / 电量」这类**非金额**词：末级文本里 `当前剩余电量957.50度`
+/// 是 kWh 而非元，把它当成「余额」会让 UI 把电量当钱显示（错报数字）。
+/// 实测 448 的文本同时出现「当前余额517.05元」与「当前剩余电量957.50度」，取前者即正确值，
+/// 故排除电量词不影响任何一片区的真实取数。
+const BALANCE_KEYWORDS: [&str; 3] = ["剩余金额", "剩余电费", "余额"];
+
+/// 关键词与数字之间允许出现的分隔符（含「零宽紧邻」形态——实测 448/449 就是关键词直接贴数字；
+/// `为`/`是` 是中文里不改变语义的连接词）。分隔符之外的内容一律不跳过（不是模糊匹配）。
+const BALANCE_SEPARATORS: [char; 6] = [':', '：', '=', '＝', '为', '是'];
+
+/// 严格提取一段文本里的余额数值：**关键词 + 分隔符 + 数字**，其余一概不认。
+///
+/// 三条纪律（与模块头注「绝不做文本解构」的取舍一致）：
+/// 1. **只认相邻形态**：数字必须紧跟关键词（中间只允许 [`BALANCE_SEPARATORS`] 与空白），
+///    绝不在文本里乱找「第一个数字」（那会在校方改文案时错报别的数）；
+/// 2. **绝不位置解构**：不按逗号/顿号切段取第 N 段（三片区文案格式互不相同）；
+/// 3. **宁缺勿错**：提不到返回 `None`，调用方按「无数据」展示，不显示臆造值。
+///
+/// 实测三片区样例（均应命中，见单测）：`剩余金额：-545.70，单价：0.5400`、
+/// `当前余额517.05元,当前剩余电量957.50度`、`房间当前剩余电费625.35`。
+pub fn balance_from_text(text: &str) -> Option<f64> {
+    // 取**最早出现**的关键词（同位置时长词优先），后续数字才算它的值
+    let mut best: Option<(usize, &str)> = None;
+    for kw in BALANCE_KEYWORDS {
+        for (pos, _) in text.match_indices(kw) {
+            let better = match best {
+                None => true,
+                Some((p, k)) => pos < p || (pos == p && kw.len() > k.len()),
+            };
+            if better {
+                best = Some((pos, kw));
+            }
+        }
+    }
+    let (pos, kw) = best?;
+    let rest = &text[pos + kw.len()..];
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || BALANCE_SEPARATORS.contains(&c));
+    parse_leading_number(rest)
+}
+
+/// 从文本开头解析一个严格形态的数字（允许前导 `-`、一个小数点）；解析不成立 → `None`。
+fn parse_leading_number(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let neg = b.first() == Some(&b'-');
+    let start = usize::from(neg);
+    let mut i = start;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        // 关键词后没有数字（如 `余额不足，请充值`）→ 安静退化为「无数据」
+        return None;
+    }
+    if b.get(i) == Some(&b'.') {
+        let mut j = i + 1;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > i + 1 {
+            i = j;
+        }
+    }
+    // 千分位歧义（`1,234.56`）：只取到 `1` 会错报 ⇒ 直接放弃
+    let mut it = s[i..].chars();
+    if let (Some(sep), Some(d)) = (it.next(), it.next()) {
+        if matches!(sep, ',' | '，') && d.is_ascii_digit() {
+            return None;
+        }
+    }
+    s[..i].parse::<f64>().ok()
+}
+
+/// 从末级视图字段（`map.showData` 字典）提取余额数值 + **原始文本**（原文用于并存留证据）。
+///
+/// 逐字段**独立**扫描（不跨字段拼接——拼接可能造出「A 字段尾是关键词、B 字段首是数字」的假命中）；
+/// `raw` 只是各字段值的拼接（实测恒单键「信息」，拼接仅为通用性）。
+pub fn balance_from_fields(fields: &[Field]) -> (Option<f64>, String) {
+    let balance = fields.iter().find_map(|f| balance_from_text(&f.value));
+    let raw = fields
+        .iter()
+        .map(|f| f.value.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (balance, raw)
+}
+
 // ---------------- 取数 ----------------
 
 /// 片区目录（**匿名，无需 token**）。
@@ -641,5 +731,99 @@ mod tests {
         let e = query_cascade(&c, "450", &empty_room).await.expect_err("空房间号应报错");
         assert!(matches!(e, CampusSynjonesError::Parse(_)), "实际 {e:?}");
         assert!(e.to_string().contains("第 1 级未填值"), "实际 {e}");
+    }
+
+    // ---------- 余额提取（M4，严格形态） ----------
+
+    /// **实测三片区文案全部命中**（这三句是 live 原文；金额单位元）。
+    #[test]
+    fn balance_extraction_hits_all_three_live_texts() {
+        // 450：全角冒号 + 负号 + 小数；后面还跟着「单价」的另一个数字，不能取错
+        assert_eq!(
+            balance_from_text("房间号：101,剩余金额：-545.70，单价：0.5400"),
+            Some(-545.70)
+        );
+        // 448：关键词**紧邻**数字（无分隔符），且同一句里有「剩余电量」的干扰数字
+        assert_eq!(
+            balance_from_text("当前余额517.05元,当前剩余电量957.50度"),
+            Some(517.05)
+        );
+        // 449：无分隔符 + 无单位
+        assert_eq!(balance_from_text("房间当前剩余电费625.35"), Some(625.35));
+    }
+
+    /// 关键词取**最早出现**的那个；分隔符形态多样（`：`/`:`/`是`/空格/无）。
+    #[test]
+    fn balance_extraction_takes_earliest_keyword_and_tolerates_separators() {
+        assert_eq!(
+            balance_from_text("单价：0.5400，余额：12.3"),
+            Some(12.3),
+            "单价在前也不干扰（只认关键词后的数字）"
+        );
+        assert_eq!(balance_from_text("余额: 8.5 元"), Some(8.5), "半角冒号 + 空格");
+        assert_eq!(balance_from_text("余额是 9.9 元"), Some(9.9), "「是」连接词");
+        assert_eq!(balance_from_text("剩余金额 100"), Some(100.0), "只有空格");
+        assert_eq!(
+            balance_from_text("余额0.00元"),
+            Some(0.0),
+            "0 是合法余额（不能与「提不到」混为一谈）"
+        );
+        assert_eq!(balance_from_text("余额：5元，优惠券：3张"), Some(5.0), "只取关键词后第一个数字");
+    }
+
+    /// **提不到就返回 None**（宁缺勿错）：无关键词 / 关键词后无数 / 电量词 / 千分位歧义 / 空串。
+    #[test]
+    fn balance_extraction_refuses_when_unsure() {
+        assert_eq!(balance_from_text("房间号：101,单价：0.5400"), None, "没有余额关键词");
+        assert_eq!(
+            balance_from_text("当前剩余电量957.50度"),
+            None,
+            "电量（度）不是金额——刻意不认，绝不当余额显示"
+        );
+        assert_eq!(balance_from_text("余额不足，请及时充值"), None, "关键词后不是数字");
+        assert_eq!(balance_from_text("剩余金额：--"), None, "只有符号没有数字");
+        assert_eq!(balance_from_text("余额：1,234.56元"), None, "千分位歧义 → 宁可无数据");
+        assert_eq!(balance_from_text("缴费系统返回数据错误child==NULL！"), None);
+        assert_eq!(balance_from_text(""), None);
+        // 关键词在句尾（无后续内容）也不能 panic
+        assert_eq!(balance_from_text("当前余额"), None);
+    }
+
+    /// 多字段（`showData` 字典）：逐字段独立扫描，**不跨字段拼接**（拼接会造出假命中）。
+    #[test]
+    fn balance_from_fields_scans_fields_independently() {
+        let hit = vec![Field {
+            label: "信息".to_string(),
+            value: "当前余额517.05元,当前剩余电量957.50度".to_string(),
+        }];
+        let (balance, raw) = balance_from_fields(&hit);
+        assert_eq!(balance, Some(517.05));
+        assert_eq!(raw, "当前余额517.05元,当前剩余电量957.50度", "原文原样返回（留证据）");
+
+        let miss = vec![Field {
+            label: "信息".to_string(),
+            value: "房间号：101,单价：0.5400".to_string(),
+        }];
+        let (balance, raw) = balance_from_fields(&miss);
+        assert_eq!(balance, None);
+        assert_eq!(raw, "房间号：101,单价：0.5400");
+
+        // 字段 A 尾是关键词、字段 B 首是数字 → **不得**拼起来命中（独立性纪律）
+        let split = vec![
+            Field {
+                label: "a".to_string(),
+                value: "当前余额".to_string(),
+            },
+            Field {
+                label: "b".to_string(),
+                value: "999.99".to_string(),
+            },
+        ];
+        assert_eq!(balance_from_fields(&split).0, None, "跨字段拼接会误报，必须拒绝");
+
+        let empty: Vec<Field> = Vec::new();
+        let (balance, raw) = balance_from_fields(&empty);
+        assert_eq!(balance, None);
+        assert_eq!(raw, "");
     }
 }

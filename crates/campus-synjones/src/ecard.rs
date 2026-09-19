@@ -70,6 +70,12 @@ pub struct Transaction {
     pub pay_name: String,
     /// 消费地点（`locationName`）。
     pub location_name: String,
+    /// **该笔交易后的余额快照**（元；`cardBalance` 字段，服务端单位分）。
+    ///
+    /// M4 新增的「事件级余额」数据源：一卡通流水每笔都带这个字段，故「某时刻的余额」是**可回溯**的
+    /// （与服务端恒为 null 的电费每日余额不同）。字段缺失/非数值 → `None`（`Option` 保持向后兼容，
+    /// 旧前端不读该键不受影响）。
+    pub card_balance_yuan: Option<f64>,
 }
 
 /// 一页流水。
@@ -169,6 +175,8 @@ pub fn parse_transaction(rec: &Value) -> Transaction {
         is_income,
         pay_name,
         location_name: text_of(rec.get("locationName")),
+        // 交易后余额快照（分→元）；缺失/垃圾值 → None（不臆造 0：0 元与「没有该字段」语义不同）
+        card_balance_yuan: int_of(rec.get("cardBalance")).map(yuan),
     }
 }
 
@@ -328,6 +336,48 @@ mod tests {
         assert!(!expense.is_income);
         assert_eq!(expense.pay_name, "餐饮", "payName 为空回落 consumeTypeName");
         assert_eq!(expense.summary, "食堂消费");
+    }
+
+    /// **交易后余额快照**（M4 新增）：`cardBalance` 单位是**分**（一卡通侧口径），分→元；
+    /// 缺失 / `null` / 非数值 → `None`（**不臆造 0**：「0 元」与「没有该字段」语义不同，
+    /// 后者若显示成 0 元会在趋势图上造出假点）。
+    #[test]
+    fn transaction_card_balance_is_fen_to_yuan() {
+        // 实测样本：cardBalance = 8151 分，与 queryCurrentCard 的 elec_accamt 一致
+        let live = parse_transaction(&json!({
+            "jndatetimeStr": "2026-09-19 12:30:00",
+            "resume": "食堂消费",
+            "tranamt": "350",
+            "typeFrom": "2",
+            "cardBalance": 8151
+        }));
+        assert_eq!(live.card_balance_yuan, Some(81.51), "分→元（不是元口径）");
+
+        // 字符串形态也吃得下（服务端类型漂移先例）
+        let as_text = parse_transaction(&json!({"cardBalance": "8151"}));
+        assert_eq!(as_text.card_balance_yuan, Some(81.51));
+
+        // 0 分是合法余额（与「无该字段」不同）
+        assert_eq!(
+            parse_transaction(&json!({"cardBalance": 0})).card_balance_yuan,
+            Some(0.0)
+        );
+
+        // 缺失 / null / 垃圾值 / 小数分（四舍五入）→ None 或取整
+        assert_eq!(parse_transaction(&json!({})).card_balance_yuan, None);
+        assert_eq!(
+            parse_transaction(&json!({"cardBalance": null})).card_balance_yuan,
+            None
+        );
+        assert_eq!(
+            parse_transaction(&json!({"cardBalance": "abc"})).card_balance_yuan,
+            None
+        );
+        assert_eq!(
+            parse_transaction(&json!({"cardBalance": 8151.4})).card_balance_yuan,
+            Some(81.51),
+            "非整数分先取整（int_of 口径）"
+        );
     }
 
     /// 流水信封：total 与 records；空/缺字段 → 0 条不 panic。

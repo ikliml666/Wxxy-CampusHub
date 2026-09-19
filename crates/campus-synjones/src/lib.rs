@@ -33,6 +33,7 @@ pub mod client;
 pub mod ecard;
 pub mod recharge;
 pub mod sso;
+pub mod turnover;
 
 pub use charge::{
     list_feeitems, query_cascade, Choice, ElectricityQuery, ElectricityView, FeeItem, Field,
