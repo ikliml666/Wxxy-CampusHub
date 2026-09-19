@@ -1,5 +1,32 @@
 # 更新日志
 
+## 2026-09-19 · M3 批 2：一卡通取数与钱包页接线（慧新E校实时 + 门户降级）
+
+- **模块**：`campus-synjones/src/ecard.rs`（新建 356 行）、`commands/synjones.rs`（新建 270 行：`get_ecard`/`get_ecard_transactions`/`get_wallet_cards`）、`WalletPanel.tsx`（重写）、`TodayPanel.tsx`（仅钱包卡）、契约 types +61 行
+- **要点**：**余额口径**以电子账户 `elec_accamt`（分）为准、卡账户 `(db_balance+unsettle_amount)` 次级显示；流水不带 `type` 即全量（实测 1042 = 支出 1006 + 收入 36）；`cardname` 实测为空串 → 回落 `card_name`→`cardtype`；**单 token 缓存**（进程级 `static SYNJONES` + `MutexGuard` 串行化，杜绝并发 SSO——token 实测为「单活」）；首页钱包卡**实时优先、失败静默回落门户快照并标注来源**，不阻塞首屏
+- **已知降级**：今日/本月消费无解——`berserker-search/statistics/turnover/sum/user` 实测需五参、17 种组合全部返回空 `data`，`count` 给的是**全时段**总额且无视日期参数，故 UI 显示「暂不可用」（如后续需要，只能拉全量流水本地按日期求和，收益不匹配暂不做）
+
+## 2026-09-19 · M2 遗留补做：顶栏命令面板（Cmd/Ctrl+K）
+
+- **模块**：`components/CommandPalette.tsx`（新建 332 行）、`AppShell.tsx`（触发条 + 挂载）、`uiStore.ts`（开关状态，不入持久化）
+- **要点**：三类数据源——DockNav `DOCK_ITEMS` 的 9 个页面项、现有 store 动作（主题/登录/头像同步/退出/切换已存账号）、设置跳转；模糊匹配 + `↑/↓/Enter/Esc` 全程键盘可达 + `role=dialog/combobox/listbox` 语义 + 焦点回归；清掉 M2 遗留的 `aria-disabled` 搜索胶囊与三处「M2 接入」注释；零新依赖
+
+## 2026-09-19 · M3 批 1：慧新E校协议 crate（lyCas SSO 桥 + 三套信封）
+
+- **模块**：`crates/campus-synjones`（新建：`lib.rs`/`sso.rs`/`client.rs` + live 测试）、根 `Cargo.toml` members
+- **要点**：CAS TGT 走 lyCas 桥换 token（**2 跳**，token 在落点 URL query `?synjones-auth=`、无 Set-Cookie 参与）；**`targetUrl` 是硬性前提**——`/campus-card-pc/`、`/charge-pc/pays/450` 带 token，而 `/plat/shouyeUser` 与裸调用**不带**（产品默认值据此定为前者）；`synAccessSource=app` **双份携带**（GET 走 query + 同名头、POST form 走 body + 同名头），4030 首次带 token 实证（`app`→200、`pc`→HTTP 401 `code=4030`）；berserker/charge/search 三套信封分离解析，`Envelope` 显式传参防混用；**token 单活**、CAS TGT 隔夜过期（换票 500，正文含票据不得回显）。live 全链断言通过（换到 token 后 `queryCurrentCard` 200）
+
+## 2026-09-19 · 修复：门户会话失效被误报为「解析失败」（各界面资讯拉取失败）
+
+- **模块**：`campus-auth/src/{error.rs,cas.rs}`、`campus-portal/src/{client.rs,Cargo.toml}`、`campus-portal/tests/portal_diag_live.rs`（新建 live 回归）
+- **根因**（真实账号实测复现）：门户用 **HTTP 200 + `data:null` + `meta.statusCode=302`** 表达会话失效，与匿名响应**逐字段相同**（`len=116`）；而 `extract_user_profile` 只认 `data.userName`、`profile_err` 又把所有非 HTTP 错误归 `Parse` → 用户看到「响应解析失败: tryLoginUserInfo 缺少 userName」；同时 `portal_probe` 仅凭「有 `customsid` + 首页未弹回 CAS」判定，**死会话被误报 Alive**，`check_session` 不清会话，落入「显示已登录、点什么都报错」的死状态
+- **要点**：新增 `CampusAuthError::PortalNotLogin`；解析前**先判信封**（`meta.success==false` 或 `data` 空）；`profile_err` 映射为 `NotLogin`（「请先登录」文案首次可达）；`portal_probe` 追加鉴权信封判定，失效即 `Expired` → 启动清会话引导重新登录。live 复跑：新登录资讯 7 栏目正常、旧会话判 Expired；全仓 244 passed / 0 failed
+
+## 2026-09-19 · M3 规划与侦察取证（含两条旧事实证伪）
+
+- **模块**：`PLAN.md`（§3.2 慧新E校事实纠错 + §M3 细化）、`docs/superpowers/plans/2026-09-19-m3-ecard-electricity.md`（任务级计划，4 批）
+- **要点**：**证伪**「电费 `charge-pc/pays/450` 匿名可用、返回剩余金额/单价」——该 URL 是 Vue SPA 壳，真链路为 `GET /charge/feeitem`（**唯一匿名可读**）→ `singleFeeitem` → `getThirdData` 三级级联；**一卡通流水在独立的 `berserker-search` 服务**（非 `berserker-app`）；`appScheme/info` 需 `?type=user&serviceType=<agentType>`（匿名可读）；同步纠正 `PLAN.md`、`docs/HANDOFF.md`、项目记忆库三处同源错误
+
 ## 2026-09-19 · 全量补齐收口：批 10 多课表、批 11 多方案/全局课程管理经用户裁决砍掉（单校定位，无代码改动）
 
 - **模块**：`docs/HANDOFF-timetable-parity.md`（§七终态补记）、`CHANGELOG.md`；批 10 已实现代码**未提交即丢弃**（worktree reset），契约 §16 未合入
