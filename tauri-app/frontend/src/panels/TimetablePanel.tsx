@@ -28,6 +28,8 @@ import type {
   MoveResult,
   NoticeCandidate,
   NoticeAutoParse,
+  NoticeSwapCandidate,
+  SwapDay,
   OverrideKind,
   SemesterConfigInput,
   SlotRule,
@@ -1147,6 +1149,7 @@ function SlotsEditor({
 function SettingsEditor({
   initial,
   initialSkippedDates,
+  initialSwapDays,
   courses,
   busy,
   skippedBusy,
@@ -1157,6 +1160,10 @@ function SettingsEditor({
   bulkError,
   onSave,
   onSaveSkippedDates,
+  onSaveSwapDays,
+  onFetchHolidays,
+  holidaysBusy,
+  holidaysMsg,
   onMoveDayCourses,
   onQuickDelete,
   onClose,
@@ -1171,6 +1178,8 @@ function SettingsEditor({
   };
   /** 跳过日期快照（契约 §8.1，批 2） */
   initialSkippedDates: string[];
+  /** 置换日快照（契约 §22） */
+  initialSwapDays: SwapDay[];
   /** 课程快照（批 8 §14.3：快速删除的受影响课程数前端本地预览） */
   courses: Course[];
   busy: boolean;
@@ -1183,6 +1192,12 @@ function SettingsEditor({
   onSave: (input: SemesterConfigInput) => void;
   /** 跳过日期独立保存（save_skipped_dates，整体替换），与学期设置分开提交 */
   onSaveSkippedDates: (dates: string[]) => void;
+  /** 置换日编辑保存（save_swap_days，整体替换；手动条目来源清空） */
+  onSaveSwapDays: (days: SwapDay[]) => void;
+  /** 一键拉取法定节假日（timor.tech） */
+  onFetchHolidays: () => void;
+  holidaysBusy: boolean;
+  holidaysMsg: { ok: boolean; text: string } | null;
   /** 批量调整（批 8 §14.3）：confirm 确认在弹层内完成（搬迁列日期、快删列预览数） */
   onMoveDayCourses: (fromDate: string, toDate: string) => void;
   onQuickDelete: (weeks: number[], days: number[]) => void;
@@ -1195,6 +1210,10 @@ function SettingsEditor({
   const [skipped, setSkipped] = useState<string[]>(initialSkippedDates);
   const [skipInput, setSkipInput] = useState("");
   const [skipLocalErr, setSkipLocalErr] = useState<string | null>(null);
+  // 置换日草稿（契约 §22）：日期 + 被补日星期，整体替换保存
+  const [swaps, setSwaps] = useState<SwapDay[]>(initialSwapDays);
+  const [swapInput, setSwapInput] = useState("");
+  const [swapWdInput, setSwapWdInput] = useState(1);
   // 批量调整（批 8 契约 §14.3 → 批 B §19 排版修订）：搬迁两日期 +
   // 快删周次改文本输入（parseWeeksInput）+ 星期紧凑 chips
   const [moveFrom, setMoveFrom] = useState("");
@@ -1416,6 +1435,113 @@ function SettingsEditor({
             </div>
           </div>
 
+          {/* 置换日区块（契约 §22）：某日期按某星期的课表上课（调休补课） */}
+          <div className={cn(field, "border-t border-line pt-3")}>
+            <span className={label}>置换日（调休补课）</span>
+            <p className="text-caption text-text-2">
+              该日期按所选星期的课表上课，网格该列加「班」标并显示被补日的课程。
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={swapInput}
+                onChange={(e) => setSwapInput(e.target.value)}
+                disabled={holidaysBusy}
+                aria-label="置换日期"
+                className={cn(inputCls, "flex-1")}
+              />
+              <select
+                value={swapWdInput}
+                onChange={(e) => setSwapWdInput(Number(e.target.value))}
+                disabled={holidaysBusy}
+                aria-label="按哪天的课表上课"
+                className={cn(inputCls, "w-24")}
+              >
+                {[1, 2, 3, 4, 5, 6, 7].map((d) => (
+                  <option key={d} value={d}>
+                    按{DAY_NAMES[d]}课表
+                  </option>
+                ))}
+              </select>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={holidaysBusy || !swapInput}
+                onClick={() => {
+                  if (swaps.some((x) => x.date === swapInput))
+                    return setSkipLocalErr("该日期已有置换条目");
+                  if (skipped.includes(swapInput))
+                    return setSkipLocalErr("该日期是跳过日期（当天无课），与置换冲突");
+                  setSkipLocalErr(null);
+                  setSwaps((ds) => [...ds, { date: swapInput, weekday: swapWdInput, sourceNoticeId: null }]);
+                  setSwapInput("");
+                }}
+              >
+                <Plus aria-hidden="true" className="size-3.5" />
+                添加
+              </Button>
+            </div>
+            {swaps.length > 0 ? (
+              <ul className="flex flex-wrap gap-1.5">
+                {swaps.map((sw) => (
+                  <li key={sw.date}>
+                    <span className="tabular-num inline-flex items-center gap-1 rounded bg-sched/10 px-1.5 py-0.5 text-caption text-sched">
+                      {sw.date}·补周{DAY_NAMES[sw.weekday]}
+                      <button
+                        type="button"
+                        aria-label={`移除置换 ${sw.date}`}
+                        disabled={holidaysBusy}
+                        onClick={() => setSwaps((ds) => ds.filter((x) => x.date !== sw.date))}
+                        className="text-alert hover:underline disabled:opacity-50"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-caption text-text-2/70">暂无置换日。</p>
+            )}
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={holidaysBusy}
+                onClick={() => onSaveSwapDays(swaps)}
+              >
+                {holidaysBusy ? "保存中…" : "保存置换日"}
+              </Button>
+            </div>
+          </div>
+
+          {/* 节假日一键拉取（契约 §22）：timor.tech 公开 API，放假日并入跳过日期 */}
+          <div className={cn(field, "border-t border-line pt-3")}>
+            <span className={label}>法定节假日</span>
+            <p className="text-caption text-text-2">
+              从公开节假日服务拉取当年法定放假日（含节日名，网格横幅显示），并入上方跳过日期。
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={holidaysBusy}
+                onClick={onFetchHolidays}
+              >
+                <RefreshCw aria-hidden="true" className={cn("size-3.5", holidaysBusy && "animate-spin")} />
+                {holidaysBusy ? "拉取中…" : "更新节假日信息"}
+              </Button>
+              {holidaysMsg && (
+                <p className={cn("text-caption", holidaysMsg.ok ? "text-sched" : "text-alert")} role="status">
+                  {holidaysMsg.text}
+                </p>
+              )}
+            </div>
+          </div>
+
           {/* 批量调整区块（批 8 契约 §14.3；批 B §19 排版修订——周次改文本输入）：
               搬迁走 override 整批可撤销；快删按周次×星期 */}
           <div className={cn(field, "border-t border-line pt-3")}>
@@ -1569,6 +1695,8 @@ export function TimetablePanel() {
    *  null = 尚未检查过。candidates 为全部通知候选的扁平合并，确认流不变。 */
   const [scanning, setScanning] = useState(false);
   const [noticeResults, setNoticeResults] = useState<NoticeAutoParse[] | null>(null);
+  /** 置换候选（契约 §22）：与逐课候选分开渲染，采纳走 apply_swap_day */
+  const [swapCandidates, setSwapCandidates] = useState<NoticeSwapCandidate[] | null>(null);
   const [candidates, setCandidates] = useState<NoticeCandidate[] | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -1591,6 +1719,8 @@ export function TimetablePanel() {
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
   const [skippedBusy, setSkippedBusy] = useState(false);
   const [skippedErr, setSkippedErr] = useState<string | null>(null);
+  /** 节假日一键拉取结果消息（契约 §22） */
+  const [holidaysMsg, setHolidaysMsg] = useState<{ ok: boolean; text: string } | null>(null);
   /** 批量调整（批 8 契约 §14.3）：设置弹层内的搬迁 / 快速删除 */
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkMsg, setBulkMsg] = useState<string | null>(null);
@@ -1721,6 +1851,20 @@ export function TimetablePanel() {
   const isSkippedCol = (i: number) =>
     weekDates[i] != null && skippedSet.has(dayKeyOf(weekDates[i]!));
 
+  /** 置换日映射（契约 §22）：日期 key → 被补日星期。命中列显示该星期课程。 */
+  const swapMap = useMemo(
+    () => new Map((tt?.config.swapDays ?? []).map((sw) => [sw.date, sw.weekday])),
+    [tt?.config.swapDays],
+  );
+  const swapCol = (i: number): number | undefined =>
+    weekDates[i] != null ? swapMap.get(dayKeyOf(weekDates[i]!)) : undefined;
+
+  /** 节假日名映射（契约 §22，仅显示）：日期 key → 节日名。 */
+  const holidayNameMap = useMemo(
+    () => new Map((tt?.config.holidayNames ?? []).map((h) => [h.date, h.name])),
+    [tt?.config.holidayNames],
+  );
+
   const openBlockDetail = (block: PlacedBlock) => {
     const el = blockRefs.current.get(block.key);
     if (!el) return;
@@ -1772,7 +1916,7 @@ export function TimetablePanel() {
     if (rects.length === 0) return null;
     let col = rects.findIndex((r) => x < r.left + r.width);
     if (col === -1) col = rects.length - 1; // 越过右缘 → 末列
-    if (isSkippedCol(col)) return null;
+    if (isSkippedCol(col) || swapCol(col) != null) return null;
     const span = block.endSection - block.startSection;
     const raw = Math.floor((y - rects[col].top) / ROW_H_S) + 1;
     const startSection = Math.min(Math.max(1, sectionSlots.length - span), Math.max(1, raw));
@@ -2004,13 +2148,15 @@ export function TimetablePanel() {
     }
     setNoticeResults(r.data);
     const all = r.data.flatMap((n) => n.candidates);
+    const swaps = r.data.flatMap((n) => n.swaps);
+    setSwapCandidates(swaps.length > 0 ? swaps : null);
     const failed = r.data.filter((n) => n.error !== null).length;
-    if (all.length > 0) {
+    if (all.length > 0 || swaps.length > 0) {
       setCandidates(all);
       setNoticeMsg({
         ok: true,
         text:
-          `已解析 ${r.data.length} 条公告：${all.length} 条候选待确认` +
+          `已解析 ${r.data.length} 条公告：${all.length + swaps.length} 条候选待确认` +
           (failed > 0 ? `（${failed} 条未能解析，见下方说明）` : "") +
           "，采纳后才会生效。",
       });
@@ -2032,6 +2178,24 @@ export function TimetablePanel() {
       setReloadTick((t) => t + 1);
     } else {
       setNoticeMsg({ ok: false, text: r.message ?? "采纳失败" });
+    }
+  };
+
+  /** 采纳置换候选（契约 §22）：写 config.swapDays，一次置换生效整列课表。 */
+  const adoptSwapDay = async (c: NoticeSwapCandidate) => {
+    setBusyKey(`swap-${c.noticeId}-${c.date}`);
+    setNoticeMsg(null);
+    const r = await invokeCommand<SwapDay>("apply_swap_day", { candidate: c });
+    setBusyKey(null);
+    if (r.success && r.data) {
+      setSwapCandidates((cs) => (cs ? cs.filter((x) => x !== c) : cs));
+      setNoticeMsg({
+        ok: true,
+        text: `已采纳置换：${c.date} 按 ${DAY_NAMES[c.weekday ?? 1]} 课表上课`,
+      });
+      setReloadTick((t) => t + 1);
+    } else {
+      setNoticeMsg({ ok: false, text: r.message ?? "置换采纳失败" });
     }
   };
 
@@ -2195,6 +2359,37 @@ export function TimetablePanel() {
       setView({ phase: "ready", data: r.data });
     } else {
       setSkippedErr(r.message ?? "保存失败");
+    }
+  };
+
+  /** 置换日手动编辑保存（契约 §22，save_swap_days 整体替换）。 */
+  const saveSwapDays = async (days: SwapDay[]) => {
+    setSkippedBusy(true);
+    setSkippedErr(null);
+    const r = await invokeCommand<TimetableView>("save_swap_days", { days });
+    setSkippedBusy(false);
+    if (r.success && r.data) {
+      setView({ phase: "ready", data: r.data });
+    } else {
+      setSkippedErr(r.message ?? "保存失败");
+    }
+  };
+
+  /** 一键拉取法定节假日（契约 §22，timor.tech）：放假日并入跳过日期 + 节日名。 */
+  const fetchHolidays = async () => {
+    setSkippedBusy(true);
+    setSkippedErr(null);
+    setHolidaysMsg(null);
+    const r = await invokeCommand<{ added: number; total: number; year: number }>("fetch_holidays");
+    setSkippedBusy(false);
+    if (r.success && r.data) {
+      setHolidaysMsg({
+        ok: true,
+        text: `已更新 ${r.data.year} 年节假日：新并入 ${r.data.added} 天（共 ${r.data.total} 天放假日）`,
+      });
+      setReloadTick((t) => t + 1);
+    } else {
+      setHolidaysMsg({ ok: false, text: r.message ?? "节假日拉取失败" });
     }
   };
 
@@ -2501,8 +2696,16 @@ export function TimetablePanel() {
                       </p>
                     )}
                     {skipped && (
-                      <p className="mt-0.5 inline-block rounded bg-line px-1 text-caption font-medium text-text-2">
-                        休
+                      <p
+                        className="mt-0.5 inline-block rounded bg-alert/10 px-1 text-caption font-medium text-alert"
+                        title={holidayNameMap.get(dayKeyOf(weekDates[i]!)) ?? undefined}
+                      >
+                        休{holidayNameMap.get(dayKeyOf(weekDates[i]!)) ?? ""}
+                      </p>
+                    )}
+                    {!skipped && swapCol(i) != null && (
+                      <p className="mt-0.5 inline-block rounded bg-sched/10 px-1 text-caption font-medium text-sched">
+                        班·补周{DAY_NAMES[swapCol(i)!]}
                       </p>
                     )}
                   </div>
@@ -2533,7 +2736,13 @@ export function TimetablePanel() {
               {Array.from({ length: displayDays }, (_, i) => {
                 const day = displayDayOf(i);
                 const skipped = isSkippedCol(i);
-                const col = skipped ? [] : weekBlocks.columns[day - 1];
+                const swapWd = swapCol(i);
+                // 置换列（契约 §22）：显示被补日星期的课程块（周次仍是本视图周）
+                const col = skipped
+                  ? []
+                  : swapWd != null
+                    ? weekBlocks.columns[swapWd - 1]
+                    : weekBlocks.columns[day - 1];
                 const layout = layouts[day - 1];
                 return (
                   <div
@@ -2553,9 +2762,12 @@ export function TimetablePanel() {
                   >
                     {/* 跳过日期列（契约 §8.1）：课程与空位按钮都不渲染，居中「休」标 */}
                     {skipped ? (
-                      <p className="absolute inset-0 flex items-center justify-center text-caption text-text-2/50">
-                        休
-                      </p>
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+                        <p className="rounded bg-alert/10 px-2 py-0.5 text-caption font-medium text-alert">
+                          {holidayNameMap.get(dayKeyOf(weekDates[i]!)) ?? "放假"}
+                        </p>
+                        <p className="text-caption text-text-2/50">当天无课</p>
+                      </div>
                     ) : (
                       <>
                         {/* 空位按钮：点击空白格新建课程（预填星期/小节/展示周，契约 §17
@@ -2856,6 +3068,7 @@ export function TimetablePanel() {
                 showNonCurrentWeek: tt.config.showNonCurrentWeek,
               }}
               initialSkippedDates={tt.config.skippedDates}
+              initialSwapDays={tt.config.swapDays}
               courses={tt.courses}
               busy={settingsBusy}
               skippedBusy={skippedBusy}
@@ -2866,6 +3079,10 @@ export function TimetablePanel() {
               bulkError={bulkErr}
               onSave={(input) => void saveSemesterConfig(input)}
               onSaveSkippedDates={(dates) => void saveSkippedDates(dates)}
+              onSaveSwapDays={(days) => void saveSwapDays(days)}
+              onFetchHolidays={() => void fetchHolidays()}
+              holidaysBusy={skippedBusy}
+              holidaysMsg={holidaysMsg}
               onMoveDayCourses={(fromDate, toDate) => void moveDayCourses(fromDate, toDate)}
               onQuickDelete={(weeks, days) => void quickDelete(weeks, days)}
               onClose={() => setSettingsOpen(false)}
@@ -2990,6 +3207,53 @@ export function TimetablePanel() {
                           {c.excerpt}
                         </p>
                       )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {/* 置换候选列表（契约 §22）：一次采纳 = 该日期整列按被补日课表上课 */}
+              {swapCandidates && swapCandidates.length > 0 && (
+                <ul className="mt-3 space-y-2">
+                  {swapCandidates.map((c) => (
+                    <li
+                      key={`${c.noticeId}-${c.date}`}
+                      className="rounded-inner border border-line bg-surface-2 px-3 py-2.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded bg-sched/10 px-1.5 text-caption font-medium text-sched">
+                          置换
+                        </span>
+                        <p className="tabular-num text-body font-medium text-text">
+                          {c.date} 按 周{DAY_NAMES[c.weekday ?? 1]} 课表上课
+                        </p>
+                        {c.confidence === "high" ? (
+                          <span className="rounded bg-wallet/10 px-1.5 text-caption font-medium text-wallet">
+                            要素齐全
+                          </span>
+                        ) : (
+                          <span className="rounded bg-todo/10 px-1.5 text-caption text-todo" title={c.reason}>
+                            待确认
+                          </span>
+                        )}
+                        <Button
+                          size="sm"
+                          className="ml-auto"
+                          disabled={c.weekday == null || busyKey === `swap-${c.noticeId}-${c.date}`}
+                          onClick={() => adoptSwapDay(c)}
+                        >
+                          {busyKey === `swap-${c.noticeId}-${c.date}` ? "采纳中…" : "采纳置换"}
+                        </Button>
+                      </div>
+                      {c.confidence === "low" && c.reason && (
+                        <p className="mt-1 text-caption text-todo">{c.reason}</p>
+                      )}
+                      {c.excerpt && (
+                        <p className="mt-1 border-l-2 border-line pl-2 text-caption text-text-2/80">
+                          {c.excerpt}
+                        </p>
+                      )}
+                      <p className="mt-1 text-caption text-text-2/60">来源公告：{c.sourceTitle}</p>
                     </li>
                   ))}
                 </ul>

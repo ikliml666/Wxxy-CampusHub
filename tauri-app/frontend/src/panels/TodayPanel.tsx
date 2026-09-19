@@ -192,7 +192,7 @@ export function TodayPanel() {
     if (!authed) {
       setLocalCourses({
         phase: "ready",
-        data: { date: "", currentWeek: null, state: "normal", hasLocal: false, courses: [], next: null },
+        data: { date: "", currentWeek: null, state: "normal", hasLocal: false, courses: [], next: null, swapWeekday: null },
       });
       return;
     }
@@ -339,6 +339,16 @@ export function TodayPanel() {
       )}
       {useLocal && local && local.state === "normal" && (
         <>
+          {local.swapWeekday != null && (
+            <Surface accent="sched" className="mt-4 flex items-center gap-2 px-4 py-3">
+              <span className="rounded bg-sched/10 px-1.5 py-0.5 text-caption font-medium text-sched">
+                班
+              </span>
+              <span className="text-body text-text">
+                今日调休补课，按{"周一二三四五六日".charAt(local.swapWeekday)}课表上课
+              </span>
+            </Surface>
+          )}
           {local.next && (
             <Surface accent="sched" className="mt-4 flex items-center gap-2 px-4 py-3">
               <span className="shrink-0 text-body font-medium text-text">下一节课</span>

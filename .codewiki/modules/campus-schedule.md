@@ -85,7 +85,7 @@ tags:
 ## 调课通知 L1/L2 解析（notice.rs，M2.5 批次 3，本项目原创）
 
 `parse_notice_text(text, courses, current_week) -> Vec<NoticeCandidate>`（`notice.rs`）实现冻结契约 §2.5，纯函数、零新依赖（std 字符串处理，无 regex）；单候选产出与取舍见 [[decisions/timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]。
-- **全校日期置换分支**（`parse_notice_with_semester(text, courses, current_week, semester_start)`，2026-09-19）：真实公告「9月20日（星期日）补9月28日（星期一）课程」不含课程名/节次，是课表层置换——旧解析器会把书名号《关于…放假安排的通知》误提为课程名。置换识别（相邻日期对 + 连接词 补/上/按/换，括号星期提示优先、缺失由 `semester_start` 推算星期与教学周）命中时，对本地「被补日星期」每门未停开课产出 `Extra` 候选（节次沿用原课）；未命中回落 `parse_notice_text`（签名不变）。tauri 两处调用点传 `tt.config.semester_start_date`。
+- **全校日期置换探测**（`detect_date_swap(text, semester_start) -> Option<Result<DateSwap, String>>`，2026-09-19 节假日轮）：真实公告「9月20日（星期日）补9月28日（星期一）课程」是课表层置换（不含课程名/节次）——逐课解析会把书名号《关于…放假安排的通知》误提为课程名。返回 None（非置换）/ Err（置换但缺学期锚点）/ Ok（date=上课日、weekday=被补日星期、confidence、excerpt）。tauri 层 `auto_parse_notices` 双轨：置换命中 → `NoticeSwapCandidate`（`apply_swap_day` 写 `config.swap_days`，替代早期逐课 Extra 方案）；未命中 → `parse_notice_text`。置换渲染周次按置换日所在教学周现算（模型不存周次）。
 
 - **NoticeCandidate**（契约 §2.3 冻结字段，camelCase）：`{noticeId, courseId?, courseName, changeType, weeks, newDay?, newStartSection?, newEndSection?, newPosition?, confidence: "high"|"low", reason, excerpt}`；`NoticeConfidence::{High, Low}` serde 小写。
 - **L1 提取**（数字锚定扫描 = `match_indices('周'/'节')` + `digits_before` 往左收 ASCII 数字，字节级安全因多字节字符各字节 ≥0x80）：

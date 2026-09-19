@@ -108,6 +108,19 @@ pub struct CourseTableConfig {
     /// 旧文件缺省）= 现状隐藏。仅前端渲染开关，后端不消费。
     #[serde(default)]
     pub show_non_current_week: bool,
+    /// 置换日（契约 §22，2026-09-19 节假日轮）：该日期**按 `weekday` 的课表
+    /// 执行**（调休补课：「9月20日（周日）补9月28日（周一）课」→
+    /// `{date: 2026-09-20, weekday: 1}`）。来源 = 公告置换解析采纳
+    /// （`apply_swap_day`，挂 `source_notice_id` 可随通知撤销）+ 设置手动编辑。
+    /// 网格该列显示 `weekday` 列课程 +「班」徽标；ICS 追加置换实例；今日页按
+    /// 置换课展示。旧文件无该键 → 空列表（serde default）。
+    #[serde(default)]
+    pub swap_days: Vec<SwapDay>,
+    /// 节假日名（契约 §22）：timor.tech API 拉取的法定节日名（如「国庆节」），
+    /// **仅供显示**（网格横幅/今日页）；「无课」判定仍以 [`CourseTableConfig::skipped_dates`]
+    /// 为准（手动停课日无节日名，横幅回退「放假」）。旧文件无该键 → 空。
+    #[serde(default)]
+    pub holiday_names: Vec<NamedDate>,
 }
 
 /// 按日期区间的作息规则（契约 §9.1，批 3）。`slots` 恒非空（保存时校验）。
@@ -120,6 +133,28 @@ pub struct SlotRule {
     pub end_date: NaiveDate,
     /// 该区间的作息
     pub slots: Vec<TimeSlot>,
+}
+
+/// 置换日（契约 §22）：某日期按某星期的课表执行。见
+/// [`CourseTableConfig::swap_days`]。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapDay {
+    pub date: NaiveDate,
+    /// 该日按星期几的课表执行（1=周一 … 7=周日）
+    pub weekday: u8,
+    /// 来源通知 id（`revoke_notice` 的撤销键）；手动添加为 None
+    #[serde(default)]
+    pub source_notice_id: Option<String>,
+}
+
+/// 带名的日期（契约 §22）：法定节假日名，仅显示用。见
+/// [`CourseTableConfig::holiday_names`]。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedDate {
+    pub date: NaiveDate,
+    pub name: String,
 }
 
 fn default_total_weeks() -> u32 {
@@ -264,6 +299,8 @@ mod tests {
                 first_day_of_week: 1,
                 slots: None,
                 skipped_dates: vec![NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()],
+                swap_days: vec![],
+                holiday_names: vec![],
                 show_non_current_week: true,
                 slot_rules: vec![SlotRule {
                     start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),

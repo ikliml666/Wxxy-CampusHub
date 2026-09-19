@@ -53,6 +53,13 @@
 - **风险披露与遗留（如实记录）**：界面常驻风险声明（真实扣款不可撤销/不接触密码/失败可取消/接口变更改用官网）；首轮 live 验证用 form 方式调 `deleteOrder` 失败（该端点只认 JSON body），留下 **1 笔 1 元未支付订单**且订单号未落盘，学校侧**没有可用的待支付订单列表接口**（`personal_data?status=0` 恒 500）⇒ 无法程序化取消，**需用户在官方缴费页手动取消或等过期**（未支付=无扣款）。自批 C 起所有运行均正确清理；计划里「进充值前检查遗留订单」这条防线被证实**无法实现**
 - **未验证**：`submit_pay` 的**成功路径**只能由用户真机试充验证（开发与点验阶段一律不提交支付）
 
+## 2026-09-19 · 节假日轮：置换日模型 + 法定节假日一键拉取 + 公告重复通知去重
+
+- **模块**：`campus-schedule/model.rs`（`swap_days`/`holiday_names`）、`notice.rs`（`detect_date_swap` 替代逐课置换分支）、`commands/timetable.rs`（`apply_swap_day`/`save_swap_days`/`fetch_holidays` 新命令、`revoke_by_notice` 扩展、ICS 置换实例、今日页 `swap_weekday`、扫描去重）、`TimetablePanel.tsx`（网格「休/班」角标+节日名横幅+置换课列、置换候选卡、设置弹层置换日编辑+节假日按钮）、`TodayPanel.tsx`（调休横幅）、契约 §22
+- **双轨数据**：timor.tech API 一键拉当年法定放假日（并入跳过日期+节日名；补班日忽略——API 无补课映射，由公告置换解析承担）；公告「9月20日（周日）补9月28日（周一）课」自动产出置换候选，一次采纳=该日整列按被补日课表上课（替代此前逐门课一条补课 override）
+- **显示**（用户拍板：横幅遮罩+隐藏课程）：假期列「休·国庆节」红标+节日名横幅+课程隐藏；置换列「班·补周一」蓝标+显示被补日课程；今日页调休横幅；ICS 含置换实例
+- **重复通知去重**：两栏目同文（title+日期）只解析一条
+- **验证**：`cargo test --workspace` 18 组全绿（新增 swap 撤销/今日置换/置换探测测试）、tsc 零错、vite build 成功
 ## 2026-09-19 · 自动解析轮：公告一键自动发现+解析（auto_parse_notices）+ 旧通知按学期过滤
 
 - **模块**：`commands/timetable.rs`（新命令 `auto_parse_notices`，NoticeAutoParse 聚合结构）、`lib.rs`（注册）、`TimetablePanel.tsx`（一键按钮+状态徽标列表）、`shared/types.ts`（NoticeAutoParse）、契约 §21
