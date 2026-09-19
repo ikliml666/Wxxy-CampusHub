@@ -102,6 +102,8 @@ mod tests {
             first_day_of_week: 1,
             slots: None,
             skipped_dates: vec![],
+            swap_days: vec![],
+            holiday_names: vec![],
             slot_rules: vec![],
             show_non_current_week: false,
         };

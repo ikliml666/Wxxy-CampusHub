@@ -39,8 +39,8 @@ use crate::infra::{state, timetable};
 use campus_portal::{html_text, section_time_slots, ScheduleNoticeBrief};
 use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
-    current_week, diff_courses, expand_occurrences, parse_kb_response,
-    parse_notice_with_semester, parse_notice_text,
+    current_week, diff_courses, detect_date_swap, expand_occurrences, parse_kb_response,
+    parse_notice_text,
     previous_or_same_day_of_week, semester_start_from_week, week_index_at_date, OccurrenceKind,
     NoticeConfidence, OverrideKind, Semester,
 };
@@ -645,10 +645,104 @@ fn build_ics_with_reminder(tt: &Timetable, remind_minutes: Option<u8>) -> Result
             }
         }
     }
+    // 置换日实例（契约 §22）：swap.date 当天按 weekday 列课表生成 VEVENT
+    //（周次 = 置换日所在教学周，取该周 weekday 列的当前生效 Solid 实例）。
+    // UID `...-swap<date>s<section>` 与原位/override 实例不撞。
+    for sw in &tt.config.swap_days {
+        if tt.config.skipped_dates.contains(&sw.date) {
+            continue; // 跳过优先（apply 层已互斥，此处防御）
+        }
+        let week = week_index_at_date(sw.date, week_first, tt.config.first_day_of_week);
+        let week = match u32::try_from(week) {
+            Ok(w) if w >= 1 => w,
+            _ => continue, // 置换日不在学期内
+        };
+        let slots = effective_slots_at(&tt.config, sw.date);
+        for course in &tt.courses {
+            if course.disabled || !course.weeks.contains(&week) {
+                continue;
+            }
+            for occ in expand_occurrences(course, &tt.overrides, week) {
+                if occ.kind != OccurrenceKind::Solid || occ.day != sw.weekday {
+                    continue;
+                }
+                let (start_hm, end_hm) = match (occ.start_section, occ.end_section) {
+                    (Some(s), Some(e)) => match section_course_times(&slots, s, e) {
+                        Some(t) => t,
+                        None => continue,
+                    },
+                    _ => {
+                        let (Some(cs), Some(ce)) =
+                            (&course.custom_start_time, &course.custom_end_time)
+                        else {
+                            continue;
+                        };
+                        (cs.clone(), ce.clone())
+                    }
+                };
+                let start_hm = start_hm.replace(':', "");
+                let end_hm = end_hm.replace(':', "");
+                let day_basic = sw.date.format("%Y%m%d").to_string();
+                let sec_tag = occ
+                    .start_section
+                    .map(|x| x.to_string())
+                    .unwrap_or_else(|| "custom".into());
+                let mut desc_parts: Vec<String> = Vec::new();
+                if !course.teacher.is_empty() {
+                    desc_parts.push(format!("教师 {}", course.teacher));
+                }
+                desc_parts.push(format!("补周{}课", weekday_name(sw.weekday)));
+                if let Some(r) = &course.remark {
+                    if !r.is_empty() {
+                        desc_parts.push(r.clone());
+                    }
+                }
+                let mut block = vec![
+                    "BEGIN:VEVENT".into(),
+                    format!(
+                        "UID:{}-swap{}s{}@campushub",
+                        ics_escape(&course.id),
+                        sw.date.format("%Y%m%d"),
+                        sec_tag
+                    ),
+                    format!("DTSTAMP:{dtstamp}"),
+                    format!("DTSTART:{day_basic}T{start_hm}00"),
+                    format!("DTEND:{day_basic}T{end_hm}00"),
+                    format!("SUMMARY:{}", ics_escape(&course.name)),
+                    format!("LOCATION:{}", ics_escape(&occ.position)),
+                    format!("DESCRIPTION:{}", ics_escape(&desc_parts.join("，"))),
+                ];
+                if let Some(mins) = remind_minutes {
+                    block.extend([
+                        "BEGIN:VALARM".into(),
+                        "ACTION:DISPLAY".into(),
+                        format!("TRIGGER:-PT{mins}M"),
+                        "DESCRIPTION:课前提醒".into(),
+                        "END:VALARM".into(),
+                    ]);
+                }
+                block.push("END:VEVENT".into());
+                lines.extend(block);
+            }
+        }
+    }
     lines.push("END:VCALENDAR".into());
     let mut out = lines.join("\r\n");
     out.push_str("\r\n");
     Ok(out)
+}
+
+/// 星期号 → 「一/二/…/日」（置换实例描述用）。
+fn weekday_name(d: u8) -> &'static str {
+    match d {
+        1 => "一",
+        2 => "二",
+        3 => "三",
+        4 => "四",
+        5 => "五",
+        6 => "六",
+        _ => "日",
+    }
 }
 
 /// 把 ICS 文本写入 `dir` 下固定文件名「课表.ics」（已存在直接覆盖），返回完整路径。
@@ -881,12 +975,13 @@ pub async fn parse_notice(
     let tt = timetable::load_timetable(&dir);
     let today = chrono::Local::now().date_naive();
     let cw = current_week(today, &tt.config);
-    Ok(CommandResult::ok(parse_notice_with_semester(
-        &text,
-        &tt.courses,
-        cw,
-        tt.config.semester_start_date,
-    )))
+    // 置换格式（公告流已接管；粘贴路径不产置换候选）→ 引导走公告自动解析
+    if let Some(Err(reason)) =
+        campus_schedule::detect_date_swap(&text, tt.config.semester_start_date)
+    {
+        return Ok(CommandResult::err(&reason));
+    }
+    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
 }
 
 /// 同一 `noticeId + courseId` 重复采纳幂等：先移除旧叠加再写入（覆盖而非堆叠）。
@@ -901,7 +996,13 @@ fn revoke_by_notice(tt: &mut Timetable, notice_id: &str) -> u32 {
     let before = tt.overrides.len();
     tt.overrides
         .retain(|o| o.source_notice_id != notice_id);
-    (before - tt.overrides.len()) as u32
+    let n = before - tt.overrides.len();
+    // 置换日同键撤销（契约 §22）：override 与 swap_days 共用 notice_id 溯源
+    let sb = tt.config.swap_days.len();
+    tt.config
+        .swap_days
+        .retain(|sw| sw.source_notice_id.as_deref() != Some(notice_id));
+    (n + sb - tt.config.swap_days.len()) as u32
 }
 
 /// 候选 → 叠加记录（契约 §2.3：autoApplied 区分高置信自动应用与低置信人工采纳；
@@ -955,6 +1056,176 @@ pub async fn revoke_notice(notice_id: String) -> Result<CommandResult<u32>, Stri
         Ok(n) => Ok(CommandResult::ok(n)),
         Err(e) => Ok(CommandResult::err(&e)),
     }
+}
+
+/// 采纳置换候选（契约 §22）：写 `config.swap_days`（同 date 幂等覆盖）。
+/// weekday 缺失（Low 无星期）→ 业务失败；date 已是跳过日 → 提示先移除
+/// （跳过 = 当天无课，与置换互斥）。
+#[tauri::command]
+pub async fn apply_swap_day(
+    candidate: NoticeSwapCandidate,
+) -> Result<CommandResult<campus_schedule::SwapDay>, String> {
+    let Some(weekday) = candidate.weekday else {
+        return Ok(CommandResult::err(
+            "该通知缺少被补日的星期信息，无法应用置换",
+        ));
+    };
+    if !(1..=7).contains(&weekday) {
+        return Ok(CommandResult::err("星期信息非法"));
+    }
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        if tt.config.skipped_dates.contains(&candidate.date) {
+            return Err(format!(
+                "{} 已在跳过日期中（当天无课与置换冲突），请先在设置中移除该跳过日期",
+                candidate.date.format("%Y-%m-%d")
+            ));
+        }
+        let sw = campus_schedule::SwapDay {
+            date: candidate.date,
+            weekday,
+            source_notice_id: Some(candidate.notice_id.clone()),
+        };
+        tt.config.swap_days.retain(|d| d.date != sw.date);
+        tt.config.swap_days.push(sw.clone());
+        tt.config.swap_days.sort_by_key(|d| d.date);
+        Ok(sw)
+    }) {
+        Ok(sw) => Ok(CommandResult::ok(sw)),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+/// 保存置换日（契约 §22 手动编辑路径）：**整体替换**语义，全部视为手动来源
+/// （source_notice_id 清空，公告撤销不影响手动条目）。
+#[tauri::command]
+pub async fn save_swap_days(
+    days: Vec<campus_schedule::SwapDay>,
+) -> Result<CommandResult<TimetableView>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        let mut cleaned = days;
+        for sw in &mut cleaned {
+            sw.source_notice_id = None;
+        }
+        cleaned.retain(|sw| (1..=7).contains(&sw.weekday));
+        cleaned.sort_by_key(|d| d.date);
+        tt.config.swap_days = cleaned;
+        Ok(())
+    }) {
+        Ok(()) => Ok(CommandResult::ok(build_timetable_view(
+            timetable::load_timetable(&dir),
+            chrono::Local::now().date_naive(),
+        ))),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+/// fetch_holidays 结果（契约 §22）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HolidaysFetchResult {
+    /// 本次新并入 skipped_dates 的放假日数
+    pub added: u32,
+    /// skipped_dates 当前总数
+    pub total: u32,
+    /// 拉取的年份
+    pub year: u32,
+}
+
+/// 一键拉取法定节假日（契约 §22，timor.tech 公开 API，时光课程表同源）：
+/// 拉当年 `holiday/year/{year}`，`holiday=true`（放假）的日期**并入**
+/// `skipped_dates`（去重；整体替换语义只对 `holiday_names` —— 节日名随官方
+/// 修订），节日名写入 `holiday_names` 供网格横幅/今日页显示。`holiday=false`
+/// （调休补班日）**忽略**——API 不说明补班日上哪天的课，置换日由公告解析
+/// （`apply_swap_day`）或手动编辑补全。失败中文透传，本地数据不动。
+#[tauri::command]
+pub async fn fetch_holidays() -> Result<CommandResult<HolidaysFetchResult>, String> {
+    let year = chrono::Local::now().year() as u32;
+    let url = format!("https://timor.tech/api/holiday/year/{year}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36",
+        )
+        .send()
+        .await
+        .map_err(|_| "节假日服务连接失败，请检查网络".to_string())?;
+    if !resp.status().is_success() {
+        return Ok(CommandResult::err(&format!(
+            "节假日服务返回 HTTP {}",
+            resp.status()
+        )));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "节假日服务响应格式异常".to_string())?;
+    let Some(holidays) = v.get("holiday").and_then(|h| h.as_object()) else {
+        return Ok(CommandResult::err("节假日服务响应缺少 holiday 字段"));
+    };
+    // (date, name) 收集：holiday=true 才是放假日；日期取条目内 date 字段（含年）
+    let mut days: Vec<(NaiveDate, String)> = Vec::new();
+    for (k, entry) in holidays {
+        let is_hol = entry.get("holiday").and_then(|b| b.as_bool()).unwrap_or(false);
+        if !is_hol {
+            continue;
+        }
+        let date_str = entry
+            .get("date")
+            .and_then(|d| d.as_str())
+            .unwrap_or(k)
+            .to_string();
+        let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") else {
+            continue; // 形态异常的条目跳过，不致全批失败
+        };
+        let name = entry
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("法定节假日")
+            .to_string();
+        days.push((date, name));
+    }
+    if days.is_empty() {
+        return Ok(CommandResult::err("节假日服务未返回 {year} 年放假数据"));
+    }
+    days.sort_by_key(|(d, _)| *d);
+    days.dedup();
+    let dir = state::data_dir()?;
+    let mut before_set: std::collections::HashSet<NaiveDate> = std::collections::HashSet::new();
+    let tt = timetable::load_timetable(&dir);
+    before_set.extend(tt.config.skipped_dates.iter().copied());
+    let added = days
+        .iter()
+        .filter(|(d, _)| !before_set.contains(d))
+        .count() as u32;
+    mutate_timetable(&dir, |tt| {
+        // skipped_dates 并集（手动条目与公告停课日不动）
+        let mut merged: Vec<NaiveDate> = tt.config.skipped_dates.clone();
+        for (d, _) in &days {
+            if !merged.contains(d) {
+                merged.push(*d);
+            }
+        }
+        merged.sort();
+        tt.config.skipped_dates = merged;
+        // holiday_names 整体替换为本次拉取结果（名随官方修订）
+        tt.config.holiday_names = days
+            .iter()
+            .map(|(d, name)| campus_schedule::NamedDate { date: *d, name: name.clone() })
+            .collect();
+        Ok(())
+    })?;
+    Ok(CommandResult::ok(HolidaysFetchResult {
+        added,
+        total: days.len() as u32,
+        year,
+    }))
 }
 
 // ---------------- 批量操作：调课搬迁 / 快速删除（契约 §14，2026-09-19 批 8） ----------------
@@ -1118,6 +1389,9 @@ pub struct TodayCoursesView {
     pub courses: Vec<TodayCourse>,
     /// 第一门未结束（end > now）的课程；全部已结束 → None
     pub next: Option<TodayCourse>,
+    /// 今日是置换日（契约 §22）：Some(被补日星期) = 今天按该星期课表上课
+    ///（前端显示「补周X课」徽标）
+    pub swap_weekday: Option<u8>,
 }
 
 /// 今日单节课（契约 §15.1）。
@@ -1162,11 +1436,18 @@ fn today_courses(tt: &Timetable, now: chrono::NaiveDateTime) -> TodayCoursesView
         "normal"
     };
     let has_local = !tt.courses.is_empty() && tt.config.semester_start_date.is_some();
+    // 置换日（契约 §22）：今天按被补日星期的课表上课（skipped 互斥，apply 已挡）
+    let swap = tt
+        .config
+        .swap_days
+        .iter()
+        .find(|sw| sw.date == today)
+        .map(|sw| sw.weekday);
 
     let mut courses: Vec<TodayCourse> = Vec::new();
     if state == "normal" {
         let week = current_week.unwrap();
-        let weekday = today.weekday().number_from_monday() as u8;
+        let weekday = swap.unwrap_or_else(|| today.weekday().number_from_monday() as u8);
         // 当天生效作息整日一份（收敛点契约 §8.3；放循环外免逐实例重算）
         let slots = effective_slots_at(&tt.config, today);
         for course in &tt.courses {
@@ -1227,6 +1508,7 @@ fn today_courses(tt: &Timetable, now: chrono::NaiveDateTime) -> TodayCoursesView
         has_local,
         courses,
         next,
+        swap_weekday: swap,
     }
 }
 
@@ -1304,15 +1586,35 @@ pub async fn parse_notice_from_url(
     let tt = timetable::load_timetable(&dir);
     let today = chrono::Local::now().date_naive();
     let cw = current_week(today, &tt.config);
-    Ok(CommandResult::ok(parse_notice_with_semester(
-        &text,
-        &tt.courses,
-        cw,
-        tt.config.semester_start_date,
-    )))
+    // 置换格式（公告流已接管；粘贴路径不产置换候选）→ 引导走公告自动解析
+    if let Some(Err(reason)) =
+        campus_schedule::detect_date_swap(&text, tt.config.semester_start_date)
+    {
+        return Ok(CommandResult::err(&reason));
+    }
+    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
 }
 
-/// 单条公告自动解析结果（契约 §21）：`error` 非 None 时 `candidates` 为空。
+/// 置换候选（契约 §22）：全校日期置换型通知的解析产物，采纳走
+/// [`apply_swap_day`] 写 `config.swap_days`（与逐课候选流分开渲染/采纳）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeSwapCandidate {
+    pub notice_id: String,
+    /// 上课日（置换日，"YYYY-MM-DD"）
+    pub date: NaiveDate,
+    /// 被补日的星期（1=周一 … 7=周日）；None = 缺星期（Low，不可采纳）
+    pub weekday: Option<u8>,
+    pub confidence: campus_schedule::NoticeConfidence,
+    pub reason: String,
+    /// 原文摘录（置换句所在行）
+    pub excerpt: String,
+    /// 来源公告标题（列表展示）
+    pub source_title: String,
+}
+
+/// 单条公告自动解析结果（契约 §21/§22）：`error` 非 None 时两者为空；
+/// 置换型命中 → `swaps` 非空、`candidates` 空。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeAutoParse {
@@ -1323,6 +1625,8 @@ pub struct NoticeAutoParse {
     /// 解析失败原因（needsBrowser/空正文/抓取错误）；None = 成功（候选可能为空）
     pub error: Option<String>,
     pub candidates: Vec<campus_schedule::NoticeCandidate>,
+    /// 全校日期置换候选（契约 §22）：命中置换格式时非空（candidates 为空）
+    pub swaps: Vec<NoticeSwapCandidate>,
 }
 
 /// auto_parse_notices（契约 §21）：**一键自动发现 + 自动解析**——扫描两个栏目
@@ -1352,8 +1656,15 @@ pub async fn auto_parse_notices(
         Ok(b) => b,
         Err(e) => return Ok(CommandResult::err(&e.to_string())),
     };
+    // 重复通知去重（两个栏目常同步发布同一篇）：title + 日期 即同一通知，
+    // 首条保留（正文哈希在解析后才能算，扫描层按标题+日去重足够）
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut out: Vec<NoticeAutoParse> = Vec::new();
     for n in briefs {
+        let key = (n.title.clone(), n.date.chars().take(10).collect());
+        if !seen.insert(key) {
+            continue;
+        }
         // 旧通知过滤：publish_time "YYYY-MM-DD …" 前 10 位与开学日比；
         // 日期解析失败则保留（不因格式异常丢通知）
         if let Some(d10) = n.date.get(..10) {
@@ -1363,28 +1674,43 @@ pub async fn auto_parse_notices(
                 }
             }
         }
-        let (error, candidates) = match portal.fetch_info_detail(&n.url).await {
+        let (error, candidates, swaps) = match portal.fetch_info_detail(&n.url).await {
             Ok(detail) if detail.needs_browser || detail.html.is_none() => (
                 Some("正文需在浏览器中打开，无法自动解析".to_string()),
+                Vec::new(),
                 Vec::new(),
             ),
             Ok(detail) => {
                 let text = html_text(detail.html.as_deref().unwrap_or_default());
                 if text.trim().is_empty() {
-                    (Some("公告正文为空".to_string()), Vec::new())
+                    (Some("公告正文为空".to_string()), Vec::new(), Vec::new())
                 } else {
-                    (
-                        None,
-                        parse_notice_with_semester(
-                            &text,
-                            &tt.courses,
-                            cw,
-                            tt.config.semester_start_date,
+                    // 双轨（契约 §22）：先探测全校日期置换，命中 → 置换候选；
+                    // 未命中 → 常规单课调课/停课/补课解析
+                    match detect_date_swap(&text, tt.config.semester_start_date) {
+                        Some(Ok(swap)) => (
+                            None,
+                            Vec::new(),
+                            vec![NoticeSwapCandidate {
+                                notice_id: campus_schedule::notice_id_for(&text),
+                                date: swap.date,
+                                weekday: swap.weekday,
+                                confidence: swap.confidence,
+                                reason: swap.reason,
+                                excerpt: swap.excerpt,
+                                source_title: n.title.clone(),
+                            }],
                         ),
-                    )
+                        Some(Err(reason)) => (Some(reason), Vec::new(), Vec::new()),
+                        None => (
+                            None,
+                            parse_notice_text(&text, &tt.courses, cw),
+                            Vec::new(),
+                        ),
+                    }
                 }
             }
-            Err(e) => (Some(e.to_string()), Vec::new()),
+            Err(e) => (Some(e.to_string()), Vec::new(), Vec::new()),
         };
         out.push(NoticeAutoParse {
             title: n.title,
@@ -1393,6 +1719,7 @@ pub async fn auto_parse_notices(
             column: n.column,
             error,
             candidates,
+            swaps,
         });
     }
     Ok(CommandResult::ok(out))
@@ -1684,6 +2011,8 @@ mod tests {
                 skipped_dates: vec![],
                 slot_rules: vec![],
                 show_non_current_week: false,
+                swap_days: vec![],
+                holiday_names: vec![],
             },
             courses,
             overrides: vec![],
@@ -3286,6 +3615,60 @@ mod tests {
     /// now 推进切换；全部已结束 → next=None（已结束课程保留在列表，置灰由前端）；
     /// 非今天的课程（周三）不进列表；camelCase 序列化键。
     #[test]
+    /// 置换日撤销：revoke_notice 连 override 与 swap_days 一起删（契约 §22）。
+    #[test]
+    fn revoke_notice_removes_swap_days_too() {
+        let mut tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+        tt.config.swap_days.push(campus_schedule::SwapDay {
+            date: NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
+            weekday: 1,
+            source_notice_id: Some("manual:abc".into()),
+        });
+        tt.config.swap_days.push(campus_schedule::SwapDay {
+            date: NaiveDate::from_ymd_opt(2026, 9, 27).unwrap(),
+            weekday: 2,
+            source_notice_id: Some("manual:other".into()),
+        });
+        tt.overrides.push(CourseOverride {
+            id: "ov1".into(),
+            course_id: "c1".into(),
+            weeks: vec![2],
+            change_type: OverrideKind::Extra,
+            new_day: Some(7),
+            new_start_section: Some(1),
+            new_end_section: Some(2),
+            new_position: None,
+            source_notice_id: "manual:abc".into(),
+            auto_applied: false,
+        });
+        assert_eq!(revoke_by_notice(&mut tt, "manual:abc"), 2, "1 override + 1 swap");
+        assert!(tt.config.swap_days.iter().all(|sw| sw.source_notice_id != Some("manual:abc".into())));
+        assert_eq!(tt.config.swap_days.len(), 1, "其他通知的置换保留");
+    }
+
+    /// 今日页置换（契约 §22）：swap 命中 → 按 weekday 列课表展示 + swap_weekday 下发。
+    #[test]
+    fn today_courses_honors_swap_day() {
+        // 2026-09-20 是周日（第 2 周）；置换为周一课表
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![
+                course("c-mon", "周一课", 1, 1, 2, vec![2]),
+                course("c-sun", "周日课", 7, 1, 2, vec![2]),
+            ],
+        );
+        tt.config.swap_days.push(campus_schedule::SwapDay {
+            date: NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
+            weekday: 1,
+            source_notice_id: None,
+        });
+        let v = today_courses(&tt, at(20, 8, 30));
+        assert_eq!(v.state, "normal");
+        assert_eq!(v.swap_weekday, Some(1));
+        assert_eq!(v.courses.len(), 1, "按周一课表：只有周一课进列表");
+        assert_eq!(v.courses[0].name, "周一课");
+    }
+
     fn today_courses_normal_expansion_sorting_and_next() {
         let mut tt = timetable_with(
             Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),

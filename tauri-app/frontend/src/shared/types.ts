@@ -69,6 +69,8 @@ export interface TodayCoursesView {
   courses: TodayCourse[];
   /** 第一门未结束（end > now）；全部已结束为 null */
   next: TodayCourse | null;
+  /** 今日是置换日：值 = 被补日星期（1=周一…7=周日），前端显示「补周X课」 */
+  swapWeekday: number | null;
 }
 
 // ---------- M2 批次 2：资讯页 / 待办页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
@@ -272,6 +274,26 @@ export interface CourseTableConfig {
   /** 非本周课程降级显示（2026-09-19 批 7 契约 §13.2）：true = 网格同时渲染非展示周
    *  课程（40% 透明度、可点详情、不可拖）；false/旧数据缺省 = 隐藏 */
   showNonCurrentWeek: boolean;
+  /** 置换日（2026-09-19 节假日轮契约 §22）：该日期按 weekday 的课表执行
+   *  （调休补课）。网格该列显示 weekday 列课程 +「班」徽标 */
+  swapDays: SwapDay[];
+  /** 法定节假日名（timor.tech 拉取，仅显示用） */
+  holidayNames: NamedDate[];
+}
+
+/** 置换日（契约 §22）：某日期按某星期的课表执行。sourceNoticeId = 公告撤销键。 */
+export interface SwapDay {
+  /** "YYYY-MM-DD" */
+  date: string;
+  /** 1=周一 … 7=周日 */
+  weekday: number;
+  sourceNoticeId: string | null;
+}
+
+/** 法定节假日名（契约 §22，仅显示用；无课判定以 skippedDates 为准）。 */
+export interface NamedDate {
+  date: string;
+  name: string;
 }
 
 /** 按日期区间的作息规则（契约 §9.1）。slots 恒非空（保存时校验）。 */
@@ -433,10 +455,22 @@ export interface NoticeAutoParse {
   column: string;
   error: string | null;
   candidates: NoticeCandidate[];
+  /** 全校日期置换候选（契约 §22）：命中置换格式时非空（candidates 为空） */
+  swaps: NoticeSwapCandidate[];
 }
 
-/** 一键自动解析结果（auto_parse_notices → data；契约 §21）：
- *  NoticeAutoParse 镜像 Rust camelCase 序列化，error 非 null 时 candidates 为空。 */
+/** 全校日期置换候选（契约 §22）：采纳走 apply_swap_day 写 config.swapDays。 */
+export interface NoticeSwapCandidate {
+  noticeId: string;
+  /** 上课日 "YYYY-MM-DD" */
+  date: string;
+  /** 被补日星期（1=周一…7=周日）；null = 缺星期（Low，不可采纳） */
+  weekday: number | null;
+  confidence: "high" | "low";
+  reason: string;
+  excerpt: string;
+  sourceTitle: string;
+}
 export interface NoticeAutoParse {
   title: string;
   date: string;

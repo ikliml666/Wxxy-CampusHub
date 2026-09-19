@@ -30,10 +30,10 @@ pub use diff::{diff_courses, format_weeks, DiffResult};
 
 pub use grid::{grid_scale_to_time, merge_courses, time_to_grid_scale, MergedCourseBlock, ScheduleMode};
 pub use model::{
-    expand_week_mask, Course, CourseOverride, CourseSource, CourseTableConfig, OverrideKind,
-    TimeSlot, Timetable,
+    expand_week_mask, Course, CourseOverride, CourseSource, CourseTableConfig, NamedDate,
+    OverrideKind, SwapDay, TimeSlot, Timetable,
 };
-pub use notice::{notice_id_for, parse_notice_text, parse_notice_with_semester, NoticeCandidate, NoticeConfidence};
+pub use notice::{detect_date_swap, notice_id_for, parse_notice_text, DateSwap, NoticeCandidate, NoticeConfidence};
 pub use occurrence::{expand_occurrences, CourseOccurrence, OccurrenceKind};
 pub use timeslots::default_time_slots;
 pub use weeks::{
