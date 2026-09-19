@@ -12,6 +12,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import AccountMenu from "@/components/AccountMenu";
+import CommandPalette, { MOD_KEY_LABEL } from "@/components/CommandPalette";
 import DockNav from "@/components/DockNav";
 import { TodayPanel } from "@/panels/TodayPanel";
 import { TimetablePanel } from "@/panels/TimetablePanel";
@@ -38,6 +39,7 @@ const PANEL_MAP: Record<PanelId, ComponentType> = {
 export default function AppShell() {
   const activePanel = useUiStore((s) => s.activePanel);
   const theme = useUiStore((s) => s.theme);
+  const openCommandPalette = useUiStore((s) => s.openCommandPalette);
   // 快速连切时 useDeferredValue 只渲染最终面板，AnimatePresence 不闪烁
   const deferredPanel = useDeferredValue(activePanel);
   const ActivePanel = PANEL_MAP[deferredPanel];
@@ -70,14 +72,15 @@ export default function AppShell() {
               </div>
             </div>
 
-            {/* 中：搜索胶囊（命令面板 M2 接入，aria-disabled 占位、不做假交互） */}
+            {/* 中：命令面板触发条（点击与 Cmd/Ctrl+K 同路，快捷键按平台显示） */}
             <div className="flex min-w-0 flex-1 justify-center">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    aria-disabled="true"
-                    aria-label="搜索或跳转（命令面板 · M2 接入）"
+                    aria-label="打开命令面板"
+                    aria-keyshortcuts="Meta+K Control+K"
+                    onClick={openCommandPalette}
                     className="flex h-9 w-full max-w-md items-center gap-2.5 rounded-full border border-line bg-surface px-4 text-caption text-text-2 transition-all duration-[var(--dur-fast)] ease-out-soft hover:-translate-y-px hover:border-line-strong hover:shadow-card"
                   >
                     <Search className="size-4 shrink-0" aria-hidden="true" />
@@ -85,11 +88,11 @@ export default function AppShell() {
                       搜索或跳转…
                     </span>
                     <kbd className="shrink-0 rounded-[5px] border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-text-2 tabular-num">
-                      ⌘K
+                      {MOD_KEY_LABEL}
                     </kbd>
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>命令面板 · M2 接入</TooltipContent>
+                <TooltipContent>命令面板（{MOD_KEY_LABEL}）</TooltipContent>
               </Tooltip>
             </div>
 
@@ -131,6 +134,7 @@ export default function AppShell() {
         </main>
 
         <DockNav />
+        <CommandPalette />
       </div>
     </TooltipProvider>
   );

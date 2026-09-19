@@ -14,4 +14,9 @@ pub enum CampusAuthError {
     /// （有 TGT 时可用 [`crate::cas::CasClient::jwglxt_sso`] 静默重进）。
     #[error("教务会话已失效，请重新登录")]
     JwglNotLogin,
+    /// 门户（my.cwxu.edu.cn）会话无效：业务接口返回 **HTTP 200** + `data:null` +
+    /// `meta.statusCode=302` / `message:"未登录或会话已过期，请重新登录！"`，与全新
+    /// 匿名请求逐字段相同（2026-09-19 实测）。上层按「未登录」提示重新登录。
+    #[error("门户会话已失效，请重新登录")]
+    PortalNotLogin,
 }

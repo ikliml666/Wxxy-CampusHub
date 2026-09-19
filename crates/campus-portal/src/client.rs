@@ -135,6 +135,9 @@ fn now_ms() -> u128 {
 fn profile_err(e: CampusAuthError) -> PortalError {
     match e {
         CampusAuthError::Http(e) => PortalError::Http(e),
+        // 门户会话失效（信封 meta.success=false / data:null）归一为「请先登录」，
+        // 不再伪装成解析失败（2026-09-19：原先用户看到的是「响应解析失败: 缺少 userName」）。
+        CampusAuthError::PortalNotLogin => PortalError::NotLogin,
         other => PortalError::Parse(format!("获取登录信息失败: {other}")),
     }
 }
@@ -595,5 +598,23 @@ impl PortalClient {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 门户会话失效 → 「请先登录」（NotLogin），不再归 Parse 而暴露「缺少 userName」。
+    #[test]
+    fn profile_err_maps_portal_not_login() {
+        assert!(matches!(
+            profile_err(CampusAuthError::PortalNotLogin),
+            PortalError::NotLogin
+        ));
+        assert!(matches!(
+            profile_err(CampusAuthError::Parse("x".to_string())),
+            PortalError::Parse(_)
+        ));
     }
 }

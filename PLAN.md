@@ -47,10 +47,12 @@
 ### 2. 慧新E校（内网，新中中平台）
 - Spring Cloud OAuth 体系；登录 `POST /berserker-auth/oauth/token`，Basic 头为 `mobile_service_platform:mobile_service_platform_secret` 的 base64
 - token 存 sessionStorage（`access_token`/`token_type`），请求带自定义头 `synjones-auth: bearer <token>`；⚠️ sessionStorage 不跨标签页，新开标签即掉登录（2026-09-17 实测，官方产品缺陷，客户端后端持 token 规避）
-- 门户→慧新E校 SSO 桥：`http://10.3.100.110/berserker-auth/cas/redirect/lyCas?targetUrl=...`
+- 门户→慧新E校 SSO 桥（2026-09-19 实测补全）：浏览器入口 `http://10.3.100.110/berserker-auth/cas/redirect/lyCas?targetUrl=...` → 302 到 CAS，其 `service` 指向 `{BASE}/berserker-auth/cas/login/lyCas?targetUrl=<二次编码>`——**换 ST 要对准后者**（与教务 `jwglxt` 同构）；子 SPA 的 token 交接靠落点 URL 的 `?synjones-auth=<raw token>` query
 - ⚠️ **4030 故障关键结论**：服务端按请求参数 `synAccessSource` 做来源授权，`pc` 来源校验失败（当前服务端配置问题），**`app` 来源放行**——本客户端调 berserker 系接口一律带 `synAccessSource=app`
-- **电费查询直连（匿名可用，已实测）**：`http://10.3.100.110/charge-pc/pays/450`（校区→楼栋→房间→确认信息，返回剩余金额与单价；`450` 为电费项目 feeitemid，来自 appScheme 数据 `appCode:electricity`）
-- 应用方案接口 `GET /berserker-app/appScheme/info` 可拿到全部服务应用列表
+- **电费接口（2026-09-19 复核；旧说法「`charge-pc/pays/450` 匿名可用」已证伪——那只是 Vue SPA 壳 HTML）**：真链路 = `GET /charge/feeitem`（**唯一匿名可读**，返回启用片区 450 梅园1-3号 / 449 李园9-11号 / 448 桃园1-8号，另有同名停用项 428 须按 `status==1` 过滤）→ `GET /charge/feeitem/singleFeeitem?feeitemid=`（需 token）→ `POST /charge/feeitem/getThirdData`（form，`level` 0→1→2 级联、末级 `type=IEC`；结果在 `map.showData` 动态键名字典，金额 `map.money|iectranamt`）；**级联与详情均需 token**
+- 应用方案接口 `GET /berserker-app/appScheme/info?type=user&serviceType=<agentType>` 可拿到服务应用列表（**匿名可读**，2026-09-19 实测 200；缺参数报「缺少用户信息类型!」）
+- **一卡通接口（2026-09-19 实测）**：余额/卡信息 `GET /berserker-app/ykt/tsm/queryCurrentCard`、`queryCard?account=`（`db_balance`+`unsettle_amount` 单位**分** → 元；`elec_accamt` 为电控账户金额，即慧新E校侧电费余额）；**消费流水在独立服务** `GET /berserker-search/search/personal/turnover?size&current&account&type=2` → `{code,data:{total,records[]}}`（`tranamt` 分、`typeFrom=="1"` 为收入）；全部需 token
+- 鉴权细节：来源参数与头**双份携带**（GET 走 query、POST 走 body，另加同名头 `synAccessSource: app`）；4030 的判定是 **HTTP 401 + `body.code==4030`**（不是 403）；berserker 系信封 `{code,success,data,msg}` 与 charge 系 `{code,message}` **不可共用解析器**
 - ⚠️ 一卡通余额两源不同步（门户卡片 28.01 vs 慧新E校 17.51，2026-09-17 同时刻）——客户端以慧新E校实时接口为准
 
 ### 3. WebVPN（校外通道）
@@ -112,12 +114,14 @@
   - **ICS 导出**：交付形态已修正——原前端 Blob 下载在 WebView2 里静默失效（真机点验发现），改为后端写入 `dirs::download_dir()` 并回显路径；真机确认写出 23136 字节、82 个 VEVENT 的合法 iCalendar 文件
   - **命令面 35 条**（M2.5 新增 10 条：`get_timetable` / `import_timetable` / `add_course_manual` / `update_course` / `delete_course` / `parse_notice` / `apply_override` / `revoke_notice` / `export_ics` / `save_time_slots`）
 
-### M3 · 一卡通 + 电费查询 ⬜
-- [ ] CAS→慧新E校 SSO 桥接换 token（`berserker-auth/cas/redirect/lyCas` 流程）
-- [ ] 一卡通余额/流水（`berserker-app` 接口，全部带 `synAccessSource=app`）
-- [ ] 电费查询页：校区/楼栋/房间 → 剩余金额/单价（charge-pc 直连 + 余额查询接口）
-- [ ] 常用房间绑定（多房间记忆，为 M5 电费提醒铺路）
-- 验收：查询结果与官方渠道一致；校内全程不需浏览器
+### M3 · 一卡通 + 电费查询 🔄（2026-09-19 开工，会话 `sess-36e5d8e0`）
+> 实施计划（任务级，含全部实测接口契约与三项待确认未知）：`docs/superpowers/plans/2026-09-19-m3-ecard-electricity.md`（2026-09-19 定稿，4 批任务）
+- [ ] CAS→慧新E校 SSO 桥接换 token（`{BASE}/berserker-auth/cas/login/lyCas` 换 ST + 落点 `?synjones-auth=` 解析；**token 传递方式由批 1 live 探针确认**）
+- [ ] 一卡通余额/流水（`berserker-app/ykt/tsm/*` 卡信息 + `berserker-search/*` 流水与统计，一律 `synAccessSource=app`）
+- [ ] 电费查询页：片区→校区/楼栋/房间 → 剩余金额/单价（`/charge/feeitem` 三级链路；`showData` 键名由 live 测试固化）
+- [ ] 常用房间绑定（**本地记忆**满足需求；平台侧 `sceneBind/add` 是写接口，不采用）
+- 不做：充值/缴费下单（charge-pc 走 SHA256 签名 + 动态 HTML form 跳转，涉及真实金钱且 PLAN 未要求）
+- 验收：查询结果与官方渠道一致；校内全程不需浏览器（校外可用性依赖 M4）
 
 ### M4 · 网络智能路由 ⬜
 - [ ] 移植 Wxxy-CampusLogin 校园网检测（/18 子网 + Portal 可达性判定；仅移植检测，登录/注销协议不带过来）

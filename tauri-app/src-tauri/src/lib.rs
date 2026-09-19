@@ -60,6 +60,9 @@ pub fn run() {
             commands::timetable::move_day_courses,
             commands::timetable::quick_delete,
             commands::timetable::get_today_courses,
+            commands::synjones::get_ecard,
+            commands::synjones::get_ecard_transactions,
+            commands::synjones::get_wallet_cards,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -430,3 +430,64 @@ export interface NoticeCandidate {
   /** 原文摘录（命中课程所在行） */
   excerpt: string;
 }
+
+// ---------- M3 批 2：一卡通（tauri commands/synjones.rs，计划 §2.4/§2.5；后端已把单位换算成元） ----------
+
+/**
+ * 一张一卡通。**余额口径**（后端批 1 live 实测修订）：
+ * `elecAccamtYuan`（电子账户，`elec_accamt`）是页面主口径——`elec` 指 electronic，
+ * **不是电费余额**；`balanceYuan` 是卡账户 `(db_balance + unsettle_amount)/100`。
+ */
+export interface CardInfo {
+  account: string;
+  cardname: string;
+  /** 卡账户余额（元） */
+  balanceYuan: number;
+  /** 电子账户余额（元） */
+  elecAccamtYuan: number;
+  statusLabel: string;
+}
+
+/** 一条流水（`amountYuan` 带符号：收入为正、支出为负）。 */
+export interface EcardTransaction {
+  /** 服务端原文 "YYYY-MM-DD HH:MM:SS" */
+  time: string;
+  summary: string;
+  amountYuan: number;
+  isIncome: boolean;
+  payName: string;
+  locationName: string;
+}
+
+/** 流水一页（不带方向过滤 = 全量；`total` 供「加载更多」判断）。 */
+export interface EcardTransactions {
+  total: number;
+  records: EcardTransaction[];
+}
+
+/**
+ * get_ecard → data。`balanceYuan` 为电子账户（主数字）、`cardBalanceYuan` 为卡账户。
+ * ⚠️ `todaySpend` / `monthSpend` 目前恒 `null`：慧新E校
+ * `statistics/turnover/sum/user` 五参齐备仍恒返回空数据（2026-09-19 live 实测），
+ * 前端按「暂不可用」呈现，**不伪造数字**。
+ */
+export interface EcardOverview {
+  balanceYuan: number;
+  cardBalanceYuan: number;
+  account: string;
+  cards: CardInfo[];
+  todaySpend: number | null;
+  monthSpend: number | null;
+}
+
+/** 钱包卡数据来源：慧新E校实时 / 门户快照 / 两者都失败。 */
+export type WalletSource = "realtime" | "portal" | "none";
+
+/** get_wallet_cards → data（首页钱包卡：后端聚合 + 门户降级，计划 §2.4）。 */
+export interface WalletCards {
+  ecard: { valueYuan: number | null; source: WalletSource; updatedAt: string };
+  mail: { unread: number | null };
+  library: { borrowed: number | null };
+  /** 电费余额：走 `/charge/*` 级联（批 3 接入），当前恒 `null` + `source:"none"`。 */
+  elec: { valueYuan: number | null; source: WalletSource };
+}
