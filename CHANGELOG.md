@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-09-19 · 修复：内嵌充值页「服务大厅未授权」弹窗（4030 参数改写 hook）
+
+- **模块**：`commands/electricity.rs`（新增 `RECHARGE_4030_HOOK` + 离线单测，仅此一文件）
+- **根因**：官方 `charge-pc` 页面部分请求**硬编码 `synAccessSource=pc`**，撞上学校服务端来源授权策略（`pc` 被拒、`app` 放行，即 4030）→ 页面弹「服务大厅未授权」；我们注入的 `agentType=app` 管不到写死该值的请求
+- **要点**：注入脚本**第一段**安装 fetch/XHR hook，把 `synAccessSource=pc` 改写为 `app`，覆盖 URL query / 请求头 / 请求体三种携带位置（含 `Request` 实例与 `Headers` 三种形态；`new Request` 重建失败退回原对象）；纪律 = **只改不增**（官方没带的请求不加参数）、只改该键（authorization 等不动）、幂等、try/catch 兜底不破坏 token 注入；属**临时措施**，学校修复 PC 授权后可整段移除
+
+## 2026-09-19 · M3 批 3：电费三级查询 + 常用房间 + 应用内嵌充值页
+
+- **模块**：`campus-synjones/src/charge.rs`（新建）、`commands/electricity.rs`（新建，7 命令）、`PowerPanel.tsx`（重写）、契约 types +85 行
+- **要点**：片区口径 = `status==1 && impl_interface` 非空（**恰好 3 条**；`status==1` 实有 6 条，另 3 条是补卡/充值/扫码类；同名停用项靠 `status` 排除）；末级是**手输房间号**（`flag[4]=='3'` 的「先选择再输入」）而非下拉，房间号格式严格（`101` 命中，`1-101`/`101室` 会得到「缴费系统返回数据错误 child==NULL！」）；结果 `map.showData` 键名**恒为「信息」**、值是三片区**格式各异**的自由文本（`map.money`/`iectranamt` 实测不存在）→ 通用字典渲染 + 逗号折行 + 负数标红，**不做文本解构**（否则随文案漂移静默失效）；常用房间**本地落盘** `electricity_rooms.json`（同片区同路径 upsert、上限 20），不写平台侧 `sceneBind/add`
+- **真机点验（CDP）**：三片区 → 校区(1) → 楼栋(1/3/2号楼) → 手输 `101` → 「房间号：101 / 剩余金额：-545.70 / 单价：0.5400」（负数行标红）；保存房间确认落盘且列表可查余额/删除；内嵌充值窗口为**登录态**（渲染官方缴费表单，非登录页），且该窗口调 IPC 被 ACL 拒绝（安全边界验证通过）
+
 ## 2026-09-19 · M3 批 2：一卡通取数与钱包页接线（慧新E校实时 + 门户降级）
 
 - **模块**：`campus-synjones/src/ecard.rs`（新建 356 行）、`commands/synjones.rs`（新建 270 行：`get_ecard`/`get_ecard_transactions`/`get_wallet_cards`）、`WalletPanel.tsx`（重写）、`TodayPanel.tsx`（仅钱包卡）、契约 types +61 行

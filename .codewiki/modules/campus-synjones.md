@@ -66,7 +66,7 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 
 **坑一：token 单活 ⇒ 必须单实例缓存。** `commands/synjones.rs` 用**进程级 `static` + `tokio::sync::MutexGuard`** 把请求串行化，并把会话账号/TGT 变化作为重建条件；`commands/electricity.rs` 复用同一实例（为此把 `synjones_session` 等改成 `pub(crate)`，而**不是**另起第二套客户端——另起一套会互相顶掉 token）。
 
-**坑二：官方 `charge-pc` 页硬编码 `pc` 来源 ⇒ 内嵌充值页会弹「服务大厅未授权」。** 我们自己注入 `agentType=app` 只能影响读该键的请求；官方页部分请求写死 `synAccessSource=pc`，撞上 4030 策略。处置：在 `open_recharge_page` 的 `initialization_script` 里**最先执行**一段 fetch/XHR hook，把 `synAccessSource=pc` 改写为 `app`（query / 请求头 / form body 三处）；这是**绕开学校服务端授权缺陷的临时措施**，学校修复 PC 授权后即可移除。同目的的参考实现是用户自写的油猴脚本。
+**坑二：官方 `charge-pc` 页硬编码 `pc` 来源 ⇒ 内嵌充值页会弹「服务大厅未授权」。** 我们注入的 `agentType=app` 只能影响**读该键**的请求；官方页部分请求写死 `synAccessSource=pc`，撞上 4030 策略（真机点验确认：弹「提示 服务大厅未授权(1) 确定」）。处置：`RECHARGE_4030_HOOK` 常量（`electricity.rs:318-449`）由 `init_script` **排在整个注入脚本的第一段**——`initialization_script` 先于官方页脚本执行，故 hook 先于官方 axios 拦截器生效，覆盖**三种携带位置**：① URL query（`XHR.open` / `fetch` 的字符串形态）；② 请求头（`setRequestHeader` / `fetch` 的 `init.headers` 三种形态 / `Request` 实例就地改写——URL 需改写时用 `new Request(url, opt)` 重建，`duplex:'half'`，失败退回原对象绝不阻断请求）；③ 请求体（urlencoded 串 / `URLSearchParams` / `FormData`）。纪律：**只改不增**（官方没带该参数的请求保持原样，不给它加参数）、**只改这一个键**（authorization 等不动）、**幂等**（单次安装标记）、全程 try/catch（hook 异常不得破坏 token/configs 注入而致白屏）。来源值经占位符 `__SYN_ACCESS_SOURCE__` 在 Rust 侧替换为 crate 常量，避免 JS 里重复硬编码。**这是绕开学校服务端授权缺陷的临时措施**，学校修复 PC 授权后整段可移除；单测 `init_script_puts_4030_hook_first_and_covers_three_carriers`（`electricity.rs:769-797`）钉住「排最前 + 三处覆盖 + 不做缺失追加」。同目的的参考实现是用户自写的油猴脚本 `fix-4030.user.js`。
 
 ## 五、内嵌充值窗口（`commands/electricity.rs`）
 

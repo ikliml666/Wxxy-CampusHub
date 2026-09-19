@@ -107,7 +107,9 @@ scripts/                         captcha-collect.mjs（样本采集）+ captcha-
 
 ### 4. 慧新E校（内网，M3 用）
 
-`berserker` 系接口一律带 `synAccessSource=app`（`pc` 来源被服务端拒，4030 故障结论）；电费查询 `http://10.3.100.110/charge-pc/pays/450` 匿名可用。token 存 sessionStorage 不跨标签页，所以必须由客户端后端持 token。
+`berserker` 系接口一律带 `synAccessSource=app`（`pc` 来源被服务端拒，4030 故障结论），且**双份携带**（GET 放 query / POST 放 form body，另加同名请求头）；token 存 sessionStorage 不跨标签页，所以必须由客户端后端持 token，且 token 是「**单活**」的（同账号只有最新一次 SSO 签发有效，全应用须共用一个客户端实例、禁止并发 SSO）。
+
+⚠️ **下列旧结论已于 2026-09-19 实测证伪/更新**（详见 `PLAN.md` §3.2 与 `.codewiki/modules/campus-synjones.md`）：① 电费查询**不是** `charge-pc/pays/450` 匿名可用——那只是 Vue SPA 壳 HTML；真链路是 `GET /charge/feeitem`（**唯一匿名可读**，免登录可列片区）→ `singleFeeitem` → `POST getThirdData` 三级级联（**末级是手输房间号**，结果 `map.showData` 键名恒为「信息」、值是各片区格式不同的自由文本）。② SSO 桥的 `targetUrl` **必须指向子应用**（`/campus-card-pc/` 等）才回 token。③ 一卡通余额以**电子账户 `elec_accamt`** 为主（**不是**电费余额）。
 
 ---
 
