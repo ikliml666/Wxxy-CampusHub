@@ -39,7 +39,8 @@ use crate::infra::{state, timetable};
 use campus_portal::{html_text, section_time_slots, ScheduleNoticeBrief};
 use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
-    current_week, diff_courses, expand_occurrences, parse_kb_response, parse_notice_text,
+    current_week, diff_courses, expand_occurrences, parse_kb_response,
+    parse_notice_with_semester, parse_notice_text,
     previous_or_same_day_of_week, semester_start_from_week, week_index_at_date, OccurrenceKind,
     NoticeConfidence, OverrideKind, Semester,
 };
@@ -880,7 +881,12 @@ pub async fn parse_notice(
     let tt = timetable::load_timetable(&dir);
     let today = chrono::Local::now().date_naive();
     let cw = current_week(today, &tt.config);
-    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
+    Ok(CommandResult::ok(parse_notice_with_semester(
+        &text,
+        &tt.courses,
+        cw,
+        tt.config.semester_start_date,
+    )))
 }
 
 /// 同一 `noticeId + courseId` 重复采纳幂等：先移除旧叠加再写入（覆盖而非堆叠）。
@@ -1264,7 +1270,8 @@ pub async fn list_schedule_notices(
 
 /// parse_notice_from_url（契约 §18.3）：拉公告正文页（域名白名单在
 /// `fetch_info_detail` 内强制）→ 剥标签取纯文本（[`html_text`]，块级标签转
-/// 换行，摘录按行取依赖它）→ 复用 [`parse_notice_text`] 解析。
+/// 换行，摘录按行取依赖它）→ [`parse_notice_with_semester`] 解析（先识别全校
+/// 日期置换型公告，未命中回落 [`parse_notice_text`]，学期锚点取课表配置）。
 /// 返回结构与 [`parse_notice`] 完全一致（候选列表，confidence/reason 在候选内）；
 /// **解析结果只进候选确认流，不自动 apply**（采纳仍走 `apply_override`）。
 #[tauri::command]
@@ -1297,7 +1304,12 @@ pub async fn parse_notice_from_url(
     let tt = timetable::load_timetable(&dir);
     let today = chrono::Local::now().date_naive();
     let cw = current_week(today, &tt.config);
-    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
+    Ok(CommandResult::ok(parse_notice_with_semester(
+        &text,
+        &tt.courses,
+        cw,
+        tt.config.semester_start_date,
+    )))
 }
 
 // ---------------- 作息时间表编辑（冻结契约 §2.3，2026-09-18 收尾轮追加） ----------------

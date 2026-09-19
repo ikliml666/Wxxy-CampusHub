@@ -74,7 +74,7 @@ tags:
 
 `diff_courses(existing, incoming) -> DiffResult`（`diff.rs:135`）实现冻结契约 §2.4 的自动对比更新，输出即「合并后的完整课程列表」（直接写库）+ 计数（added/changed/removed）+ 人类可读 `changes` 文案：
 
-- **匹配键 = 课程名 + `class_id`**（`match_key`，`diff.rs:36`）；`class_id` 缺失退化为仅课程名匹配（`Option<&str>` 的 None==None）。
+- **匹配键 = 课程名 + `class_id` + 时段三元组（day/start_section/end_section）**（`match_key`，`diff.rs:39`，五元组）；`class_id` 缺失退化为仅课程名匹配（`Option<&str>` 的 None==None）。⚠️ 匹配键只有名+id 在真机翻过车：正方 kbList 同一教学班（同 `jxb_id`）**按多时段拆多条**（马原 3 条同 `540B1687E8…`），二次同步一对多覆盖 → 本地多条被改成同一条时段 → 同格重叠分列渲染、课程块压缩。2026-09-19 修复：diff 改**消费式一对一配对**（incoming 按 key 分桶 `VecDeque`，旧库逐条队首消费 + `consumed` 标记；新增只收未消费项），回归测试 `diff_pairs_same_class_multi_section_one_to_one` / `diff_duplicate_local_keys_only_one_consumed`。
 - **Manual 零触碰**（`diff.rs:141-145`）：旧库 Manual 课程原样 push——不参与匹配、不被更新、永不被置 `disabled`（专门单测 `diff_never_touches_manual_courses` 覆盖「同名 Import 来袭」与「Manual 消失」两个方向）。
 - 消失 → 置 `disabled=true` 不删记录；**已停开的再次消失不重复计数/不重复报文案**（`diff.rs:167-176`，单测 `diff_second_run_no_duplicate_removed`）——removed 语义 =「本次新发现停开」。
 - 字段级 diff（`field_changes`，`diff.rs:43-76`）：星期/节次/周次/教室/教师五个字段；周次**排序后比较**（旧库手工编辑乱序不误报）。文案形态照契约：`信息安全 教室 D4-207 → D4-305`，多字段以「；」连接；added=`新增 X`、removed=`X 停开`、复活=`X 恢复开课`。
@@ -85,6 +85,7 @@ tags:
 ## 调课通知 L1/L2 解析（notice.rs，M2.5 批次 3，本项目原创）
 
 `parse_notice_text(text, courses, current_week) -> Vec<NoticeCandidate>`（`notice.rs`）实现冻结契约 §2.5，纯函数、零新依赖（std 字符串处理，无 regex）；单候选产出与取舍见 [[decisions/timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]。
+- **全校日期置换分支**（`parse_notice_with_semester(text, courses, current_week, semester_start)`，2026-09-19）：真实公告「9月20日（星期日）补9月28日（星期一）课程」不含课程名/节次，是课表层置换——旧解析器会把书名号《关于…放假安排的通知》误提为课程名。置换识别（相邻日期对 + 连接词 补/上/按/换，括号星期提示优先、缺失由 `semester_start` 推算星期与教学周）命中时，对本地「被补日星期」每门未停开课产出 `Extra` 候选（节次沿用原课）；未命中回落 `parse_notice_text`（签名不变）。tauri 两处调用点传 `tt.config.semester_start_date`。
 
 - **NoticeCandidate**（契约 §2.3 冻结字段，camelCase）：`{noticeId, courseId?, courseName, changeType, weeks, newDay?, newStartSection?, newEndSection?, newPosition?, confidence: "high"|"low", reason, excerpt}`；`NoticeConfidence::{High, Low}` serde 小写。
 - **L1 提取**（数字锚定扫描 = `match_indices('周'/'节')` + `digits_before` 往左收 ASCII 数字，字节级安全因多字节字符各字节 ≥0x80）：
