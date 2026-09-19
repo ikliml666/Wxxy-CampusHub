@@ -15,7 +15,9 @@ tags: [frontend, electricity, recharge, charts, cascade]
 
 ## 布局（M4 批 3 重设计）
 
-`PowerPanel.tsx:421`：容器 `mx-auto mt-8 max-w-5xl px-4`，下方 `grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-4`。**左列**=缴费片区 / 查询房间余额（含结果）/ 充值，**右列**=电费变化 / 缴费记录 / 常用房间。窄屏栅格塌成单列、右列内容顺移到左列之后。栅格轨道必须 `minmax(0,1fr)`、卡内文本 `min-w-0`，否则长房间名会撑破布局。
+`PowerPanel.tsx`：容器 `mx-auto mt-8 max-w-5xl px-4`，下方 `grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-4`。**左列**=缴费片区 / 查询房间余额（卡内含结果与**常用房间**区段）/ 充值，**右列**=电费变化 / 缴费记录。窄屏栅格塌成单列、右列内容顺移到左列之后。栅格轨道必须 `minmax(0,1fr)`、卡内文本 `min-w-0`，否则长房间名会撑破布局。
+
+**常用房间与查询卡融合**（2026-09-19 用户要求）：常用房间本质就是查询入口——点「查余额」走的是同一条级联查询，原先是右列独立卡、与左栏查询动作隔开。现作为**查询卡的卡内区段**（`mt-4 border-t border-line pt-3` 分隔 + 「共 N 个」计数），右列由三张卡减为两张，左右两列高度更接近。
 
 底部留白由外壳统一提供（`AppShell.tsx:119` `<main className="pb-28">`），面板自身不加。
 
