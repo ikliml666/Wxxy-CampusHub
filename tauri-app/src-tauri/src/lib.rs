@@ -94,6 +94,21 @@ pub fn run() {
             commands::ecard::get_ecard_stats_assort,
             commands::ecard::get_ecard_transfer_accounts,
             commands::ecard::get_ecard_secure_keyboard,
+            commands::ecard::ecard_lost,
+            commands::ecard::ecard_unlost,
+            commands::ecard::ecard_check_pwd,
+            commands::ecard::ecard_modify_pwd,
+            commands::ecard::ecard_send_find_pwd_code,
+            commands::ecard::ecard_find_pwd,
+            commands::ecard::ecard_set_limits,
+            commands::ecard::ecard_set_autotrans,
+            commands::ecard::ecard_transfer,
+            commands::ecard::ecard_send_bind_bank_code,
+            commands::ecard::ecard_bind_bank,
+            commands::ecard::ecard_cancel_bank,
+            commands::ecard::ecard_send_bind_user_code,
+            commands::ecard::ecard_bind_user,
+            commands::ecard::ecard_unbind_user,
         ])
         // M4 批 2 启动补采：今天还没采过 + 有内存会话时，后台补一次日余额快照。
         // 不弹窗、不阻塞启动（spawn 后立刻返回）、失败只记日志（不出现 token/账号/户号）。

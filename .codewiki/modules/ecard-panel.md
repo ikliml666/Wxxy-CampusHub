@@ -9,6 +9,10 @@ source_files:
   - tauri-app/frontend/src/components/ecard/EcardStatsView.tsx
   - tauri-app/frontend/src/components/ecard/EcardPowerView.tsx
   - tauri-app/frontend/src/components/ecard/EcardRechargeView.tsx
+  - tauri-app/frontend/src/components/ecard/SecureKeypad.tsx
+  - tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardTransferView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardBankView.tsx
   - tauri-app/frontend/src/components/ecard/MiniLine.tsx
   - tauri-app/frontend/src/shared/types.ts
   - tauri-app/src-tauri/src/commands/ecard.rs
@@ -33,7 +37,7 @@ tags:
 
 ## 页面结构：宫格首页 ⇄ 子页
 
-`panels/EcardsPanel.tsx` 是容器：当前子页放 **uiStore 的 `ecardView`**（持久化、非法值兜底 `"home"`）——今日页快捷动作「查电费」「卡片充值」设 `panel:"ecard"` + `ecardView:"power"/"recharge"` 即可**直达子页**（`TodayPanel.tsx:109-110,441`）。`EcardView = "home" | "balance" | "bill" | "stats" | "recharge" | "power"`（`shared/types.ts:943`）。
+`panels/EcardsPanel.tsx` 是容器：当前子页放 **uiStore 的 `ecardView`**（持久化、非法值兜底 `"home"`）——今日页快捷动作「查电费」「卡片充值」设 `panel:"ecard"` + `ecardView:"power"/"recharge"` 即可**直达子页**（`TodayPanel.tsx:109-110,441`）。`EcardView = "home" | "balance" | "bill" | "stats" | "recharge" | "power" | "cardops" | "transfer" | "bank"`（`shared/types.ts:943`，M4.5 批 4 追加后三值；`uiStore.ts:31-33` 的 `ECARD_VIEWS` 同步）。
 
 - **首页** `EcardHome.tsx`：顶部**主余额带**（主余额口径 = 电子账户，由 `config.balanceShowsElectronic` 决定）+ 功能宫格。
 - **余额** `EcardBalanceView.tsx`：`get_ecard_overview` 的 `cards[]`（`getCampusCards` 全卡列表）逐卡渲染。
@@ -41,6 +45,10 @@ tags:
 - **统计** `EcardStatsView.tsx`：`get_ecard_stats_summary`（今日/区间收支合计）+ `get_ecard_stats_series`（日期序列，`MiniLine.tsx` 手绘 SVG 折线）+ `get_ecard_stats_assort`（分类占比）。
 - **充值** `EcardRechargeView.tsx`：一卡通充值（片区 401），复用 [[modules/campus-synjones|慧新E校协议核心]] §五 的 `RechargeFlow` 支付链路，建单带 `noContext: true`（见下「命令面」）。
 - **电费** `EcardPowerView.tsx`：**原 PowerPanel 电费内容整体搬入**（级联查询/常用房间/结果卡/三张数据卡均未动），页面壳换成子页形态；原文章细节见 [[modules/electricity-panel|电费页]]（其 `source_files` 已同步指向本文件）。
+- **卡务操作** `EcardCardOpsView.tsx`（M4.5 批 4 新增）：挂失·解挂（挂失分区按 `config.showLost` 门控）/ 修改密码三段式（旧密 + 新密 + 确认新密，**三把键盘各领各的**）/ 短信找回密码 / 免密与限额设置 / 圈存转账标识。
+- **转账** `EcardTransferView.tsx`（批 4 新增）：卡账户 ⇄ 电子账户互转，金额前端校验**不得超转出账户余额**。
+- **银行卡** `EcardBankView.tsx`（批 4 新增）：绑定/解绑银行卡（短信验证码流程）、查看绑定卡号（走**查询密码校验**）；宫格入口按 `config.enabledApps` 含 `yinhangka`/`bind-bank-card` 门控。
+- **安全键盘** `SecureKeypad.tsx`（批 4 新增，通用组件）：调 `get_ecard_secure_keyboard` 拿 `keys` 渲染，**只记录用户点击的位置下标序列**（明文不进前端），点满 6 位自动回调提交；占位符只显示已输位数，`aria-label` 只写「第 N 键」——**绝不把键位字符回显到无障碍文本**。
 
 ## 命令面清单（`commands/ecard.rs`，2026-09-19 新增 7 条，全部**只读**）
 
@@ -56,7 +64,33 @@ tags:
 
 流水查询在 `commands/synjones.rs::get_ecard_transactions`（`:153`）**原地扩参**：`account?/page/size?/type?/typeId?/info?/orderId?`，映射到协议层 `TurnoverFilter`（`ecard.rs:391`；`build_turnover_params` 保证**未传的可选参数不进 query**）。
 
-**写类（挂失/转账/改密等）本批未做**：安全键盘只到「取键盘 + 进程级缓存」（`ecard_ops.rs`），写操作在下一批。
+## 写操作命令清单（`commands/ecard.rs`，2026-09-19 批 4 新增 15 条；⚠️ **全部未 live 验证**——写路径红线：开发/点验阶段绝不真发写请求，只能由用户在真机上显式触发，与 `submit_pay` 同口径，见 [[modules/campus-synjones|慧新E校协议核心]] §五「未验证项」）
+
+| 命令 | 关键参数 | 说明 | 位置 |
+|---|---|---|---|
+| `ecard_lost` | `account?` | 挂失（**免密**）；前端二次确认后才发 | `ecard.rs:470` |
+| `ecard_unlost` | `account?`, `padId?/positions?` | 解挂；本校无 `unlockFlag` ⇒ 服务端默认需密码，`optional_pad` 要求密码参数**要么都给要么都不给**（`ecard.rs:455`） | `ecard.rs:489` |
+| `ecard_check_pwd` | `account?`, `padId/positions` | 校验查询密码，返回 `{ok, bankCardNo}`；本校 `bankCardNo` 恒 null（前端如实提示「学校未返回卡号」） | `ecard.rs:514` |
+| `ecard_modify_pwd` | `account?`, 三组 `padId/positions` | 改密三段式（`oldpw`/`newpw`/`renewpw` 各自消耗一把键盘） | `ecard.rs:536` |
+| `ecard_send_find_pwd_code` | `account?` | 发验证码，回 `data.account` 作后续会话 id | `ecard.rs:566` |
+| `ecard_find_pwd` | `account?`, `padId/positions`×2, `vercode`, `id` | 凭短信验证码设新密（免旧密） | `ecard.rs:585` |
+| `ecard_set_limits` | `account?`, `acctype`, 日/免密/单笔限额（**元**） | 后端 `yuan_to_fen_str` ×100 转分（`ecard_ops.rs:292`） | `ecard.rs:614` |
+| `ecard_set_autotrans` | `account?`, `flag`, 金额（元）, `limite?` | 圈存转账标识（`autotransFlag/Amt/Limite`） | `ecard.rs:646` |
+| `ecard_transfer` | `srcAccount`, `dstAccount`, `srcAcctype`, 金额（元） | 卡间转账；**唯一必须由前端回传账户原号的写命令**（账户来自 `get_ecard_transfer_accounts`） | `ecard.rs:668` |
+| `ecard_send_bind_bank_code` | `account?` | 绑定银行卡-发验证码 | `ecard.rs:695` |
+| `ecard_bind_bank` | `account?`, 银行卡号, `vercode` | 建立银行卡绑定关系 | `ecard.rs:716` |
+| `ecard_cancel_bank` | `account?` | 解绑银行卡 | `ecard.rs:741` |
+| `ecard_send_bind_user_code` | `account?` | 绑定用户-发验证码 | `ecard.rs:760` |
+| `ecard_bind_user` | `account?`, 姓名, 证件号, `vercode` | 绑定用户身份 | `ecard.rs:779` |
+| `ecard_unbind_user` | `account?` | 解绑用户 | `ecard.rs:803` |
+
+**账号来源（批 4 关键设计）**：除 `ecard_transfer` 外，这 15 条命令的 `account` 参数都是 `Option<String>`——因为**卡号原号不暴露给前端**（`CardDetail` 只有 `account_masked`，见下「脱敏策略」），缺省时由后端 helper `resolve_account`（`ecard.rs:440`）调 crate 层新增的 `ecard::current_account`（`ecard.rs:392`，内部走 `getCampusCards` 取本人当前卡）解析。这与「电费房间上下文串由后端合成」（`third_party_for_room`）是同一取舍：**凡是前端拿不到/不该拿的数据，由后端在命令边界现解析**。
+
+**密码协议链路（安全键盘消费）**：前端 `SecureKeypad.tsx` 只提交 `padId`（本进程随机 id，真实 uuid 不出后端）+ 用户点击的**位置下标序列** → 后端 `ecard_ops::assemble_pwd`（`ecard_ops.rs:284`）经 `take_pad`（取走即删）取回键盘映射，纯函数 `build_pwd`（`ecard_ops.rs:263`）按下标翻译成字符拼 `pwd = "1$1$" + 明文 + "$1$" + keyboardUuid`（`pwdType:"1"`），**明文只在后端内存中出现、拼完即弃**——与电费充值 `passwordMap` 同构的红线（[[learnings/ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘]]、[[modules/campus-synjones|慧新E校协议核心]] §五安全红线）。
+
+**双层成功判定**：写操作不能只看信封 `code==200`。`require_retcode_ok`（`ecard_ops.rs:302`）要求**axios 层 `code==200` 且业务层 `data.retcode=="0"`**，失败取 `data.errmsg`、回落顶层 `msg` 组装中文错误。既有单测 `retcode_double_layer_judgement` 钉住该口径（`ecard_ops.rs:750`）。
+
+**前端一处已知妥协**：改密时「新密码 === 确认新密码」的本地比对依赖**两把键盘的布局指纹**（两次取键盘若乱序布局不同则本地比不出，明文不进前端所致）——布局不一致时交服务端判定，前端不为此还原明文。**多卡绑定不做**：本校 `getAllApps` 无 `bind-campus-card`（见上「门控与配置」）。
 
 ## 门控与配置（`EcardClientConfig`）
 

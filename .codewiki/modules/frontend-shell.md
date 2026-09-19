@@ -32,6 +32,10 @@ source_files:
   - tauri-app/frontend/src/components/ecard/EcardStatsView.tsx
   - tauri-app/frontend/src/components/ecard/EcardPowerView.tsx
   - tauri-app/frontend/src/components/ecard/EcardRechargeView.tsx
+  - tauri-app/frontend/src/components/ecard/SecureKeypad.tsx
+  - tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardTransferView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardBankView.tsx
   - tauri-app/frontend/src/components/ecard/MiniLine.tsx
   - tauri-app/frontend/src/panels/SettingsPanel.tsx
 tags:
@@ -123,7 +127,7 @@ tags:
 
 ## EcardsPanel：一卡通页（M4.5，9→8 面板合并）
 
-原「钱包」（WalletPanel）与「电费」（PowerPanel）合并为 `panels/EcardsPanel.tsx`（宫格首页 ⇄ 子页，`EcardView` 六值），两个旧面板文件已删除；电费内容整体迁入 `components/ecard/EcardPowerView.tsx`（级联/常用房间/结果卡逻辑未动，见 [[modules/electricity-panel|电费页]]）。子页与数据源、命令面、门控、单位口径与脱敏策略详见 [[modules/ecard-panel|一卡通页]]，合并决策见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]。TodayPanel 快捷动作「查电费」「卡片充值」改指 `ecard` 面板并**直达子页**（`TodayPanel.tsx:109-110` 设 `ecardView: "power"/"recharge"`，`TodayPanel.tsx:441` 应用）。
+原「钱包」（WalletPanel）与「电费」（PowerPanel）合并为 `panels/EcardsPanel.tsx`（宫格首页 ⇄ 子页，`EcardView` **九值**：home/balance/bill/stats/recharge/power + M4.5 批 4 新增 `cardops`/`transfer`/`bank` 三子页——卡务操作、卡间转账、银行卡绑定，组件为 `components/ecard/EcardCardOpsView.tsx` / `EcardTransferView.tsx` / `EcardBankView.tsx`，密码输入统一走通用安全键盘 `SecureKeypad.tsx`），两个旧面板文件已删除；电费内容整体迁入 `components/ecard/EcardPowerView.tsx`（级联/常用房间/结果卡逻辑未动，见 [[modules/electricity-panel|电费页]]）。宫格新增三入口按 `config` 门控（挂失分区 `showLost`、银行卡项 `enabledApps` 含 `yinhangka`/`bind-bank-card`；多卡绑定不做——本校 `getAllApps` 无 `bind-campus-card`）。子页与数据源、命令面（含 15 条写命令）、门控、单位口径与脱敏策略详见 [[modules/ecard-panel|一卡通页]]，合并决策见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]。TodayPanel 快捷动作「查电费」「卡片充值」改指 `ecard` 面板并**直达子页**（`TodayPanel.tsx:109-110` 设 `ecardView: "power"/"recharge"`，`TodayPanel.tsx:441` 应用）。
 
 ## TodayPanel：今日页真实数据（M2 批次 1）
 

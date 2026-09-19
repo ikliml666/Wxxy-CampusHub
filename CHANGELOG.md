@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-09-19 · M4.5 批 3：一卡通写操作（挂失·解挂 / 改密 / 限额 / 圈存 / 转账 / 银行卡）+ 错误文案凭据脱敏（安全修复）
+
+- **模块**：`crates/campus-synjones/src/{ecard_ops,ecard,lib,client,charge,recharge,sso}.rs`、`tauri-app/src-tauri/src/commands/{ecard,synjones}.rs` + `src/lib.rs`、`tauri-app/frontend/src/{components/ecard/{SecureKeypad,EcardCardOpsView,EcardTransferView,EcardBankView}.tsx, components/ecard/{EcardHome}.tsx, panels/EcardsPanel.tsx, shared/types.ts, stores/uiStore.ts}`
+- **后端 15 条写命令**（挂失 / 解挂 / 校验查询密码 / 改密 / 短信找回密码 / 免密与限额 / 圈存转账标识 / 卡账户↔电子账户转账 / 绑卡发码与提交 / 解绑银行卡 / 绑校园卡与解绑）；`ecard_ops.rs` 补齐协议实现，含辅助 `PasswordInput { padId, positions }`、`assemble_pwd`、纯函数 `build_pwd`、`yuan_to_fen_str`、`require_retcode_ok`
+- **双层成功判定**（本批新引入的必要修正）：`/ykt/tsm/*` 与 `/accountuser/*` 的成败不只看 axios 层 `code==200`，还要看业务层 `data.retcode=="0"`，失败取 `data.errmsg` 回落顶层 `msg`——学校侧的可读原因不再被吞掉
+- **密码明文只在后端**：`pwd` 协议为 `"1$1$"+明文+"$1$"+keyboardUuid` + `pwdType:"1"`；前端只提交 **`padId` + 用户点击的位置下标序列**，后端按 padId 从一次性键盘缓存取映射翻译成字符、拼串、用完即弃（与电费充值 `passwordMap` 同构的红线：明文不进前端、不进日志、不落盘、不回填输入框）
+- **卡号原号不出后端**（设计取舍）：`CardDetail` 只有脱敏号 ⇒ 写命令的 `account` 改为可选，缺省时由后端 `ecard::current_account`（走 `getCampusCards` 取本人当前卡）解析——与「电费房间上下文串由后端合成」同一取舍；只有 `ecard_transfer` 需要前端回传账户原号（转账必须选账户，来自 `get_ecard_transfer_accounts`）
+- **前端**：`SecureKeypad.tsx`（通用安全键盘：只记位置下标、点满 6 位自动提交、占位符显示位数、aria-label 只写「第 N 键」防读屏泄露）、`EcardCardOpsView.tsx`（挂失·解挂 / 改密三段式 / 短信找回 / 免密与限额 / 圈存）、`EcardTransferView.tsx`（转账，金额不得超转出余额）、`EcardBankView.tsx`（绑卡/解绑/查看卡号）；宫格新增三项（银行卡项按 `enabledApps` 门控、挂失分区按 `showLost` 门控）；**多卡绑定不做**（本校 `getAllApps` 无 `bind-campus-card`）；改密的「新密码一致性」本地比对依赖两把键盘的布局指纹，布局不同则交服务端判定（明文不进前端的必然代价，已在代码注释与 wiki 写明）
+- **安全修复（本批意外发现）**：真机点验时 UI 错误文案里**回显了完整 URL 中的 CAS 票据**（`ticket=ST-…`）——根因是 `reqwest` 把完整 URL 拼进错误串，而本系统 URL 的 query 带票据。新增 `campus_synjones::redact_secrets`（按参数名抹值：`ticket`/`synjones-auth`/`token`/`access_token`/`password`/`pwd`/`vercode`），在**错误构造点**统一调用（`client`/`charge`/`recharge` 的 HTTP 错误与 `sso` 的两处换票错误），命令层 `err_text` 再兜一层——UI 文案、诊断日志、live 探针三条路径同时受益。实现踩了两个坑（均是既有测试当场抓到的）：① 回看键名用 `rfind(...)+1` 遇多字节分隔符（中文括号）**panic**（`byte index N is not a char boundary`），改用 `char_indices().rev()...map(|(p,c)| p + c.len_utf8())`；② 值边界用「终止符列表」会把全角右括号一起吞掉，改为按**允许字符集**界定
+- **验证**：`cargo test --workspace` **363 passed / 0 failed**（含脱敏与 pwd 拼装的单测）、`tsc --noEmit` 零错误；真机点验三个新子页可正常进入、标题与门控正确、取数失败时显示错误条 + 重试（不白屏）
+- **⚠️ 写路径未 live 验证（红线）+ 真机点验环境异常**：挂失/改密/限额/转账/绑卡等会真实改变卡状态或余额，按红线**未发任何真实请求**，实现依据是官方 bundle 反查的协议形态；点验当天校园网断开（`10.3.100.110` 不可达，HTTP 000），写操作子页的**数据渲染与键盘弹出未能实测**——需恢复校园网后由用户真机操作确认（尤其 `retcode` 双层判定的真实响应形态、`checkPwd` 的 GET query 是否被服务端接受）
+
 ## 2026-09-19 · M4.5 批 1+2：一卡通页（宫格首页 + 子页）——钱包与电费合并、官方读类能力补齐
 
 - **模块**：`crates/campus-synjones/src/{ecard,ecard_stats,ecard_ops,recharge,lib}.rs`、`tauri-app/src-tauri/src/commands/{ecard,synjones,electricity,mod}.rs` + `src/lib.rs`、`tauri-app/frontend/src/{panels/EcardsPanel.tsx, components/ecard/*, components/{AppShell,DockNav,RechargeFlow}.tsx, panels/TodayPanel.tsx, shared/types.ts, stores/uiStore.ts}`

@@ -134,9 +134,13 @@ pub async fn sso_token(
     let st = cas
         .sso_ticket(tgt, &service)
         .await
-        .map_err(|e| CampusSynjonesError::SsoFailed(format!("CAS 换票失败（TGT 可能已过期）：{e}")))?;
+        .map_err(|e| CampusSynjonesError::SsoFailed(crate::redact_secrets(&format!(
+            "CAS 换票失败（TGT 可能已过期）：{e}"
+        ))))?;
     let landing = cas.sso_follow(&service, &st).await.map_err(|e| {
-        CampusSynjonesError::SsoFailed(format!("跟随 lyCas 回跳链失败：{e}"))
+        CampusSynjonesError::SsoFailed(crate::redact_secrets(&format!(
+            "跟随 lyCas 回跳链失败：{e}"
+        )))
     })?;
     extract_token_from_url(&landing).ok_or_else(|| {
         CampusSynjonesError::SsoFailed(format!(

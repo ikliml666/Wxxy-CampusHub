@@ -384,6 +384,26 @@ pub async fn fetch_cards_full(
         .unwrap_or_default())
 }
 
+/// 「当前卡」的**卡号原号**——写操作（挂失/解挂/改密/限额/圈存/绑卡）的账号来源。
+///
+/// 为什么放在这里而不是让前端传：卡号原号**不暴露给前端**（[`CardDetail`] 只有 `account_masked`），
+/// 而这些写操作恒作用于本人当前卡 ⇒ 账号由后端自解析，前端拿不到也不需要（与「房间上下文串由后端
+/// 合成」同一取舍）。前端若要显式指定账号（多卡场景）仍可传，由命令层优先采用。
+pub async fn current_account(client: &SynjonesClient) -> Result<String, CampusSynjonesError> {
+    let v = client.get(EP_CARDS_FULL, &[], Envelope::Berserker).await?;
+    let acc = v["data"]["card"]
+        .as_array()
+        .and_then(|a| a.first())
+        .map(|c| text_of(c.get("account")))
+        .unwrap_or_default();
+    if acc.trim().is_empty() {
+        return Err(CampusSynjonesError::Parse(
+            "未取到校园卡号，请稍后重试".to_string(),
+        ));
+    }
+    Ok(acc)
+}
+
 /// 流水查询的增强筛选（契约 §1.4：全部实测生效）。
 ///
 /// `None` / 空串的参数**不进 query**（避免改变服务端语义——实测 `type` 不传即全量）。

@@ -1,15 +1,16 @@
-//! 一卡通面板读类命令（批 1，契约 §2.2 读类清单）：卡列表+客户端配置 / 分类字典 /
-//! 统计三件套 / 转账账户 / 安全键盘。
+//! 一卡通面板命令（批 1 读类 + 批 3 写类，契约 §2.2）：卡列表+客户端配置 / 分类字典 /
+//! 统计三件套 / 转账账户 / 安全键盘 / 挂失解挂改密限额转账绑卡等写操作。
 //!
 //! 与 [`super::synjones`]（钱包页 `get_ecard`、流水 `get_ecard_transactions`）分文件；
 //! 共用同一把进程级 synjones 锁与同一个客户端（**token 单活**，见 `commands::synjones`
 //! 头注——本模块绝不自建第二套客户端）。
 //!
-//! # 批 1 只读红线
+//! # 写操作（批 3，协议 §1.8：bundle 反查，**未 live 验证**）
 //!
-//! 本模块只发 GET（含 `queryCardByTransfer` / `frontInfo` / `getAllApps` / `keyboard`），
-//! **不碰任何写接口**（`/blade-pay/pay`、`lostCard`、`modifyPwd`、`payLimiteModify`、
-//! `modifyAcc`、`cardTransfer`、`buildBankCardRelation`、`bindUser`/`unBind` 一律不出现在此）。
+//! - 密码**永不回传前端**：前端只提交 `padId` + 点击位置序列（[`PasswordInput`]），
+//!   `pwd` 串由 crate 层 [`campus_synjones::ecard_ops::assemble_pwd`] 在后端拼装，用完即弃。
+//! - 金额：前端传元，crate 层 ×100 成分。
+//! - 本模块不做参数校验以外的业务判断；二次确认与输入校验由前端负责（契约 §2.2）。
 //!
 //! # 配置与 PII 纪律
 //!
@@ -27,8 +28,12 @@
 use super::auth::CommandResult;
 use super::synjones::{err_text, synjones_session, ERR_NO_SESSION};
 use crate::infra::state::AppState;
-use campus_synjones::ecard::CardDetail;
-use campus_synjones::ecard_ops::{fetch_secure_keyboard, KeyboardKind, SecurePad};
+use campus_synjones::ecard::{current_account, CardDetail};
+use campus_synjones::ecard_ops::{
+    bind_bank, bind_user, cancel_bank, check_pwd, fetch_secure_keyboard, find_pwd, KeyboardKind,
+    lost_card, modify_pwd, send_bind_bank_code, send_bind_user_code, send_find_pwd_code,
+    set_autotrans, set_limits, transfer, unbind_user, unlost_card, PasswordInput, SecurePad,
+};
 use campus_synjones::ecard_stats::{
     fetch_stats_assort, fetch_stats_series, fetch_stats_summary, fetch_turnover_types,
     StatsAssortItem, StatsPoint, StatsSummary, TurnoverType,
@@ -37,6 +42,23 @@ use campus_synjones::client::Envelope;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
+
+/// 与 `commands::electricity` 的同名宏同一份展开（取全局唯一会话/客户端、未登录回
+/// 「请先登录」）。那边是 `macro_rules!` 文本作用域、未导出，跨文件复用需要改
+/// `electricity.rs`（不在本批允许改动清单内），故此处按同构展开就地定义；
+/// 语义与那边完全一致，后续可上提去重。
+macro_rules! with_synjones {
+    ($state:expr, |$client:ident| $body:expr) => {{
+        let Some(guard) = synjones_session(&$state).await else {
+            return Ok(CommandResult::err(ERR_NO_SESSION));
+        };
+        let Some(sess) = guard.as_ref() else {
+            return Ok(CommandResult::err(ERR_NO_SESSION));
+        };
+        let $client = &sess.client;
+        $body
+    }};
+}
 
 /// `get_ecard_overview` → data。
 #[derive(Debug, Serialize)]
@@ -392,6 +414,413 @@ pub async fn get_ecard_secure_keyboard(
     })
 }
 
+// ---------------- 写操作命令（批 3，契约 §2.2 写类清单） ----------------
+
+/// `ecard_check_pwd` / 发码类 → data。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcardOpId {
+    /// 发码接口响应 `data.account`（后续提交命令原样回传的 `id`/`uuid`）。
+    pub id: String,
+}
+
+/// `ecard_check_pwd` → data。`bank_card_no` 本校无「校验密码查银行卡号」需求，恒 None
+/// （契约 §2.5：全号仅校验通过才回——本校无该路径，绝不无凭回号）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckPwdResult {
+    pub ok: bool,
+    pub bank_card_no: Option<String>,
+}
+
+/// 写操作的账号解析：卡号原号**不出后端**（前端只持脱敏号），缺省时由后端取「当前卡」。
+///
+/// 与「电费房间上下文串由后端合成」同一取舍：能由后端解析出的事实，就不让前端传。
+/// 显式传入（多卡场景）时优先采用传入值。
+async fn resolve_account(
+    client: &campus_synjones::SynjonesClient,
+    account: Option<String>,
+) -> Result<String, String> {
+    if let Some(a) = account
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+    {
+        return Ok(a);
+    }
+    current_account(client).await.map_err(|e| err_text(&e))
+}
+
+/// 组装可选密码输入（`ecard_unlost` 用）：`padId`/`positions` 要么都给要么都不给。
+/// 只给一半 → 可读错误（防止前端半截提交被静默当成免密解挂）。
+fn optional_pad(
+    pad_id: Option<String>,
+    positions: Option<Vec<usize>>,
+) -> Result<Option<PasswordInput>, String> {
+    match (pad_id, positions) {
+        (Some(pad_id), Some(positions)) => {
+            Ok(Some(PasswordInput { pad_id, positions }))
+        }
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err("密码参数不完整：请重新获取键盘并完整输入密码".to_string()),
+    }
+}
+
+/// 挂失（免密）。⚠️ 服务端会立即冻结卡片，调用前由前端完成二次确认。
+#[tauri::command]
+pub async fn ecard_lost(
+    state: State<'_, AppState>,
+    account: Option<String>,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match lost_card(client, &account).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 解挂（本校无 `unlockFlag` → 需密码；`padId`/`positions` 缺省 = 免密形态提交）。
+#[tauri::command]
+pub async fn ecard_unlost(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    pad_id: Option<String>,
+    positions: Option<Vec<usize>>,
+) -> Result<CommandResult<()>, String> {
+    let pad = match optional_pad(pad_id, positions) {
+        Ok(p) => p,
+        Err(msg) => return Ok(CommandResult::err(&msg)),
+    };
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match unlost_card(client, &account, pad).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 校验查询密码（通过 → `{ok:true}`；`bankCardNo` 本校恒 null）。
+#[tauri::command]
+pub async fn ecard_check_pwd(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    pad_id: String,
+    positions: Vec<usize>,
+) -> Result<CommandResult<CheckPwdResult>, String> {
+    let pad = PasswordInput { pad_id, positions };
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match check_pwd(client, &account, pad).await {
+            Ok(()) => CommandResult::ok(CheckPwdResult { ok: true, bank_card_no: None }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 修改查询密码（旧密 / 新密 / 确认新密各占一把键盘）。
+#[tauri::command]
+pub async fn ecard_modify_pwd(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    old_pad_id: String,
+    old_positions: Vec<usize>,
+    new_pad_id: String,
+    new_positions: Vec<usize>,
+    renew_pad_id: String,
+    renew_positions: Vec<usize>,
+) -> Result<CommandResult<()>, String> {
+    let (old, new, renew) = (
+        PasswordInput { pad_id: old_pad_id, positions: old_positions },
+        PasswordInput { pad_id: new_pad_id, positions: new_positions },
+        PasswordInput { pad_id: renew_pad_id, positions: renew_positions },
+    );
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match modify_pwd(client, &account, old, new, renew).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 找回密码-发验证码 → `{id}`（后续 `ecard_find_pwd` 的 `id`）。
+#[tauri::command]
+pub async fn ecard_send_find_pwd_code(
+    state: State<'_, AppState>,
+    account: Option<String>,
+) -> Result<CommandResult<EcardOpId>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match send_find_pwd_code(client, &account).await {
+            Ok(id) => CommandResult::ok(EcardOpId { id }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 找回密码-提交新密码（免旧密，凭验证码）。
+#[tauri::command]
+pub async fn ecard_find_pwd(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    new_pad_id: String,
+    new_positions: Vec<usize>,
+    renew_pad_id: String,
+    renew_positions: Vec<usize>,
+    vercode: String,
+    id: String,
+) -> Result<CommandResult<()>, String> {
+    let (new, renew) = (
+        PasswordInput { pad_id: new_pad_id, positions: new_positions },
+        PasswordInput { pad_id: renew_pad_id, positions: renew_positions },
+    );
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match find_pwd(client, &account, new, renew, &vercode, &id).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 限额设置（`acc_type`：`CARD`/`ACCOUNT`；金额前端传元，后端 ×100 成分）。
+#[tauri::command]
+pub async fn ecard_set_limits(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    acc_type: String,
+    daycost_limit_yuan: f64,
+    nonpwd_limit_yuan: f64,
+    single_limit_yuan: f64,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match set_limits(
+            client,
+            &account,
+            &acc_type,
+            daycost_limit_yuan,
+            nonpwd_limit_yuan,
+            single_limit_yuan,
+        )
+        .await
+        {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 转账标识（`flag`：官方语义见 bundle；`amt_yuan` 金额元、`limite_yuan` 单笔限额元可缺省）。
+#[tauri::command]
+pub async fn ecard_set_autotrans(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    flag: i64,
+    amt_yuan: f64,
+    limite_yuan: Option<f64>,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match set_autotrans(client, &account, flag, amt_yuan, limite_yuan).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 卡间转账（卡账户 ⇄ 电子账户；`src_acc_type`/`dst_acc_type`：`CARD`/`ACCOUNT`）。
+#[tauri::command]
+pub async fn ecard_transfer(
+    state: State<'_, AppState>,
+    dst_account: String,
+    src_account: String,
+    amount_yuan: f64,
+    src_acc_type: String,
+    dst_acc_type: String,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        Ok(match transfer(
+            client,
+            &dst_account,
+            &src_account,
+            amount_yuan,
+            &src_acc_type,
+            &dst_acc_type,
+        )
+        .await
+        {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 绑定银行卡-发验证码 → `{id}`（本校 `specialversion=0`，`phone`/`bankacc` 不传即不带）。
+#[tauri::command]
+pub async fn ecard_send_bind_bank_code(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    phone: Option<String>,
+    bankacc: Option<String>,
+) -> Result<CommandResult<EcardOpId>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match send_bind_bank_code(client, &account, phone.as_deref(), bankacc.as_deref()).await {
+            Ok(id) => CommandResult::ok(EcardOpId { id }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 绑定银行卡-提交。
+#[tauri::command]
+pub async fn ecard_bind_bank(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    bankacc: String,
+    vercode: String,
+    id: String,
+    pad_id: String,
+    positions: Vec<usize>,
+) -> Result<CommandResult<()>, String> {
+    let pad = PasswordInput { pad_id, positions };
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match bind_bank(client, &account, &bankacc, &vercode, &id, pad).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 解绑银行卡（免密）。
+#[tauri::command]
+pub async fn ecard_cancel_bank(
+    state: State<'_, AppState>,
+    account: Option<String>,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match cancel_bank(client, &account).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 绑定校园卡（电子账户）-发验证码 → `{id}`（即后续 `ecard_bind_user` 的 `id`/协议 `uuid`）。
+#[tauri::command]
+pub async fn ecard_send_bind_user_code(
+    state: State<'_, AppState>,
+    account: Option<String>,
+) -> Result<CommandResult<EcardOpId>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match send_bind_user_code(client, &account).await {
+            Ok(id) => CommandResult::ok(EcardOpId { id }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 绑定校园卡-提交。
+#[tauri::command]
+pub async fn ecard_bind_user(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    ver_code: String,
+    id: String,
+    pad_id: String,
+    positions: Vec<usize>,
+) -> Result<CommandResult<()>, String> {
+    let pad = PasswordInput { pad_id, positions };
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match bind_user(client, &account, &ver_code, &id, pad).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 解绑校园卡。
+#[tauri::command]
+pub async fn ecard_unbind_user(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    remark: Option<String>,
+    pad_id: String,
+    positions: Vec<usize>,
+) -> Result<CommandResult<()>, String> {
+    let pad = PasswordInput { pad_id, positions };
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端：缺省时由后端取「当前卡」（见 ecard::current_account）
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match unbind_user(client, &account, remark.as_deref(), pad).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +994,45 @@ mod tests {
             "accInfos",
         ] {
             assert!(card.get(k).is_some(), "缺 {k}：{card}");
+        }
+    }
+
+    /// 写类命令返回 DTO（批 3）键名契约：前端按这些键取值。
+    #[test]
+    fn write_command_dtos_are_camel_case() {
+        let op_id = serde_json::to_value(EcardOpId { id: "acc-1".into() }).unwrap();
+        assert_eq!(op_id["id"], "acc-1");
+
+        let check = serde_json::to_value(CheckPwdResult { ok: true, bank_card_no: None }).unwrap();
+        for k in ["ok", "bankCardNo"] {
+            assert!(check.get(k).is_some(), "缺 {k}：{check}");
+        }
+        assert_eq!(check["ok"], true);
+        assert!(check["bankCardNo"].is_null(), "本校无查卡号需求，恒 null");
+    }
+
+    /// `optional_pad`：padId/positions 必须成对出现——只给一半要报错，
+    /// 防止「半截提交」被静默当成免密解挂发出。
+    #[test]
+    fn optional_pad_requires_paired_args() {
+        assert!(optional_pad(None, None).unwrap().is_none(), "都不给 = 免密形态");
+        let pad = optional_pad(Some("p1".into()), Some(vec![0, 1])).unwrap().unwrap();
+        assert_eq!(pad.pad_id, "p1");
+        assert_eq!(pad.positions, vec![0, 1]);
+        assert!(optional_pad(Some("p1".into()), None).is_err(), "缺 positions 应报错");
+        assert!(optional_pad(None, Some(vec![0])).is_err(), "缺 padId 应报错");
+    }
+
+    /// 红线：写类命令的任何 DTO 都不携带密码/键盘材料（结构面上就不存在这些字段）。
+    #[test]
+    fn write_dtos_carry_no_secret_fields() {
+        for text in [
+            serde_json::to_value(EcardOpId { id: "x".into() }).unwrap().to_string(),
+            serde_json::to_value(CheckPwdResult { ok: true, bank_card_no: None }).unwrap().to_string(),
+        ] {
+            for leaked in ["pwd", "password", "keys", "positions", "uuid"] {
+                assert!(!text.contains(leaked), "DTO 不得出现 {leaked}：{text}");
+            }
         }
     }
 }

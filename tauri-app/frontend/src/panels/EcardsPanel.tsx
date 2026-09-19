@@ -5,11 +5,14 @@ import { PanelHeader } from "@/components/PanelHeader";
 import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { EcardBalanceView } from "@/components/ecard/EcardBalanceView";
+import { EcardBankView } from "@/components/ecard/EcardBankView";
 import { EcardBillView } from "@/components/ecard/EcardBillView";
+import { EcardCardOpsView } from "@/components/ecard/EcardCardOpsView";
 import { EcardHome } from "@/components/ecard/EcardHome";
 import { EcardPowerView } from "@/components/ecard/EcardPowerView";
 import { EcardRechargeView } from "@/components/ecard/EcardRechargeView";
 import { EcardStatsView } from "@/components/ecard/EcardStatsView";
+import { EcardTransferView } from "@/components/ecard/EcardTransferView";
 import { useAuthStore } from "@/stores/authStore";
 import { useUiStore } from "@/stores/uiStore";
 import { invokeCommand } from "@/shared/tauriApi";
@@ -27,6 +30,9 @@ const SUB_TITLES: Record<Exclude<EcardView, "home">, string> = {
   stats: "收支统计",
   recharge: "一卡通充值",
   power: "宿舍电费",
+  cardops: "卡设置",
+  transfer: "账户转账",
+  bank: "银行卡",
 };
 
 /** 充值片区兜底值：实测该校 `frontConfig.recharge = 401`（配置拿不到时仍能进充值页）。 */
@@ -129,6 +135,7 @@ export function EcardsPanel() {
           error={overview.phase === "error" ? overview.message : ""}
           onRetry={() => setTick((t) => t + 1)}
           onOpen={setView}
+          config={cfg}
         />
       )}
 
@@ -152,6 +159,29 @@ export function EcardsPanel() {
       {view === "power" && (
         <EcardPowerView
           onNavigate={(v) => setView(v === "ecard-recharge" ? "recharge" : "home")}
+        />
+      )}
+
+      {view === "cardops" && (
+        <EcardCardOpsView
+          phase={overview.phase}
+          card={overview.phase === "ready" ? (overview.data.cards[0] ?? null) : null}
+          config={cfg}
+          error={overview.phase === "error" ? overview.message : ""}
+          onRetry={() => setTick((t) => t + 1)}
+          onChanged={() => setTick((t) => t + 1)}
+        />
+      )}
+      {view === "transfer" && (
+        <EcardTransferView onChanged={() => setTick((t) => t + 1)} />
+      )}
+      {view === "bank" && (
+        <EcardBankView
+          phase={overview.phase}
+          card={overview.phase === "ready" ? (overview.data.cards[0] ?? null) : null}
+          error={overview.phase === "error" ? overview.message : ""}
+          onRetry={() => setTick((t) => t + 1)}
+          onChanged={() => setTick((t) => t + 1)}
         />
       )}
     </section>

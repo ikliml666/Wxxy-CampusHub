@@ -28,6 +28,9 @@ const ECARD_VIEWS: readonly EcardView[] = [
   "stats",
   "recharge",
   "power",
+  "cardops",
+  "transfer",
+  "bank",
 ] as const;
 
 export const useUiStore = create<{

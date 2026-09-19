@@ -632,7 +632,7 @@ async fn json_post(
             .timeout(REQUEST_TIMEOUT)
             .send()
             .await
-            .map_err(|e| CampusSynjonesError::Http(e.to_string()))?;
+            .map_err(|e| CampusSynjonesError::Http(crate::redact_secrets(&e.to_string())))?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         match parse_envelope(Envelope::Berserker, status, &text) {

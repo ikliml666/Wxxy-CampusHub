@@ -211,6 +211,378 @@ pub async fn fetch_secure_keyboard(
     Ok(SecurePad { pad_id, keys, images })
 }
 
+// ---------------- 写操作（批 3；协议 §1.8：bundle 反查，**未 live 验证**） ----------------
+//
+// 写路径红线：本节只按 bundle 反查出的协议实现，**绝不发真实请求验证**——挂失/改密/转账
+// 一旦真发出去就是不可逆的真实状态变更。所有端点/参数名以契约 §1.8 表格为准，若实测
+// 结构与本实现不符，按现场报错修正，不猜第二个形态。
+
+/// 一卡通写操作端点（`/berserker-app/ykt/tsm/*`）。
+pub const EP_LOST: &str = "/berserker-app/ykt/tsm/lostCard";
+pub const EP_UNLOST: &str = "/berserker-app/ykt/tsm/unLostCard";
+pub const EP_CHECK_PWD: &str = "/berserker-app/ykt/tsm/checkPwd";
+pub const EP_MODIFY_PWD: &str = "/berserker-app/ykt/tsm/modifyPwd";
+pub const EP_SEND_FIND_PWD_VER: &str = "/berserker-app/ykt/tsm/sendfindPwdVer";
+pub const EP_FIND_PWD: &str = "/berserker-app/ykt/tsm/findPwd";
+pub const EP_PAY_LIMITE_MODIFY: &str = "/berserker-app/ykt/tsm/payLimiteModify";
+pub const EP_MODIFY_ACC: &str = "/berserker-app/ykt/tsm/modifyAcc";
+pub const EP_CARD_TRANSFER: &str = "/berserker-app/ykt/tsm/cardTransfer";
+pub const EP_SEND_BIND_BANK_VER: &str = "/berserker-app/ykt/tsm/sendBindBankVer";
+pub const EP_BUILD_BANK_RELATION: &str = "/berserker-app/ykt/tsm/buildBankCardRelation";
+pub const EP_CANCEL_BANK: &str = "/berserker-app/ykt/tsm/cancelBankCardRelation";
+
+/// 绑/解绑校园卡走 `/berserker-base/*`（其余写操作都在 `/berserker-app/ykt/tsm/*`）。
+pub const EP_SEND_BIND_USER_VER: &str = "/berserker-base/accountuser/sendBindUserVerCode";
+pub const EP_BIND_USER: &str = "/berserker-base/accountuser/bindUser";
+pub const EP_UNBIND_USER: &str = "/berserker-base/accountuser/unBind";
+
+/// `pwdType` 参数值（bundle 反查恒为 `1`）。
+pub const PWD_TYPE: &str = "1";
+
+/// 前端提交形态的密码输入：只有一次性 [`SecurePad::pad_id`] + 用户点击的**位置下标序列**。
+///
+/// 明文密码**永不出现在本结构里**——拼装在 [`assemble_pwd`] 内完成后立即丢弃；`Debug` 打码。
+#[derive(Clone, PartialEq)]
+pub struct PasswordInput {
+    /// [`SecurePad::pad_id`] 原样带回（取走即删，一把键盘只能提交一次）。
+    pub pad_id: String,
+    /// 用户点击的键位下标（按 [`SecurePad::keys`] 的下标）。
+    pub positions: Vec<usize>,
+}
+
+impl std::fmt::Debug for PasswordInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PasswordInput {{ pad_id: ***, positions: <{} 项> }}", self.positions.len())
+    }
+}
+
+/// 用一把已取出的键盘秘密把位置序列翻译成 `pwd` 串（纯函数，单测钉住）。
+///
+/// 位置越界 → 可读错误（**不含任何键位/明文内容**）；位置序列为空 → 报「请输入密码」。
+/// 产物形态：`"1$1$" + 明文 + "$1$" + keyboardUuid`（bundle 反查，未 live 验证）。
+fn build_pwd(secret: &PadSecret, positions: &[usize]) -> Result<String, CampusSynjonesError> {
+    if positions.is_empty() {
+        return Err(CampusSynjonesError::Parse("请输入密码".to_string()));
+    }
+    let mut plain = String::new();
+    for (i, &pos) in positions.iter().enumerate() {
+        match secret.keys.get(pos) {
+            Some(k) => plain.push_str(k),
+            None => {
+                return Err(CampusSynjonesError::Parse(format!(
+                    "密码输入第 {} 位的位置无效，请重新获取键盘后再输入",
+                    i + 1
+                )))
+            }
+        }
+    }
+    Ok(format!("1$1${plain}$1${}", secret.uuid))
+}
+
+/// 从缓存取走键盘（消耗语义）并拼出 `pwd` 串；拼完明文只在本次调用的返回值里存在，
+/// 调用方把返回值直接塞进 form 后即丢弃，**不得**留存 / 打日志 / 写进错误文案。
+pub fn assemble_pwd(input: PasswordInput) -> Result<String, CampusSynjonesError> {
+    let secret = take_pad(&input.pad_id).ok_or_else(|| {
+        CampusSynjonesError::Parse("密码键盘已过期或不存在，请重新获取键盘后再输入".to_string())
+    })?;
+    build_pwd(&secret, &input.positions)
+}
+
+/// 元（前端口径）→ 分（协议口径）字符串。`0.1` 元必须得到 `"10"`（浮点陷阱：先 ×100 再取整）。
+fn yuan_to_fen_str(yuan: f64) -> String {
+    ((yuan * 100.0).round() as i64).to_string()
+}
+
+/// 写操作响应的**双层判定**第二层（第一层 `code==200` 已由 `client` 判过）：
+/// 业务层要求 `data.retcode == "0"`，失败文案取 `data.errmsg`（缺失回落顶层 `msg`）。
+///
+/// ⚠️ 未 live 验证：`retcode` 缺失的响应按成功放行（免得误杀 `checkPwd` 等可能不带
+/// retcode 的形态）；`retcode` 存在且非 `"0"` 一律失败。学校侧的可读原因（errmsg）
+/// 原样透出，不吞掉、不二次包装。
+fn require_retcode_ok(v: &Value) -> Result<(), CampusSynjonesError> {
+    let Some(retcode) = v.get("data").and_then(|d| d.get("retcode")) else {
+        return Ok(());
+    };
+    if crate::ecard::text_of(Some(retcode)) == "0" {
+        return Ok(());
+    }
+    let errmsg = v
+        .get("data")
+        .and_then(|d| d.get("errmsg"))
+        .and_then(Value::as_str)
+        .or_else(|| v.get("msg").and_then(Value::as_str))
+        .unwrap_or("操作失败");
+    Err(CampusSynjonesError::Api {
+        code: retcode.as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+        msg: errmsg.trim().to_string(),
+    })
+}
+
+/// 取 `data.<key>` 的字符串值（发码类接口用 `data.account` 作后续 `id`/`uuid`）。
+fn data_text(v: &Value, key: &str, what: &str) -> Result<String, CampusSynjonesError> {
+    let s = crate::ecard::text_of(v.get("data").and_then(|d| d.get(key)));
+    if s.is_empty() {
+        return Err(CampusSynjonesError::Parse(format!("响应缺少 {what}（{key}）")));
+    }
+    Ok(s)
+}
+
+/// 挂失（免密）。⚠️ 真实调用会立即冻结卡片——**只由用户显式触发，绝不重试**。
+pub async fn lost_card(
+    client: &SynjonesClient,
+    account: &str,
+) -> Result<(), CampusSynjonesError> {
+    let v = client
+        .post_form(EP_LOST, &[("account", account.to_string())], Envelope::Berserker)
+        .await?;
+    require_retcode_ok(&v)
+}
+
+/// 解挂（本校 `frontConfig` 无 `unlockFlag` → 官方默认**需密码**；`pad` 为 None 时不带
+/// `pwd`/`pwdType` 字段，交给服务端按缺省校验）。
+pub async fn unlost_card(
+    client: &SynjonesClient,
+    account: &str,
+    pad: Option<PasswordInput>,
+) -> Result<(), CampusSynjonesError> {
+    let mut form = vec![("account", account.to_string())];
+    if let Some(pad) = pad {
+        form.push(("pwd", assemble_pwd(pad)?));
+        form.push(("pwdType", PWD_TYPE.to_string()));
+    }
+    let v = client.post_form(EP_UNLOST, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 校验查询密码（GET，query 携带 `pwd`）。仅校验，通过即 `Ok(())`。
+pub async fn check_pwd(
+    client: &SynjonesClient,
+    account: &str,
+    pad: PasswordInput,
+) -> Result<(), CampusSynjonesError> {
+    let pwd = assemble_pwd(pad)?;
+    let v = client
+        .get(
+            EP_CHECK_PWD,
+            &[("account", account), ("pwd", pwd.as_str()), ("pwdType", PWD_TYPE)],
+            Envelope::Berserker,
+        )
+        .await?;
+    require_retcode_ok(&v)
+}
+
+/// 修改查询密码（三处密码各自带自己的键盘 uuid，由三次 [`assemble_pwd`] 分别消耗）。
+pub async fn modify_pwd(
+    client: &SynjonesClient,
+    account: &str,
+    old: PasswordInput,
+    new: PasswordInput,
+    renew: PasswordInput,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("account", account.to_string()),
+        ("oldpw", assemble_pwd(old)?),
+        ("newpw", assemble_pwd(new)?),
+        ("renewpw", assemble_pwd(renew)?),
+    ];
+    let v = client.post_form(EP_MODIFY_PWD, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 找回密码-发验证码。返回 `data.account` 作为后续 [`find_pwd`] 的 `id`。
+pub async fn send_find_pwd_code(
+    client: &SynjonesClient,
+    account: &str,
+) -> Result<String, CampusSynjonesError> {
+    let v = client
+        .post_form(EP_SEND_FIND_PWD_VER, &[("account", account.to_string())], Envelope::Berserker)
+        .await?;
+    require_retcode_ok(&v)?;
+    data_text(&v, "account", "找回密码会话 id")
+}
+
+/// 找回密码-提交新密码（免旧密，凭短信验证码 `vercode` + [`send_find_pwd_code`] 的 `id`）。
+pub async fn find_pwd(
+    client: &SynjonesClient,
+    account: &str,
+    new: PasswordInput,
+    renew: PasswordInput,
+    vercode: &str,
+    id: &str,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("account", account.to_string()),
+        ("newpw", assemble_pwd(new)?),
+        ("renewpw", assemble_pwd(renew)?),
+        ("vercode", vercode.to_string()),
+        ("id", id.to_string()),
+    ];
+    let v = client.post_form(EP_FIND_PWD, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 限额设置（`daycostlimit`/`nonpwdlimit`/`singlelimit` 一律**分**；前端传元，此处 ×100）。
+pub async fn set_limits(
+    client: &SynjonesClient,
+    account: &str,
+    acc_type: &str,
+    day_yuan: f64,
+    nonpwd_yuan: f64,
+    single_yuan: f64,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("account", account.to_string()),
+        ("acctype", acc_type.to_string()),
+        ("daycostlimit", yuan_to_fen_str(day_yuan)),
+        ("nonpwdlimit", yuan_to_fen_str(nonpwd_yuan)),
+        ("singlelimit", yuan_to_fen_str(single_yuan)),
+    ];
+    let v = client.post_form(EP_PAY_LIMITE_MODIFY, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 转账标识（`autotransFlag` + 金额**分**；`limite_yuan` 为 None 时不带 `autotransLimite`）。
+pub async fn set_autotrans(
+    client: &SynjonesClient,
+    account: &str,
+    flag: i64,
+    amt_yuan: f64,
+    limite_yuan: Option<f64>,
+) -> Result<(), CampusSynjonesError> {
+    let mut form = vec![
+        ("account", account.to_string()),
+        ("autotransFlag", flag.to_string()),
+        ("autotransAmt", yuan_to_fen_str(amt_yuan)),
+    ];
+    if let Some(l) = limite_yuan {
+        form.push(("autotransLimite", yuan_to_fen_str(l)));
+    }
+    let v = client.post_form(EP_MODIFY_ACC, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 卡间转账（卡账户 ⇄ 电子账户；`tranamt` **分**）。
+pub async fn transfer(
+    client: &SynjonesClient,
+    dst_account: &str,
+    src_account: &str,
+    amount_yuan: f64,
+    src_acctype: &str,
+    dst_acctype: &str,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("dstCardAccount", dst_account.to_string()),
+        ("srcCardAccount", src_account.to_string()),
+        ("tranamt", yuan_to_fen_str(amount_yuan)),
+        ("src_acctype", src_acctype.to_string()),
+        ("dst_acctype", dst_acctype.to_string()),
+    ];
+    let v = client.post_form(EP_CARD_TRANSFER, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 绑定银行卡-发验证码（`specialversion=="1"` 的学校才带 `phone`/`bankacc`；本校 =0，
+/// 前端不传即不带）。返回 `data.account` 作为后续 [`bind_bank`] 的 `id`。
+pub async fn send_bind_bank_code(
+    client: &SynjonesClient,
+    account: &str,
+    phone: Option<&str>,
+    bankacc: Option<&str>,
+) -> Result<String, CampusSynjonesError> {
+    let mut form = vec![("account", account.to_string())];
+    if let Some(p) = phone {
+        form.push(("phone", p.to_string()));
+    }
+    if let Some(b) = bankacc {
+        form.push(("bankacc", b.to_string()));
+    }
+    let v = client.post_form(EP_SEND_BIND_BANK_VER, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)?;
+    data_text(&v, "account", "绑卡会话 id")
+}
+
+/// 绑定银行卡-提交。
+pub async fn bind_bank(
+    client: &SynjonesClient,
+    account: &str,
+    bankacc: &str,
+    vercode: &str,
+    id: &str,
+    pad: PasswordInput,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("account", account.to_string()),
+        ("bankacc", bankacc.to_string()),
+        ("vercode", vercode.to_string()),
+        ("id", id.to_string()),
+        ("pwd", assemble_pwd(pad)?),
+        ("pwdType", PWD_TYPE.to_string()),
+    ];
+    let v = client.post_form(EP_BUILD_BANK_RELATION, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 解绑银行卡（免密）。
+pub async fn cancel_bank(
+    client: &SynjonesClient,
+    account: &str,
+) -> Result<(), CampusSynjonesError> {
+    let v = client
+        .post_form(EP_CANCEL_BANK, &[("account", account.to_string())], Envelope::Berserker)
+        .await?;
+    require_retcode_ok(&v)
+}
+
+/// 绑定校园卡（电子账户）-发验证码。返回 `data.account` 作为后续 [`bind_user`] 的 `uuid`。
+pub async fn send_bind_user_code(
+    client: &SynjonesClient,
+    account: &str,
+) -> Result<String, CampusSynjonesError> {
+    let v = client
+        .post_form(EP_SEND_BIND_USER_VER, &[("account", account.to_string())], Envelope::Berserker)
+        .await?;
+    require_retcode_ok(&v)?;
+    data_text(&v, "account", "绑校园卡会话 uuid")
+}
+
+/// 绑定校园卡-提交（`bindType:"2"`、`verCode` 大小写照抄 bundle）。
+pub async fn bind_user(
+    client: &SynjonesClient,
+    account: &str,
+    ver_code: &str,
+    id: &str,
+    pad: PasswordInput,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("account", account.to_string()),
+        ("bindType", "2".to_string()),
+        ("uuid", id.to_string()),
+        ("verCode", ver_code.to_string()),
+        ("pwd", assemble_pwd(pad)?),
+        ("pwdType", PWD_TYPE.to_string()),
+    ];
+    let v = client.post_form(EP_BIND_USER, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
+/// 解绑校园卡（`bindType:"2"`；`remark` 缺省传空串，bundle 形态里该键必带）。
+pub async fn unbind_user(
+    client: &SynjonesClient,
+    account: &str,
+    remark: Option<&str>,
+    pad: PasswordInput,
+) -> Result<(), CampusSynjonesError> {
+    let form = [
+        ("account", account.to_string()),
+        ("bindType", "2".to_string()),
+        ("remark", remark.unwrap_or("").to_string()),
+        ("pwd", assemble_pwd(pad)?),
+        ("pwdType", PWD_TYPE.to_string()),
+    ];
+    let v = client.post_form(EP_UNBIND_USER, &form, Envelope::Berserker).await?;
+    require_retcode_ok(&v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +690,111 @@ mod tests {
         assert_eq!(KeyboardKind::parse(""), None);
         assert_eq!(KeyboardKind::Number.type_param(), "Number");
         assert_eq!(KeyboardKind::Standard.type_param(), "Standard");
+    }
+
+    // ---------------- 写操作（批 3） ----------------
+
+    /// `pwd` 拼装：位置序列 → `"1$1$" + 明文 + "$1$" + uuid`（§1.8 bundle 反查形态）。
+    /// 纯函数打在 [`build_pwd`] 上（不碰共享 pad 缓存，避免与并行用例互相淘汰干扰）。
+    #[test]
+    fn build_pwd_translates_positions() {
+        let secret = PadSecret {
+            uuid: "uuid-1234".into(),
+            keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        // 用户点的是 9,5,2,0 → 明文按键位表翻译（不是数字本身，是 keys[pos]）
+        let pwd = build_pwd(&secret, &[9, 5, 2, 0]).expect("合法位置应拼装成功");
+        assert_eq!(pwd, "1$1$0631$1$uuid-1234");
+        // 全键盘（四组拼接）同规则
+        let std = PadSecret { uuid: "u".into(), keys: vec!["a".into(), "B".into(), "c".into()] };
+        assert_eq!(build_pwd(&std, &[1, 0, 2]).unwrap(), "1$1$Bac$1$u");
+    }
+
+    /// `pwd` 拼装失败：位置越界 / 空序列 → 可读错误，**错误文案不含任何键位内容**。
+    #[test]
+    fn build_pwd_rejects_bad_positions_without_leaking() {
+        let secret = PadSecret {
+            uuid: "uuid-x".into(),
+            keys: vec!["7".into(), "8".into(), "9".into()],
+        };
+        let e = build_pwd(&secret, &[0, 3]).expect_err("下标 3 越界应报错");
+        assert!(e.to_string().contains("位置无效"));
+        assert!(!e.to_string().contains('7'), "不得泄漏键位：{e}");
+        let e = build_pwd(&secret, &[]).expect_err("空序列应报错");
+        assert!(e.to_string().contains("请输入密码"));
+    }
+
+    /// [`assemble_pwd`] 的失败分支：padId 过期 / 不存在 → 可读错误。
+    /// 成功分支 = take_pad（已有 `pad_cache_lifecycle` 钉死）+ [`build_pwd`]（上两条）的组合。
+    #[test]
+    fn assemble_pwd_rejects_missing_pad() {
+        let e = assemble_pwd(PasswordInput {
+            pad_id: "不存在的pad".into(),
+            positions: vec![0],
+        })
+        .expect_err("padId 不存在应报错");
+        assert!(e.to_string().contains("密码键盘已过期"));
+        // Debug 打码：PasswordInput 不外泄 pad_id 与点击序列内容
+        let dbg = format!(
+            "{:?}",
+            PasswordInput { pad_id: "pad-secret-xyz".into(), positions: vec![1, 2] }
+        );
+        assert!(!dbg.contains("pad-secret-xyz"), "实际 {dbg}");
+    }
+
+    /// 双层判定（§1.8）：`code=200`（client 已判）之外还要求 `data.retcode=="0"`。
+    #[test]
+    fn retcode_double_layer_judgement() {
+        // 成功：retcode="0"
+        require_retcode_ok(&json!({"code": 200, "data": {"retcode": "0"}, "msg": "ok"}))
+            .expect("retcode=0 应成功");
+        // 失败：retcode="1" + data.errmsg → errmsg 原样透出
+        let e = require_retcode_ok(&json!({
+            "code": 200, "data": {"retcode": "1", "errmsg": "密码错误，请重新输入"}, "msg": "顶层msg"
+        }))
+        .expect_err("retcode=1 应失败");
+        match &e {
+            CampusSynjonesError::Api { code, msg } => {
+                assert_eq!(*code, 1);
+                assert_eq!(msg, "密码错误，请重新输入", "errmsg 优先于顶层 msg");
+            }
+            other => panic!("实际 {other:?}"),
+        }
+        // errmsg 缺失 → 回落顶层 msg
+        let e = require_retcode_ok(&json!({
+            "code": 200, "data": {"retcode": "9"}, "msg": "系统繁忙"
+        }))
+        .expect_err("应失败");
+        assert!(e.to_string().contains("系统繁忙"), "实际 {e}");
+        // 两者都缺 → 通用文案
+        let e = require_retcode_ok(&json!({"code": 200, "data": {"retcode": "2"}}))
+            .expect_err("应失败");
+        assert!(e.to_string().contains("操作失败"), "实际 {e}");
+        // retcode 缺失 → 放行（未 live 验证形态不误杀）
+        require_retcode_ok(&json!({"code": 200, "data": {"foo": 1}})).expect("无 retcode 应放行");
+        // retcode 数字形态（类型漂移先例）也吃得下
+        require_retcode_ok(&json!({"code": 200, "data": {"retcode": 0}}))
+            .expect("数字 0 应成功");
+    }
+
+    /// 元 → 分换算：`0.1` 元必须得 `"10"`（浮点陷阱钉死）；79.96 → 7996；整数元亦然。
+    #[test]
+    fn yuan_to_fen_handles_float_traps() {
+        assert_eq!(yuan_to_fen_str(0.1), "10");
+        assert_eq!(yuan_to_fen_str(0.29), "29", "0.29×100=28.999…，round 后必须 29");
+        assert_eq!(yuan_to_fen_str(79.96), "7996");
+        assert_eq!(yuan_to_fen_str(100.0), "10000");
+        assert_eq!(yuan_to_fen_str(0.0), "0");
+    }
+
+    /// PasswordInput 的 PartialEq/Clone 形态（命令层要按参数重组它）。
+    #[test]
+    fn password_input_is_plain_data() {
+        let a = PasswordInput { pad_id: "p".into(), positions: vec![1, 2] };
+        let b = a.clone();
+        assert_eq!(a, b);
     }
 }

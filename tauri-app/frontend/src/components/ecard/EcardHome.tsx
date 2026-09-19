@@ -1,16 +1,19 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  ArrowLeftRight,
   ArrowRight,
   BarChart3,
   CreditCard,
+  Landmark,
   Receipt,
+  Settings2,
   Zap,
 } from "lucide-react";
 import { Surface } from "@/components/Surface";
 import { domainVar } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/shared/cn";
-import type { EcardCardsOverview, EcardView } from "@/shared/types";
+import type { EcardCardsOverview, EcardClientConfig, EcardView } from "@/shared/types";
 
 type Tile = {
   id: Exclude<EcardView, "home">;
@@ -21,6 +24,11 @@ type Tile = {
   span?: string;
   /** 主行动（充值）：域色实底，视觉权重最高 */
   primary?: boolean;
+  /**
+   * 可选门控：学校配置满足条件才显示（如银行卡按 `enabledApps` 门控）。
+   * 不传 = 恒显示；config 缺省（概览未就绪）时也不门控。
+   */
+  visible?: (config: EcardClientConfig) => boolean;
 };
 
 const TILES: Tile[] = [
@@ -40,6 +48,30 @@ const TILES: Tile[] = [
   },
   { id: "bill", label: "流水账单", hint: "收支明细与筛选", icon: Receipt },
   { id: "stats", label: "收支统计", hint: "本月 / 本年趋势", icon: BarChart3 },
+  {
+    // 始终显示：除挂失外还含改密/限额/圈存，不受 showLost 门控（挂失分区在子页内门控）
+    id: "cardops",
+    label: "卡设置",
+    hint: "挂失 · 密码 · 限额 · 圈存",
+    icon: Settings2,
+  },
+  {
+    id: "transfer",
+    label: "账户转账",
+    hint: "卡账户 ↔ 电子账户",
+    icon: ArrowLeftRight,
+  },
+  {
+    // 本校 getAllApps 清单含 yinhangka / bind-bank-card ⇒ 显示；两者都缺则隐藏。
+    // 清单不含 bind-campus-card ⇒ 不做多卡绑定入口（后端命令存在但本页不渲染）。
+    id: "bank",
+    label: "银行卡",
+    hint: "绑定与解绑",
+    icon: Landmark,
+    visible: (config) =>
+      config.enabledApps.includes("yinhangka") ||
+      config.enabledApps.includes("bind-bank-card"),
+  },
 ];
 
 /** 主余额带的取值口径：`config.balanceShowsElectronic` 为真用电子账户，否则卡账户。 */
@@ -78,12 +110,15 @@ export function EcardHome({
   error,
   onRetry,
   onOpen,
+  config,
 }: {
   phase: "loading" | "ready" | "error";
   data: EcardCardsOverview | null;
   error: string;
   onRetry: () => void;
   onOpen: (v: EcardView) => void;
+  /** 学校配置（门控用）；缺省时不门控、恒显示全部宫格项 */
+  config?: EcardClientConfig | null;
 }) {
   const overloaded = phase === "loading" || data === null;
 
@@ -140,9 +175,11 @@ export function EcardHome({
         )}
       </Surface>
 
-      {/* 宫格：每一格是一个子页入口 */}
+      {/* 宫格：每一格是一个子页入口；带 visible 判据的项按 config 门控 */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {TILES.map((tile) => {
+        {TILES.filter(
+          (tile) => !tile.visible || !config || tile.visible(config),
+        ).map((tile) => {
           const Icon = tile.icon;
           return (
             <button

@@ -135,9 +135,107 @@ impl std::fmt::Debug for SynjonesToken {
     }
 }
 
+/// 错误文案脱敏：把查询串里的凭据参数值抹成 `***`。
+///
+/// 为什么必须有：`reqwest` 的请求错误会把**完整 URL** 拼进错误串，而本系统的 URL 里带凭据——
+/// 实测 SSO 回跳失败时文案形如
+/// `...for url (http://10.3.100.110/berserker-auth/cas/login/lyCas?...&ticket=ST-232555-...)`，
+/// **票据等同凭据**。在**构造错误时**脱敏，UI 文案、诊断日志、live 探针三条路径同时受益
+/// （只在 UI 出口脱敏挡不住日志与探针）。
+pub fn redact_secrets(s: &str) -> String {
+    /// 值需要打码的参数名（大小写不敏感；一卡通侧的 `pwd`/`vercode` 同样在此列）。
+    const SECRET_KEYS: &[&str] = &[
+        "ticket",
+        "synjones-auth",
+        "token",
+        "access_token",
+        "password",
+        "pwd",
+        "vercode",
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('=') {
+        // 键名 = '=' 之前连续的 [A-Za-z0-9_-]；
+        // ⚠️ 必须用 char_indices + len_utf8 —— 分隔符可能是多字节字符（如中文括号），
+        // 直接 +1 会落在字符中间，切片即 panic（错误文案里恰恰全是中文）。
+        let key_start = rest[..i]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
+            .map(|(p, c)| p + c.len_utf8())
+            .unwrap_or(0);
+        let key = &rest[key_start..i];
+        out.push_str(&rest[..=i]);
+        let after = &rest[i + 1..];
+        // 值的边界：按**允许字符集**界定（URL 安全字符 + 常见 base64/hex 字符），
+        // 遇空格、`&`、引号、全角标点等即结束 —— 用「终止符列表」会漏判全角标点，
+        // 把 `（ticket=ST-1）` 的右括号一起吞掉。
+        let end = after
+            .char_indices()
+            .find(|(_, c)| {
+                !(c.is_ascii_alphanumeric()
+                    || matches!(
+                        c,
+                        '-' | '_' | '.' | '~' | '%' | '+' | '/' | ':' | '@' | '*' | '!' | '$' | '('
+                    ))
+            })
+            .map(|(p, _)| p)
+            .unwrap_or(after.len());
+        if end > 0 && SECRET_KEYS.iter().any(|k| k.eq_ignore_ascii_case(key)) {
+            out.push_str("***");
+        } else {
+            out.push_str(&after[..end]);
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 票据/令牌/密码类查询参数必须打码，普通参数原样保留。
+    #[test]
+    fn redact_secrets_masks_credentials_in_urls() {
+        let url = "error sending request for url (http://10.3.100.110/berserker-auth/cas/login/lyCas?targetUrl=http%3A%2F%2F10.3.100.110%2Fcampus-card-pc%2F&ticket=ST-232555-abcdef&synAccessSource=app)";
+        let got = redact_secrets(url);
+        assert!(!got.contains("ST-232555"), "票据不得出现在错误文案里：{got}");
+        assert!(got.contains("ticket=***"), "票据应被打码：{got}");
+        assert!(
+            got.contains("targetUrl=http%3A%2F%2F10.3.100.110%2Fcampus-card-pc%2F"),
+            "非凭据参数不得被误伤：{got}"
+        );
+        assert!(got.contains("synAccessSource=app"), "非凭据参数不得被误伤：{got}");
+
+        assert_eq!(
+            redact_secrets("x?access_token=abc123&u=1"),
+            "x?access_token=***&u=1"
+        );
+        assert_eq!(redact_secrets("pwd=secret"), "pwd=***");
+        // 键名不同大小写同样命中
+        assert_eq!(redact_secrets("Vercode=1234"), "Vercode=***");
+        // 无 '=' 的普通文案原样返回（不 panic、不死循环）
+        assert_eq!(redact_secrets("连接超时"), "连接超时");
+        // 非凭据键的值原样保留（含以 '=' 结尾的退化形态）
+        assert_eq!(redact_secrets("a=b="), "a=b=");
+        assert_eq!(redact_secrets(""), "");
+        // 中文（多字节）分隔符不得 panic：错误文案里最常见的就是中文括号 + code=
+        assert_eq!(
+            redact_secrets("慧新E校接口错误（code=4030）：未授权"),
+            "慧新E校接口错误（code=4030）：未授权"
+        );
+        assert_eq!(
+            redact_secrets("失败（ticket=ST-1）"),
+            "失败（ticket=***）"
+        );
+        assert_eq!(
+            redact_secrets("中文（token=abc）"),
+            "中文（token=***）"
+        );
+    }
 
     /// 常量防漂移：service 全值前缀必须等于 BASE + LOGIN_PATH（拆成两个常量供不同用途）。
     #[test]

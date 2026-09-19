@@ -237,7 +237,7 @@ impl SynjonesClient {
             let resp = build(&token)
                 .send()
                 .await
-                .map_err(|e| CampusSynjonesError::Http(e.to_string()))?;
+                .map_err(|e| CampusSynjonesError::Http(crate::redact_secrets(&e.to_string())))?;
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             match parse_envelope(kind, status, &body) {

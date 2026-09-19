@@ -32,6 +32,7 @@
 - [[learnings\zhengfang-kblist-multi-section-per-jxb|正方 kbList 同一教学班按多时段拆多条——diff 匹配键必须含时段]]
 - [[learnings\jwglxt-sso-chain|正方教务 SSO 链与课表接口取证（ST 绑定 service / TGT 不落 cookie / 901 会话特征）]]
 - [[learnings\kaptcha-arithmetic-five-roots|算术验证码识别：从 2.9% 到 100% 的五个根因]]
+- [[learnings\error-text-url-credentials|错误文案回显 URL 凭据——reqwest 错误串泄票据与 redact_secrets 脱敏]]
 - [[learnings\portal-session-expiry-200-envelope|门户会话失效是 HTTP 200 信封而非错误码（误分类成「解析失败」的连锁）]]
 - [[learnings\portal-block-periods-and-school-timetable|门户大节语义与校本作息（14:50 误报教训）]]
 - [[learnings\portal-avatar-upload-protocol|门户头像上传协议与裁切器踩坑]]

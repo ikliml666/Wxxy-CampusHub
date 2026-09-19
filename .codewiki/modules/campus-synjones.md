@@ -31,7 +31,7 @@ tags:
 
 # 慧新E校协议核心（campus-synjones）
 
-`crates/campus-synjones`：校内慧新E校平台（`http://10.3.100.110`，哈尔滨新中中/synjones）的**协议单点**，供「一卡通」（M4.5 起含电费缴费与充值，页面见 [[modules/ecard-panel|一卡通页]]）业务使用。分层与 [[modules/campus-portal|门户协议核心]] 对称：一个外部系统一个 crate，鉴权与信封不与会话/门户混用。模块划分：`ecard.rs`（卡/流水）、`ecard_stats.rs`（统计四端点，2026-09-19 新增）、`ecard_ops.rs`（安全键盘，2026-09-19 新增）、`charge.rs`（电费级联）、`turnover.rs`（缴费历史）、`recharge.rs`（充值支付链路）。命令层落在 `commands/synjones.rs`（一卡通流水）、`commands/ecard.rs`（一卡通总览/统计/键盘）与 `commands/electricity.rs`（电费 + 充值窗口），只做「锁内 clone → 调 crate → 映射 `CommandResult`」。
+`crates/campus-synjones`：校内慧新E校平台（`http://10.3.100.110`，哈尔滨新中中/synjones）的**协议单点**，供「一卡通」（M4.5 起含电费缴费与充值，页面见 [[modules/ecard-panel|一卡通页]]）业务使用。分层与 [[modules/campus-portal|门户协议核心]] 对称：一个外部系统一个 crate，鉴权与信封不与会话/门户混用。模块划分：`ecard.rs`（卡/流水/当前卡解析）、`ecard_stats.rs`（统计四端点，2026-09-19 新增）、`ecard_ops.rs`（安全键盘 + 一卡通写操作，2026-09-19 批 1/4 落地）、`charge.rs`（电费级联）、`turnover.rs`（缴费历史）、`recharge.rs`（充值支付链路）。命令层落在 `commands/synjones.rs`（一卡通流水）、`commands/ecard.rs`（一卡通总览/统计/键盘/写操作）与 `commands/electricity.rs`（电费 + 充值窗口），只做「锁内 clone → 调 crate → 映射 `CommandResult`」。
 
 ## 一、鉴权：四件必须记住的事
 
@@ -68,7 +68,13 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
   - 四者前缀都在 `/berserker-search/` ⇒ 信封一律 `Envelope::Search`。
 - **消费流水增强（`ecard.rs` 的 `TurnoverFilter`，2026-09-19）**：在原 `type`（收支方向）之上新增 `typeId`（分类 id，取自 turnoverType 字典）/`info`（关键词搜索，自动附带 `highlightFieldsClass=text-primary` 官方同款）/`orderId`（单条详情，命中时 `total=1`）/`sortFields`+`sortType`；`build_turnover_params` 保证**未传的可选参数不进 query**。`Transaction` 补 6 字段：`orderId/typeId/turnoverType/labelName/labelRemark/cardBalanceYuan`。
 - **多卡视图与脱敏**：`fetch_cards_full`（`GET /berserker-app/ykt/tsm/getCampusCards`）+ `CardDetail`/`AccInfo`（脱敏卡视图，金额分→元）；`mask_account` 策略：够长前 5+`****`+后 2，**短卡号**（本校 5 位）首位+`****`+末 2（旧实现短号一律 `****`，等于没显示）。
-- **安全键盘（`ecard_ops.rs`，写操作预备件）**：`GET /berserker-secure/keyboard?type=Number|Standard`（信封 `Berserker`）取 `numberKeyboard` 乱序串 + 图片 + uuid；进程级缓存（uuid→映射，TTL 300s、至多 8 把、`take_pad` 取走即删）；提交协议 `pwd = "1$1$" + 位置下标序列 + "$1$" + uuid`。本批只到「取键盘 + 缓存」，机制与安全红线见 [[learnings/ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘]]。
+- **安全键盘（`ecard_ops.rs`，批 1 取键盘 + 缓存）**：`GET /berserker-secure/keyboard?type=Number|Standard`（信封 `Berserker`）取 `numberKeyboard` 乱序串 + 图片 + uuid；进程级缓存（uuid→映射，TTL 300s、至多 8 把、`take_pad` 取走即删）；提交协议 `pwd = "1$1$" + 明文 + "$1$" + keyboardUuid` + `pwdType:"1"`（键位串第 i 个字符 = 第 i 张图上的字符）。机制与安全红线见 [[learnings/ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘]]。
+- **一卡通写操作（`ecard_ops.rs:331-586`，批 4 落地；⚠️ 未 live 验证——写路径红线同 `submit_pay`：开发/点验阶段绝不真发，只能用户真机显式触发）**：`lost_card` / `unlost_card` / `check_pwd` / `modify_pwd` / `send_find_pwd_code` / `find_pwd` / `set_limits` / `set_autotrans` / `transfer` / `send_bind_bank_code` / `bind_bank` / `cancel_bank` / `send_bind_user_code` / `bind_user` / `unbind_user`，端点常量 `EP_LOST`…`EP_UNBIND_USER`（`ecard_ops.rs:221-237`，全部 `berserker-app/ykt/tsm/*` 或 `berserker-base/accountuser/*`，信封 `Berserker`）。要点：
+  - **明文只在后端内存**：入口是 `PasswordInput { pad_id, positions }`（前端提交形态，`ecard_ops.rs:246`），`assemble_pwd`（`:284`）经 `take_pad` 取走即删地取回键盘映射，纯函数 `build_pwd`（`:263`）按下标翻译拼串——与电费 `passwordMap` 同构，客户端**不接触、不还原、不落盘**真实密码。
+  - **双层成功判定 `require_retcode_ok`（`:302`）**：axios 层 `code==200` **且**业务层 `data.retcode=="0"`；失败取 `data.errmsg` 回落顶层 `msg`。
+  - 金额一律**分**：命令层收元，`yuan_to_fen_str`（`:292`）×100（避开浮点陷阱，有单测钉住）。
+  - 命令面 15 条与账号自解析设计见 [[modules/ecard-panel|一卡通页]]「写操作命令清单」。
+- **错误文案脱敏 `redact_secrets`（`lib.rs:145`，批 4 新增）**：把错误文本中凭据参数名（`ticket`/`synjones-auth`/`token`/`access_token`/`password`/`pwd`/`vercode`，大小写不敏感）的值抹成 `***`，在**错误构造点**统一调用——`client.rs:240` / `charge.rs:466` / `recharge.rs:635` 的 `Http(e.to_string())` 与 `sso.rs:137,141` 两处 `SsoFailed(format!(…))`；命令层 `commands/synjones.rs:92` 的 `err_text` 兜底再过一遍。背景（reqwest 错误串回显完整 URL 带 CAS 票据）与两个实现坑（字节边界 panic / 终止符列表吞全角标点）见 [[learnings/error-text-url-credentials|错误文案回显 URL 凭据]]。
 
 ### 电费（`charge.rs`）
 

@@ -88,7 +88,8 @@ pub(crate) async fn synjones_session(
 pub(crate) fn err_text(e: &CampusSynjonesError) -> String {
     match e {
         CampusSynjonesError::NotLogin => "登录已过期，请重新登录".to_string(),
-        other => other.to_string(),
+        // 双保险：crate 内已对 URL 凭据打码，这里再兜一层（任何变体带出的凭据都不出后端）
+        other => campus_synjones::redact_secrets(&other.to_string()),
     }
 }
 

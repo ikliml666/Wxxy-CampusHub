@@ -946,7 +946,10 @@ export type EcardView =
   | "bill"
   | "stats"
   | "recharge"
-  | "power";
+  | "power"
+  | "cardops"
+  | "transfer"
+  | "bank";
 
 /** 流水分类字典（`get_ecard_types` → 项；id 语义实测 1 消费 2 充值 3 退款 4 扫码付 5 补贴）。 */
 export interface EcardTurnoverType {
@@ -1005,4 +1008,20 @@ export interface EcardSecurePad {
   keys: string[];
   /** 位置 i 对应的官方键盘图片（data URL / base64 片段，可能为空） */
   images: string[];
+}
+
+/** `ecard_check_pwd` → data。 */
+export interface EcardCheckResult {
+  ok: boolean;
+  /**
+   * 校验通过后学校返回的银行卡全号。**本校恒为 null**（学校未提供「校验密码查卡号」
+   * 能力）——前端必须如实提示「学校未返回卡号」，绝不伪造号码或显示脱敏假数据。
+   */
+  bankCardNo: string | null;
+}
+
+/** 发码类命令（`ecard_send_find_pwd_code` / `ecard_send_bind_bank_code`）→ data。 */
+export interface EcardCodeSent {
+  /** 学校侧 `data.account`，后续提交命令（`ecard_find_pwd` / `ecard_bind_bank`）原样回传的 `id` */
+  id: string;
 }
