@@ -28,10 +28,15 @@
 //! 另：流水 `type` 实测是收支方向过滤（`1`=收入 36 条 / `2`=支出 1006 条 / `3`=0 条），
 //! 与记录里的 `typeFrom`（`"1"`/`"2"`）一一对应。
 
+pub mod charge;
 pub mod client;
 pub mod ecard;
 pub mod sso;
 
+pub use charge::{
+    list_feeitems, query_cascade, Choice, ElectricityQuery, ElectricityView, FeeItem, Field,
+    RoomStep,
+};
 pub use client::SynjonesClient;
 pub use ecard::{CardInfo, Transaction, Transactions};
 pub use sso::sso_token;

@@ -41,17 +41,21 @@ const PAGE_SIZE: u32 = 15;
 // ---------------- 全局唯一客户端 ----------------
 
 /// 缓存的慧新E校会话（`username` + `tgt` 任一变化即重建，避免持过期 TGT 的旧客户端）。
-struct SynjonesSession {
-    username: String,
-    tgt: Option<String>,
-    client: SynjonesClient,
+/// 对外 `pub(crate)`：电费命令面（`commands::electricity`）与批 2 共用同一个会话/同一把锁。
+pub(crate) struct SynjonesSession {
+    pub(crate) username: String,
+    pub(crate) tgt: Option<String>,
+    pub(crate) client: SynjonesClient,
 }
 
 static SYNJONES: OnceLock<tokio::sync::Mutex<Option<SynjonesSession>>> = OnceLock::new();
 
 /// 取全局唯一客户端；返回的 guard **必须活到请求结束**（持锁即串行化，见模块头注）。
 /// 未登录 → None（调用方回「请先登录」）。
-async fn synjones_session(
+///
+/// 可见性 `pub(crate)`：M3 批 3 的电费命令面**复用同一把锁与同一个客户端**
+///（token 单活，绝不能出现第二套 SSO 缓存），不复制这段逻辑。
+pub(crate) async fn synjones_session(
     state: &State<'_, AppState>,
 ) -> Option<tokio::sync::MutexGuard<'static, Option<SynjonesSession>>> {
     // 锁内只 clone（cas/username/tgt 均廉价），drop guard 后再 await（本项目锁纪律）
@@ -80,7 +84,8 @@ async fn synjones_session(
 }
 
 /// 会话失效归一为可操作文案，其余透出 crate 的中文错误（不回显票据/凭据）。
-fn err_text(e: &CampusSynjonesError) -> String {
+/// 可见性 `pub(crate)`：电费命令面在此之上追加「需校园网」等自有文案（`electricity::elec_err`）。
+pub(crate) fn err_text(e: &CampusSynjonesError) -> String {
     match e {
         CampusSynjonesError::NotLogin => "登录已过期，请重新登录".to_string(),
         other => other.to_string(),

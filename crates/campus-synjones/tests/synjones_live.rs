@@ -30,6 +30,7 @@
 use campus_auth::captcha::{solve, KaptchaTemplates};
 use campus_auth::cas::CasClient;
 use campus_auth::rsa::rsa_encrypt_hex;
+use campus_synjones::charge::{list_feeitems, query_cascade, RoomStep, EP_FEEITEM, EP_SINGLE_FEEITEM};
 use campus_synjones::client::Envelope;
 use campus_synjones::ecard::{fetch_current_card, fetch_transactions, EP_TURNOVER};
 use campus_synjones::sso::{default_target_url, ly_cas_service_url, ly_cas_redirect_url, sso_token};
@@ -1312,4 +1313,214 @@ fn candidates_cover_variants() {
     assert!(c[1].1.ends_with("/plat/shouyeUser"), "保留负对照（实测不带 token）");
     assert!(c[2].1.ends_with("/charge-pc/pays/450"));
     assert!(c[3].1.is_empty(), "最后一个候选是裸 service（无 targetUrl）");
+}
+
+// ==================== M3 批 3：电费目录 / 级联 live 探针 ====================
+
+/// 批 3 live 探针：**直接跑产品 API**（`list_feeitems` + `query_cascade`）走完三片区到末级，
+/// 固化 `map.showData` 的真实键名与末级形态（计划 §1.7 未知 2，批 3 必交付取证）。
+///
+/// 复跑：`cargo test -p campus-synjones -- --ignored synjones_electricity_live --nocapture`
+#[tokio::test]
+#[ignore = "live：需校园网 + 本机会话/凭据，仅主智能体验收时 -- --ignored 运行"]
+async fn synjones_electricity_live() {
+    let dir = recon_dir();
+    std::fs::create_dir_all(&dir).expect("创建 recon 目录失败");
+    println!("[recon] 样本目录: {}", dir.display());
+
+    // ---------- 1) 片区目录：匿名（不带任何凭据）走产品 `list_feeitems` ----------
+    let anon = CasClient::new().expect("创建 CasClient 失败");
+    // 原始响应取证（仅 8 条的判据字段，写盘前脱敏）
+    let raw = anon
+        .http_client()
+        .get(format!("{BERSERKER_BASE}{EP_FEEITEM}"))
+        .send()
+        .await
+        .expect("匿名请求 /charge/feeitem 失败");
+    let status = raw.status().as_u16();
+    let body = raw.text().await.unwrap_or_default();
+    assert_eq!(status, 200, "匿名目录应 200（实测四种头/参组合皆可）");
+    let raw_json: Value = serde_json::from_str(&body).expect("目录响应非 JSON");
+    let all = raw_json["feeitemList"].as_array().cloned().unwrap_or_default();
+    let enabled = all
+        .iter()
+        .filter(|it| it["status"].as_i64() == Some(1))
+        .count();
+    println!(
+        "[匿名目录] 条数={} 其中 status==1 = {}（派单 brief 说「启用只有 3 条」——实测不是）",
+        all.len(),
+        enabled
+    );
+    for it in &all {
+        println!(
+            "  片区 id={} name={:?} status={} impl={:?} flag={:?}",
+            it["feeitemid"], it["name"], it["status"], it["impl_interface"], it["flag"]
+        );
+    }
+    dump(&dir, "electricity_feeitem_anon.json", &raw_json);
+
+    let items = list_feeitems(&anon)
+        .await
+        .expect("匿名 list_feeitems 应成功");
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    println!("[产品口径 list_feeitems] {} 条 = {ids:?}", items.len());
+    for it in &items {
+        println!(
+            "  {:<4} {:<18} 单位={} layout={:?} 下限={:?} 上限={:?} 末级输入={}",
+            it.id, it.name, it.billing_unit, it.layout, it.retain_money, it.maxmoney, it.last_level_is_input
+        );
+    }
+    assert_eq!(ids, vec!["448", "449", "450"], "电费页口径应只剩三个启用电费片区");
+
+    // ---------- 凭据（与批 2 同一来源链：session.json TGT → 账密登录） ----------
+    let cas = CasClient::new().expect("创建 CasClient 失败");
+    let mut token = None;
+    if let Some(t) = tgt_from_app_session() {
+        println!("[凭据] 来源=session.json(DPAPI TGT) 长度={}", t.len());
+        match sso_token(&cas, &t, &default_target_url()).await {
+            Ok(tok) => token = Some(tok),
+            Err(e) => println!("[凭据] 本机 TGT 换票失败（{e}）→ 回落账密登录"),
+        }
+    } else {
+        println!("[凭据] session.json 无可用 TGT");
+    }
+    let token = match token {
+        Some(t) => t,
+        None => {
+            let (tgt, _src) = login_tgt_via_password().await;
+            sso_token(&cas, &tgt, &default_target_url())
+                .await
+                .expect("账密登录取得的新 TGT 应能换到 token")
+        }
+    };
+    let client = SynjonesClient::new(CasClient::new().expect("新建 client 失败"), None, Some(token));
+
+    // ---------- 2) 单片区详情（需 token；产品未消费，仅记录形状） ----------
+    match client
+        .get(EP_SINGLE_FEEITEM, &[("feeitemid", "450")], Envelope::Charge)
+        .await
+    {
+        Ok(v) => {
+            println!(
+                "[单片区 450] 顶层键=[{}] view={:?}",
+                v.as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>().join(","))
+                    .unwrap_or_default(),
+                v["view"]
+            );
+            dump(&dir, "electricity_single_feeitem_450.json", &v);
+        }
+        Err(e) => println!("[单片区 450] 失败：{e}"),
+    }
+
+    // ---------- 3) 产品 API 级联：三片区各走到末级 ----------
+    // 末级是「输入级」（官方 flag[4]=='3'「先选择再输入」）→ 房间号由用户输入（实测 `101` 命中）。
+    let mut found_keys: Vec<String> = Vec::new();
+    let mut summary: Vec<String> = Vec::new();
+    for item in &items {
+        let q0 = query_cascade(&client, &item.id, &[])
+            .await
+            .unwrap_or_else(|e| panic!("{} 第 1 级失败：{e}", item.id));
+        println!(
+            "[{} 第1级] levels={:?} 选项={} 例={:?}",
+            item.id,
+            q0.levels.iter().map(|l| format!("{}:{}", l.level, l.name)).collect::<Vec<_>>(),
+            q0.options.len(),
+            q0.options.first().map(|c| (&c.label, &c.value, &c.code, c.level))
+        );
+        assert!(!q0.options.is_empty(), "第 1 级（校区）应有下拉选项");
+        assert!(q0.levels.len() >= 2, "至少两级（各级名称来自 map.total）");
+
+        let step1 = RoomStep {
+            level: q0.options[0].level,
+            code: q0.options[0].code.clone(),
+            value: q0.options[0].value.clone(),
+            name: q0.options[0].label.clone(),
+        };
+        let q1 = query_cascade(&client, &item.id, std::slice::from_ref(&step1))
+            .await
+            .unwrap_or_else(|e| panic!("{} 第 2 级失败：{e}", item.id));
+        println!(
+            "[{} 第2级] 选项={} 例={:?}",
+            item.id,
+            q1.options.len(),
+            q1.options.first().map(|c| (&c.label, &c.value))
+        );
+        assert!(!q1.options.is_empty(), "第 2 级（楼栋）应有下拉选项");
+
+        let step2 = RoomStep {
+            level: q1.options[0].level,
+            code: q1.options[0].code.clone(),
+            value: q1.options[0].value.clone(),
+            name: q1.options[0].label.clone(),
+        };
+        let q2 = query_cascade(&client, &item.id, &[step1.clone(), step2.clone()])
+            .await
+            .unwrap_or_else(|e| panic!("{} 第 3 级失败：{e}", item.id));
+        println!(
+            "[{} 第3级] 选项={}（实测为空 → 输入级）is_final={}",
+            item.id,
+            q2.options.len(),
+            q2.is_final
+        );
+        assert!(q2.options.is_empty(), "末级（房间）无下拉，实测 {} 为空", q2.options.len());
+        assert!(!q2.is_final, "未提交房间号时不是末级结果");
+        assert!(
+            item.last_level_is_input,
+            "{} 的 flag[4]=='3' ⇒ UI 应把末级渲染成输入框",
+            item.id
+        );
+
+        // 末级：房间号用实测可用值 "101"
+        let step3 = RoomStep {
+            level: q2.levels.last().map(|l| l.level).unwrap_or(3),
+            code: q2
+                .levels
+                .last()
+                .map(|l| l.code.clone())
+                .unwrap_or_else(|| "room".to_string()),
+            value: "101".to_string(),
+            name: "101".to_string(),
+        };
+        let q3 = query_cascade(&client, &item.id, &[step1, step2, step3])
+            .await
+            .unwrap_or_else(|e| panic!("{} 末级失败：{e}", item.id));
+        assert!(q3.is_final, "{} 末级应 is_final", item.id);
+        let view = q3.view.as_ref().expect("末级应有 view");
+        println!(
+            "[{} ★末级] fields={:?} money={:?} tip={:?}",
+            item.id,
+            view.fields
+                .iter()
+                .map(|f| (&f.label, &f.value))
+                .collect::<Vec<_>>(),
+            view.money,
+            view.tip
+        );
+        for f in &view.fields {
+            if !found_keys.contains(&f.label) {
+                found_keys.push(f.label.clone());
+            }
+        }
+        summary.push(format!(
+            "{} {} → {:?}",
+            item.id,
+            item.name,
+            view.fields.iter().map(|f| f.value.clone()).collect::<Vec<_>>()
+        ));
+        assert!(!view.fields.is_empty(), "{} 末级应至少一个展示字段", item.id);
+        assert_eq!(
+            view.money, None,
+            "{} 实测不下发 money/iectranamt（余额在那句自由文本里）",
+            item.id
+        );
+    }
+
+    println!("[★ showData 键名集合] {found_keys:?}");
+    println!("[★ 三片区末级实值]\n{}", summary.join("\n"));
+    assert_eq!(
+        found_keys,
+        vec!["信息".to_string()],
+        "450/448/449 末级 showData 的真实键名（批 3 必交付取证）"
+    );
 }
