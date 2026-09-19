@@ -159,3 +159,48 @@
 5. 涉及外发（P2 若选第三方假日 API）须先过「验证码/数据不外发第三方」红线评估，默认本地手动维护。
 6. 收尾四件套：CHANGELOG 条目、CodeWiki（涉及架构才更新 + `cw index` + `cw meta update`）、
    分支提交、主目录 ff-only 合并。
+
+## 六、2026-09-19 复核轮补记（P0 落地后，glm5-3-flash 双向交叉复核）
+
+P0 已完成（commit 4e2647b，粒度 B 案，见契约 §6）。两个 glm5-3-flash 分身复核：
+上游侧逐 ui 功能域/repository/tool 扫描对照清单；本仓侧逐条 grep 验证 P1-P5 并找漏网，
+主智能体抽查核实了全部关键证据。**结论：P1-P5 所列缺口逐条属实（无一虚报），但路线不完整**——
+
+### 新发现并入路线
+
+1. **【并入 P2·数据正确性】ICS 导出不消费 override**：`build_ics`
+   （`tauri-app/src-tauri/src/commands/timetable.rs:353-429`）只遍历 `tt.courses`、全程不读
+   `tt.overrides`——已采纳的调课/停课/补课通知在导出的 ICS 中不生效（单次停课也不剔除）。
+   上游 §2.8 ICS 引擎按生效结果展开。P2 落地 skippedDates 时须一并按 override 生效结果展开。
+2. **【并入 P1】开学日/总周数/当前周手动设置整块缺失**：无任何 `save_config` 类命令，
+   设置页零命中；开学日唯一来源是导入自动写（`timetable.rs:179-185`）。
+   `semester_start_from_week`（`weeks.rs:55-62`，`lib.rs:36` 导出）是**零生产调用死代码**，
+   正为「当前周反推开学日」预留。P5「顶栏标题态机」依赖它——设置入口并入 P1 一并做。
+3. **【升级 P5 表述】今日页与本地课表是数据源分叉，不止作息分叉**：
+   `TodayPanel.tsx:120`「下一节课」走 `get_portal_overview`（教务接口 + 内置大节表），完全不读
+   本地 Timetable——override/停开/手动课/自定义作息一概不反映；上游 §4 今日页日视图
+   （纵向时间轴、已结束划线、状态机）桌面端无对应物。原条目「接自定义作息」升级为
+   **「今日页课表数据接本地 Timetable（含 override）」**。
+4. **【并入 P1·轻微】ICS 日期未按周首日对齐**：`build_ics` 直接 `开学日+(week-1)*7+(day-1)`，
+   未走 `weeks.rs:33-34` 对齐法；`first_day_of_week≠1` 时 ICS 日期与网格周次不一致。
+   P1 接线 firstDayOfWeek 时统一。
+5. **【附注】自定义时间课被 ICS 静默跳过**：`build_ics` 对 `start_section/end_section` 为
+   None 的课 continue（`timetable.rs:373-375`）；P5「手动课程自定义时间」落地时 ICS 侧需同步接
+   （上游 §2.8 直接取自定义时刻）。
+
+### 文档修正
+
+- 第二节「重叠课程分列」行号应为 `grid.rs:153` 起；`:16-140` 是 `ScheduleMode` 与
+  `time_to_grid_scale`/`grid_scale_to_time` 两个拖拽预留件（P4 要用的恰是它们）。
+- 「手动课程自定义时间」缺口比原记录深一层：不止前端表单硬编码 `isCustomTime: false`
+  （`TimetablePanel.tsx:883`），后端 `add_course_manual` 也硬编码（`timetable.rs:269-271`）。
+
+### 上游侧复核结论（清单完备性）
+
+清单 17 节经逐域复核**覆盖面完备，无清单外的桌面端可适用实质缺口**。4 条条目级细节：
+① 课程详情弹窗带「编辑」按钮（上游 `CourseDetailBottomSheet.kt:98,393-396`）——本仓详情浮层
+已有「编辑」入口（`TimetablePanel.tsx` 的 `openForm({...c}, c)`），等价覆盖，无需跟进；
+② 今日页 Vacation/SemesterEnded 可见文案（上游 `TodayScheduleScreen.kt:147-168`）——
+并入 P5「顶栏标题态机」条目，范围扩到今日页副标题；③ 长按编辑态禁横向翻周 + 底栏保显
+（触摸防误触设计）——桌面端不做，P4 实现时作已知上游差异记录；④ 课表切换卡片带创建时间
+（上游 `CourseTablePickerDialog.kt:69-88`）——P5「多课表管理」落地时补细节。

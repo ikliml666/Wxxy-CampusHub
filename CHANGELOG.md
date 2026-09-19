@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-19 · 课表对账复核轮：glm5-3-flash 双向交叉复核，P1-P5 补 3 实质漏网 + 行号修正（无代码改动）
+
+- **模块**：`docs/HANDOFF-timetable-parity.md`（新增 §六复核轮补记）、`CHANGELOG.md`；**无代码改动**
+- **背景**：用户要求「检查与原项目是否有没有对齐的功能」，点名 glm5-3-flash 分析。两个 glm5-3-flash 并行：上游侧（逐 ui 功能域/repository/tool 对照清单找漏记）+ 本仓侧（逐条 grep 验证 P1-P5 + 零消费字段盘点），主智能体抽查核实关键证据
+- **核实属实的新发现（并入路线）**：① **ICS 导出不消费 override**（`build_ics` 只遍历 courses，调课/停课/补课通知在导出日历中不生效——数据正确性，并入 P2）；② 开学日/总周数手动设置整块缺失、`semester_start_from_week` 为零调用死代码（并入 P1 设置入口）；③ 今日页与本地课表是**数据源分叉**（走教务接口，override/手动课全不反映，P5 条目表述升级）；④ ICS 日期未按周首日对齐（并入 P1）；⑤ 自定义时间课被 ICS 静默跳过（P5 落地时同步接）
+- **文档修正**：重叠分列行号应为 `grid.rs:153` 起（:16-140 是拖拽预留件）；`add_course_manual` 后端也硬编码 `is_custom_time: false`（不止前端）
+- **上游侧结论**：清单 17 节覆盖面完备，无清单外桌面端适用实质缺口；4 条细节并入相应条目（详情弹窗编辑按钮本仓已有等价覆盖，其余 3 条并入 P5/P4 记录）
+- **P1-P5 原有条目**：逐条 grep 全部属实，无一虚报、无需删除
+
 ## 2026-09-19 · P0 课表样式对齐上游安卓端：时间列起止时间、课程块教师名、点空白格新建课程
 
 - **模块**：`tauri-app/frontend/src/panels/TimetablePanel.tsx`（渲染层）；契约修订 `docs/superpowers/plans/2026-09-18-m2.5-timetable.md` §6；CodeWiki decision `timetable-block-granularity`
