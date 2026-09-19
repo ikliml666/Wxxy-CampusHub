@@ -84,17 +84,33 @@ pub struct SavedRoom {
     /// 用户起的名字（留空时后端用路径名拼一个）。
     #[serde(default)]
     pub label: String,
+    /// 是否「我的宿舍」（M4 批 2：每天定时采集的采集对象）。
+    ///
+    /// **同一时刻最多一个为 true**（[`set_bound`] 保证）。`serde(default)` 让旧版
+    /// `electricity_rooms.json`（无该字段）照旧读得进来（一律视为未绑定）。
+    #[serde(default)]
+    pub bound: bool,
 }
 
 fn rooms_path(dir: &Path) -> PathBuf {
     dir.join("electricity_rooms.json")
 }
 
-fn now_ms() -> String {
-    SystemTime::now()
+/// 生成本机房间 id（epoch 毫秒）：与已存在的 id 撞号就顺延。
+///
+/// `id` 是绑定（[`set_bound`]）与删除（[`remove_room`]）的定位键 ⇒ **必须唯一**：
+/// 同一毫秒内连续新增两个房间时，裸毫秒会给出同一个 id，导致「解绑/删除隔壁」误伤另一个房间
+/// （M4 批 2 加绑定字段时发现，单测覆盖）。
+fn next_room_id(rooms: &[SavedRoom]) -> String {
+    let start = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().to_string())
-        .unwrap_or_default()
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut n = start;
+    while rooms.iter().any(|r| r.id == n.to_string()) {
+        n += 1;
+    }
+    n.to_string()
 }
 
 /// 读取本地常用房间。文件缺失/损坏/反序列化失败 → 空列表（不报错、不删坏文件，
@@ -109,7 +125,8 @@ pub fn load_rooms(dir: &Path) -> Vec<SavedRoom> {
     })
 }
 
-fn write_rooms(dir: &Path, rooms: &[SavedRoom]) -> Result<(), String> {
+/// 整体写入常用房间（电费命令面与 `electricity_history` 的绑定命令共用）。
+pub(crate) fn write_rooms(dir: &Path, rooms: &[SavedRoom]) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
     let json = serde_json::to_string_pretty(rooms).map_err(|e| e.to_string())?;
     fs::write(rooms_path(dir), json).map_err(|e| format!("写 electricity_rooms.json 失败: {e}"))
@@ -145,6 +162,10 @@ fn default_label(r: &SavedRoom) -> String {
 
 /// 新增/更新一个常用房间（纯逻辑，单测覆盖）：校验 → 同片区同路径视为同一房间（沿用原 id）
 /// → 追加或替换 → 上限校验。返回新列表（不改动入参）。
+///
+/// **绑定状态不由本函数决定**：已有房间的 `bound` 一律沿用存量（改名/换房间号不得静默丢绑定，
+/// 前端保存时不带 `bound` 字段也无妨）；新房间自带 `bound: true` 时按唯一性清掉其它房间的绑定
+/// ——绑定关系只经 [`set_bound`]（命令 `bind_electricity_room`）显式变更。
 pub fn upsert_room(mut rooms: Vec<SavedRoom>, mut room: SavedRoom) -> Result<Vec<SavedRoom>, String> {
     if room.feeitem_id.trim().is_empty() {
         return Err("缺少片区 id".to_string());
@@ -163,6 +184,7 @@ pub fn upsert_room(mut rooms: Vec<SavedRoom>, mut room: SavedRoom) -> Result<Vec
         Some(i) => {
             // 同一房间重复保存 = 改名/刷新元信息，不产生重复项
             room.id = rooms[i].id.clone();
+            room.bound = rooms[i].bound;
             rooms[i] = room;
             Ok(rooms)
         }
@@ -171,12 +193,46 @@ pub fn upsert_room(mut rooms: Vec<SavedRoom>, mut room: SavedRoom) -> Result<Vec
                 return Err(format!("常用房间已达上限（{MAX_SAVED_ROOMS} 个）"));
             }
             if room.id.trim().is_empty() {
-                room.id = now_ms();
+                room.id = next_room_id(&rooms);
+            }
+            if room.bound {
+                // 新房间自带绑定 ⇒ 先清旧的，保证「最多一个绑定」
+                let new_id = room.id.clone();
+                clear_other_bounds(&mut rooms, &new_id);
             }
             rooms.push(room);
             Ok(rooms)
         }
     }
+}
+
+/// 绑定唯一性的唯一实现：清掉除 `keep_id` 之外所有房间的绑定。
+fn clear_other_bounds(rooms: &mut [SavedRoom], keep_id: &str) {
+    for r in rooms.iter_mut() {
+        if r.id != keep_id {
+            r.bound = false;
+        }
+    }
+}
+
+/// 绑定/解绑「我的宿舍」（纯逻辑，单测覆盖）：`bound=true` 时把它设为**唯一**绑定
+/// （其余房间自动解绑），`bound=false` 时仅解绑它自己。id 不存在 → `Err`（可读中文）。
+pub fn set_bound(
+    mut rooms: Vec<SavedRoom>,
+    id: &str,
+    bound: bool,
+) -> Result<Vec<SavedRoom>, String> {
+    let Some(i) = rooms.iter().position(|r| r.id == id) else {
+        return Err("该房间不在常用列表里（可能已被删除），请刷新后重试".to_string());
+    };
+    if !bound {
+        rooms[i].bound = false;
+        return Ok(rooms);
+    }
+    let id = rooms[i].id.clone();
+    clear_other_bounds(&mut rooms, &id);
+    rooms[i].bound = true;
+    Ok(rooms)
 }
 
 /// 删除一个常用房间（纯逻辑，单测覆盖）；id 不存在则原样返回。
@@ -188,7 +244,8 @@ pub fn remove_room(rooms: Vec<SavedRoom>, id: &str) -> Vec<SavedRoom> {
 
 /// 电费侧失败文案：会话失效沿批 2 口径；网络层失败点明「需校园网」（内网明文 IP，校外不可达）；
 /// 服务端空文案（实测房间号给空串时 `code=500` 且 `message` 为空）补一句可读话。
-fn elec_err(e: &CampusSynjonesError) -> String {
+/// 可见性 `pub(crate)`：历史命令面（`commands::electricity_history`）复用同一套文案。
+pub(crate) fn elec_err(e: &CampusSynjonesError) -> String {
     match e {
         CampusSynjonesError::Http(msg) => {
             format!("无法访问学校服务，请确认已连校园网（{msg}）")
@@ -543,6 +600,7 @@ mod tests {
                 },
             ],
             label: label.to_string(),
+            bound: false,
         }
     }
 
@@ -557,8 +615,60 @@ mod tests {
 
         let raw = fs::read_to_string(rooms_path(&dir)).unwrap();
         assert!(raw.contains("\"feeitemId\""), "落盘应 camelCase：{raw}");
+        assert!(raw.contains("\"bound\": false"), "绑定字段也要落盘：{raw}");
         assert_eq!(load_rooms(&dir), rooms);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 绑定唯一性（M4 批 2）：`set_bound` 至多一个 true；绑新的自动解绑旧的；解绑只影响自己；
+    /// 未知 id → 可读中文错误。
+    #[test]
+    fn set_bound_keeps_at_most_one_and_reports_unknown_id() {
+        let mut rooms = upsert_room(Vec::new(), room("宿舍", "101")).unwrap();
+        rooms = upsert_room(rooms, room("隔壁", "102")).unwrap();
+        let (a, b) = (rooms[0].id.clone(), rooms[1].id.clone());
+        assert_ne!(a, b, "同毫秒新增两个房间不得撞号（id 是绑定/删除的定位键）");
+
+        let rooms = set_bound(rooms, &a, true).unwrap();
+        assert!(rooms[0].bound, "被绑的应为 true");
+        assert!(!rooms[1].bound);
+
+        let rooms = set_bound(rooms, &b, true).unwrap();
+        assert!(!rooms[0].bound, "绑新的应自动解绑旧的");
+        assert!(rooms[1].bound);
+
+        let rooms = set_bound(rooms, &b, false).unwrap();
+        assert!(!rooms[1].bound, "解绑只影响自己");
+        assert_eq!(
+            set_bound(rooms, "不存在", true).unwrap_err(),
+            "该房间不在常用列表里（可能已被删除），请刷新后重试"
+        );
+    }
+
+    /// 保存房间**不得静默丢绑定**：同房间重复保存（改名/刷新元信息）沿用存量 bound；
+    /// 新房间自带 bound=true 时按唯一性清掉其它房间的绑定。
+    #[test]
+    fn upsert_preserves_and_normalizes_binding() {
+        let rooms = upsert_room(Vec::new(), room("宿舍", "101")).unwrap();
+        let first_id = rooms[0].id.clone();
+        let rooms = set_bound(rooms, &first_id, true).unwrap();
+        assert!(rooms[0].bound);
+
+        // 前端保存时不带 bound（serde default = false）也不能把绑定抹掉
+        let mut renamed = room("宿舍改名", "101");
+        renamed.bound = false;
+        let rooms = upsert_room(rooms, renamed).unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert!(rooms[0].bound, "重复保存应沿用存量绑定：{rooms:?}");
+
+        // 新房间自带绑定 ⇒ 旧的解绑
+        let mut fresh = room("新宿舍", "202");
+        fresh.bound = true;
+        let rooms = upsert_room(rooms, fresh).unwrap();
+        assert_eq!(rooms.len(), 2);
+        assert!(!rooms[0].bound, "新绑定应清掉旧绑定");
+        assert!(rooms[1].bound);
+        assert_eq!(rooms.iter().filter(|r| r.bound).count(), 1, "至多一个绑定");
     }
 
     /// 同一片区同一路径重复保存 → 原地更新（沿用原 id），不产生重复项；换房间号 → 新项。

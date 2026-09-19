@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2026-09-19 · M4 批 1+2：缴费历史只读取数层 + 自采日余额快照 / 绑定宿舍 / 启动补采
+
+- **模块**：`crates/campus-synjones/`（`turnover.rs` 新建、`charge.rs` 加余额严格提取、`ecard.rs` 加 `cardBalance`、`tests/m4_history_probe_live.rs` live 探针）、`tauri-app/src-tauri/src/infra/electricity_history.rs`（新建）、`commands/electricity_history.rs`（新建，6 命令）、`commands/electricity.rs`（`SavedRoom.bound` + `set_bound`）、`lib.rs`（注册 + `.setup()` 启动补采）、`frontend/src/shared/types.ts`（类型）
+- **实测修订（重要）**：① **单位红线**——`/charge/*` 侧 `TRANAMT`/`tranamt`/`accountTotal`/`pieAccountList[].tranamt` 是**元**（官方 PC 页对 `TRANAMT` 做 `/100` 是错的，不要照抄），一卡通侧才是**分**；② **推翻旧结论**：`/charge/order/personal_data?status=0` 并非「任何形态恒 500」——真实门槛是 **App 口径头组**（`synAccessSource=app` 必须同时进 query 与同名头），补齐即回 `code=200` + `orderList`，**「进充值前检查遗留订单」这条防线恢复**（含当时遗留的 1 元待支付单）；③ 学校侧**没有**电费日余额序列（`balance_amount` 恒 null、`mouthAccount` 忽略参数、`threeExpen_account` 恒空）⇒ 日序列只能客户端自采
+- **批 1（crate 取数层，全部只读 GET）**：`turnover.rs`——账单 `app_account`（`count` 是全量条数）/ 月度 `pie_account`（参数生效，空月 = 0）/ 累计 `app_totalAccount`（可能 null）/ 订单 `order/personal_data`（含待支付）/ 片区配置 `showFeeitem`；`charge::balance_from_text` 按「关键词 + 分隔符 + 数字」的**相邻形态**提取余额（提不到返回 None，**刻意排除「剩余电量」**——448 原文同一句里既有金额也有 kWh）；`Transaction.card_balance_yuan`（分→元的事件级余额快照）
+- **批 2（自采与统计）**：`electricity_history.json`（`id = roomKey@date` 确定性主键、去重键 = 房间 + 日期、同日覆盖、上限 2000 丢最旧、读失败回空且不删坏文件）；`merge_history(a,b)` 纯函数（按 id 去重取 `collectedAt` 新者 → 时间升序 → 裁剪），**可交换 + 幂等**（安卓端内网同步的基础）；绑定宿舍（`SavedRoom.bound`，`serde(default)` 兼容旧文件，最多一个，绑新自动解绑旧的，**保存房间不会静默丢绑定**）；新命令 6 条 `get_electricity_bills` / `get_electricity_monthly` / `get_electricity_orders` / `get_electricity_history` / `bind_electricity_room` / `run_electricity_snapshot`；启动补采（`.setup()` + `spawn`，今日未采 + 有内存会话才采一次，不弹窗/不阻塞/失败只记日志，未登录静默跳过）
+- **红线遵守**：学校侧**只读**（禁 `/blade-pay/pay`、`deleteOrder`、`addRefundOrder`、`sceneBind/add`、`updateReceivable`；取消遗留单复用已有 `recharge_cancel`）；token/账号/密码/cookie/户号**不落盘、不进日志、不进样本**；token 单活 + `MutexGuard` 串行化沿用同一实例；单测全离线，**未跑 `#[ignore]` live 测试**
+- **修复（交接断口 + 真缺陷）**：`ecard.rs` 被中断截断的 `#[test]` + 函数签名两行、`lib.rs` 缺 `pub mod turnover`、`turnover.rs::parse_bills` 的 `records` 类型推断（E0282）；另修两个真缺陷——`infra/electricity_history.rs::normalize` 的**同 id 去重不能靠「排序后看相邻」**（会被别的房间的同期记录插在中间而漏合并，见 `learnings/history-dedupe-not-by-adjacent-sort`）、`SavedRoom.id` **毫秒撞号**（同毫秒连续新增两个房间会得到同一 id，而 id 是绑定/删除的定位键）
+- **验证**：`cargo test --workspace` **322 passed / 0 failed / 13 ignored**（crate 侧新增 11 + tauri 侧新增 15 单测）；`tsc -p tsconfig.json` 前端类型检查零错（`SavedRoom.bound` 声明为可选，不破坏既有组件）；**真机点验与启动补采实测属批 4**，本轮未跑
+
 ## 2026-09-19 · M3.1：充值改客户端直调官方接口（移除内嵌官方页面）
 
 - **背景（用户裁决）**：「充值还是不要使用官方界面，我们直接使用对应的验证以及接口，同时声明风险」；配套裁决：内嵌页移除并保留「去官网充值」兜底、**真实试充由用户自己完成**（不代做不可逆的资金操作）

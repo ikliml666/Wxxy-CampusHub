@@ -77,7 +77,22 @@ pub fn run() {
             commands::electricity::recharge_submit,
             commands::electricity::recharge_status,
             commands::electricity::recharge_cancel,
+            commands::electricity_history::get_electricity_bills,
+            commands::electricity_history::get_electricity_monthly,
+            commands::electricity_history::get_electricity_orders,
+            commands::electricity_history::get_electricity_history,
+            commands::electricity_history::bind_electricity_room,
+            commands::electricity_history::run_electricity_snapshot,
         ])
+        // M4 批 2 启动补采：今天还没采过 + 有内存会话时，后台补一次日余额快照。
+        // 不弹窗、不阻塞启动（spawn 后立刻返回）、失败只记日志（不出现 token/账号/户号）。
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::electricity_history::startup_snapshot(handle).await;
+            });
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

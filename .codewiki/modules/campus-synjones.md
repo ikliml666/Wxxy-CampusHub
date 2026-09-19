@@ -8,10 +8,13 @@ source_files:
   - crates/campus-synjones/src/ecard.rs
   - crates/campus-synjones/src/charge.rs
   - crates/campus-synjones/src/recharge.rs
+  - crates/campus-synjones/src/turnover.rs
+  - crates/campus-synjones/tests/m4_history_probe_live.rs
   - tauri-app/frontend/src/components/RechargeFlow.tsx
   - crates/campus-synjones/tests/synjones_live.rs
   - tauri-app/src-tauri/src/commands/synjones.rs
   - tauri-app/src-tauri/src/commands/electricity.rs
+  - tauri-app/src-tauri/src/commands/electricity_history.rs
 tags:
   - synjones
   - ecard
@@ -19,6 +22,8 @@ tags:
   - sso
   - recon
   - m3
+  - history
+  - m4
 ---
 
 # 慧新E校协议核心（campus-synjones）
@@ -63,6 +68,26 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 - **末级是「输入级」不是下拉**：三片区 `flag[4]=='3'`（`last_level_is_input`），`level` 到最后一级时 `map.data` 返回**空**，房间号由用户输入（官方语义「先选择再输入」）。房间号格式要求严格：`101` 命中，`1-101` / `101室` 之类会得到 `tipinfo`「缴费系统返回数据错误child==NULL！」。
 - **结果字段是单键自由文本**：`map.showData` 的键名**恒为 `信息`**，值是各片区**格式互不相同**的自由文本（有的含「剩余金额 + 单价」，有的含「余额 + 剩余电量」，有的只有「剩余电费」）；`map.money` / `map.iectranamt` 实测**都不存在**。所以 `ElectricityView.fields` 做**通用字典渲染**、前端按逗号折行、负数标红——**绝不做文本解构**（三片区格式各异，解构会随文案漂移静默失效）。
 - `map.data`（末级对象）含户号等 PII：**不透出、不入日志**。
+- **余额提取（M4 批 1，`charge::balance_from_text` / `balance_from_fields`）**：既然不做文本解构，余额就从那句自由文本里按**严格形态**（`关键词 + 分隔符 + 数字`，只认相邻、不跨字段拼接、不做位置解构）提取，提不到返回 `None`（UI 显示「无数据」，**绝不臆造 0**）。关键词表刻意**排除**「剩余电量/电量」——`448` 的原文「当前余额517.05元,**当前剩余电量957.50度**」里两者同句，把 kWh 当钱是错报；千分位（`1,234.56`）歧义时也宁可 `None`。单测用三片区 live 原文钉住。
+
+### 缴费历史与订单（`turnover.rs`，M4 批 1；端点 2026-09-19 live 实测）
+
+**只读纪律**：该模块**只发 GET**（下方五条），禁止出现建单/支付/删单/退款/绑卡（写路径全在 `recharge.rs`）。
+
+| 用途 | 端点 | 参数 | 关键字段 |
+|---|---|---|---|
+| 缴费账单（历史） | `GET /charge/turnover/app_account` | `current`/`size`（`size` 上限收到 100）/可选 `feeitemid` | 顶层 `count`（**全量条数**，非本页）+ `accountList[]`：`SUCCESSDATE`/`TRANAMT`/`TURNOVERID`/`ITEMNAME`/`ABSTRACTS`/`TYPENAME` |
+| 某月合计 | `GET /charge/turnover/pie_account` | `createdate=YYYY-MM`（**参数生效**，可逐月拼曲线） | `pieAccountList[].tranamt`；**无数据的月回空数组** ⇒ 该月 `0.0` |
+| 累计缴费额 | `GET /charge/turnover/app_totalAccount` | 可选 `feeitemid` | `accountTotal`（**可能 null** ⇒ `None`） |
+| 订单（**含待支付**） | `GET /charge/order/personal_data` | 可选 `status`（0 待支付 / 1 已完成 / 2） | `orderList[]`：`orderid`/`tranamt`/`actulamt`/`status`/`commitdate`/`successdate`/`source`/`abstracts`/`feeitemlist[0].feeitemid`（顶层 `feeitemid` 恒 0 是占位） |
+| 片区配置 | `GET /charge/feeitem/showFeeitem` | `feeitemid` | `list[0]`：`price`/`maxmoney`/`daymaxmoney`/`retain_money`/`billing_unit`/`layout` |
+
+**⚠️ 单位红线（元 vs 分，最易错）**：`/charge/*` 侧 `TRANAMT` / `tranamt` / `accountTotal` / `pieAccountList[].tranamt` 实测单位是**元**（同一时刻一卡通流水扣 `tranamt=100`（分）而电费账单是 `TRANAMT=1`）⇒ **不要照抄官方 PC 页对 `TRANAMT` 的 `/100`**；而一卡通侧（`ecard.rs`）一切金额字段是**分**，由该模块的 `yuan()` 换算。跨源聚合（首页钱包卡）时两者口径不可混用。
+
+**⚠️ 旧结论已修订**：项目早前记录「`/charge/order/personal_data?status=0` 任何形态恒 500 ⇒ 学校侧没有可用的待支付订单列表接口」（见 [[modules/campus-synjones|本文件]] §五 与 CHANGELOG M3.1 条目）。M4 探针实测：**路径与参数本就正确，缺的是 App 口径请求头组**——`synAccessSource=app` 必须**同时**进 query 与同名头（正是 `client.rs` 的 `with_headers` 行为），旧形态（只有来源头、无 query 一份）复跑同样 500。故「进充值前检查遗留订单」这条防线**技术上已恢复**（M4 批 2 由 `get_electricity_orders` 提供列表，取消复用 `recharge_cancel`）。
+
+**其它实测事实**：`app_account` 的 `balance_amount` **恒 null**、`mouthAccount` 只给本月合计（参数被忽略）、`threeExpen_account` 恒空 ⇒ **宿舍电费的日余额序列在学校侧不存在**，只能客户端自采（见 [[decisions/electricity-daily-snapshot-and-merge|电费日快照与多端合并决策]]）。`balance_from_text` 由此成为唯一能拿到「某个瞬间的余额数字」的路径。
+
 
 ## 四、必须记住的坑
 
@@ -91,8 +116,8 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 3. 建单早期有「日消费上限」校验，值取自片区配置 `daymaxmoney`（448/449/450 均为 500）；费用项 id 不存在时该值取到 null → 服务端 NPE 报 `dayTotalMoney-日消费最大金额判断异常了-null`（**不是缺参数**）。
 4. `third_party`（电费专用上下文串）= `JSON.stringify(末级 map.data)` + `myCustomInfo="<末级名>：<各级名 空格>"`；**不缀 `-ids-金额`**（那只在官方「选中应收项」形态出现，单房间充值无该分支）。因 `map.data` 含户号等 PII，**合成一律在后端**（`third_party_for_room`，`recharge.rs:359`），不下发前端。
 
-**一个做不到的防线（如实记录）**：计划里「进充值前检查遗留未支付订单」**无法实现**——`GET /charge/order/personal_data?status=0` 任何形态恒 500（官方 App 同一调用亦然），学校侧没有可用的待支付订单列表接口。
+**进入充值前检查遗留订单：已恢复（M4 批 1 更正）**。M3.1 时记录「无法实现」，根因不是端点不可用而是 App 口径头组缺失（`synAccessSource=app` 要同时进 query 与同名头），M4 探针实测 `status=0` 正常回 `orderList`。M4 批 2 的 `get_electricity_orders(status=0)` 已能列出待支付单（含当时遗留的那笔 1 元单），取消直接复用 `commands::electricity::recharge_cancel`（不新增写路径）。
 
 **未验证项**：`submit_pay` 的成功路径只能由**用户真机试充**验证（红线：开发/点验阶段绝不提交支付）；多应收项场景的 `-ids-金额` 后缀未实现（单房间流程用不到）。
 
-相关：[[modules/campus-auth|CAS 登录协议]]、[[modules/campus-portal|门户协议核心]]、[[learnings/portal-session-expiry-200-envelope|门户失效是 200 信封]]、[[learnings/tauri-webview-ui-verification|Tauri 真机 UI 验收方法]]。
+相关：[[modules/campus-auth|CAS 登录协议]]、[[modules/campus-portal|门户协议核心]]、[[learnings/portal-session-expiry-200-envelope|门户失效是 200 信封]]、[[learnings/tauri-webview-ui-verification|Tauri 真机 UI 验收方法]]、[[learnings/synjones-charge-yuan-vs-fen-and-pending-orders|元/分口径与待支付单旧结论修订]]、[[decisions/electricity-daily-snapshot-and-merge|电费日快照与多端合并决策]]。

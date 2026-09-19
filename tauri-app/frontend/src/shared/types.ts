@@ -587,6 +587,14 @@ export interface SavedRoom {
   feeitemName: string;
   path: RoomStep[];
   label: string;
+  /**
+   * 是否「我的宿舍」（M4 批 2：`run_electricity_snapshot` 的采集对象，同一时刻最多一个）。
+   *
+   * 读（`get_electricity_rooms`）时**恒在场**（后端 `serde` 正常序列化）；写成可选只是为了让
+   * 「新增房间」的调用不用带它——后端 `#[serde(default)]` 收 `false`，且**保存已有房间时沿用存量绑定**
+   * （改名/刷新元信息不会静默丢绑定）。改绑走 `bind_electricity_room`，不要靠 save 修改。
+   */
+  bound?: boolean;
 }
 
 // ─────────── 电费充值（M3.1 批 D 前端；命令契约 = 计划 §2.2，后端 `commands/electricity.rs`） ───────────
@@ -661,3 +669,110 @@ export interface RechargeCreated {
 /** `recharge_status` → data：与 `recharge_pay_methods` **同一个结构**（同一端点同一解析），
  *  轮询时只关心 `order.status`。故不另立类型，避免一个 payload 两种形状。 */
 export type RechargeStatus = RechargePayMethods;
+
+// ──────── 电费历史（M4 批 2；命令层 `commands/electricity_history.rs`） ────────
+//
+// 历史三源并存（任务书 §2）：① 学校账单（权威缴费记录）② 订单（含待支付）
+// ③ **自采日余额快照**——学校侧没有每日余额序列（`turnover` 的 `balance_amount` 恒 null），
+// 只能客户端自己采。三个源金额口径都是**元**（`/charge/*` 侧实测单位；一卡通侧才是分）。
+
+/**
+ * 一条缴费账单（`get_electricity_bills` → `records` 项；服务端 `/charge/turnover/app_account`）。
+ * ⚠️ `amountYuan` 单位是**元**（服务端 `TRANAMT` 原文即元，**不要再除 100**）；缺失为 `null`。
+ */
+export interface ElectricityBill {
+  /** 流水号（列表 key 用；后端不落盘、不记日志） */
+  id: string;
+  /** 成功时间（服务端原文，形如 `2026-09-19 17:08:16`） */
+  time: string;
+  /** 缴费项名（如 `桃园1号-李园8号`） */
+  itemName: string;
+  /** 摘要（含房间路径等学校侧原文） */
+  abstracts: string;
+  /** 渠道名（实测 `移动服务平台`） */
+  typeName: string;
+  amountYuan: number | null;
+}
+
+/** `get_electricity_bills` → data。`total` 是**符合条件的全量条数**（不是本页条数），用于「加载更多」。 */
+export interface ElectricityBillPage {
+  total: number;
+  records: ElectricityBill[];
+}
+
+/**
+ * 某月缴费合计（`get_electricity_monthly` → 12 项，`month` 形如 `2026-09`）。
+ * **空月 = 0**（学校侧回空数组 ⇒ 该月确实没缴费），故曲线保留完整 12 个月 x 轴；
+ * 而**请求失败是整年失败**（不会把「取不到」显示成 0 元）。
+ */
+export interface ElectricityMonthTotal {
+  month: string;
+  amountYuan: number;
+}
+
+/**
+ * 一条订单（`get_electricity_orders` → 项；`/charge/order/personal_data`，**含待支付**）。
+ * `status`：0 待支付 / 1 已完成 / 2。
+ *
+ * 待支付单的 `orderId` 可直接交给已有的 `recharge_status` / `recharge_cancel`
+ *（取消遗留订单复用充值那条链路，本批不新增取消命令）。**无任何户号/姓名等 PII 字段**。
+ */
+export interface ElectricityOrder {
+  orderId: string;
+  status: number;
+  amountYuan: number | null;
+  /** 实付金额；**待支付单为 `null`** */
+  actualYuan: number | null;
+  /** 下单时间（服务端原文） */
+  commitDate: string;
+  /** 成功时间（待支付单为空串） */
+  successDate: string;
+  /** 来源（实测 `app`） */
+  source: string;
+  /** 摘要（如 `无锡学院 1号楼 101`） */
+  abstracts: string;
+  /** 片区 id（取自 `feeitemlist[0]`；顶层 `feeitemid` 实测恒 0） */
+  feeitemId: string;
+}
+
+/**
+ * 一条自采余额快照（`get_electricity_history` → 项，**时间升序**，图表直接消费）。
+ *
+ * - 去重键 = `roomKey` + `date`：同房间同日重复采集**覆盖**当天那条（保留 `collectedAt` 最新的）；
+ * - `balance` 为 `null` = 学校那句自由文本里**提不到金额**（如只给了「剩余电量」）⇒ UI 显示「无数据」，
+ *   **不要当 0**（0 元与「没采到」在曲线上语义完全不同）；
+ * - `raw` 是学校侧那句原文（三片区格式互不相同，前端**不要解构**它，展示只在需要时作为副标题）。
+ */
+export interface ElectricityHistoryEntry {
+  /** 稳定主键 `roomKey@date`（跨端合并的唯一依据；前端只读不构造） */
+  id: string;
+  /** 观察到该快照的设备名（多端合并时区分来源；本机采集时在场，导入的记录可能缺省） */
+  device?: string;
+  /** 房间稳定键（片区 id + 级联路径；与 `SavedRoom.id` 无关，删除重建房间不改变历史归属） */
+  roomKey: string;
+  /** 房间显示名（保存时的 `label`） */
+  roomName: string;
+  feeitemId: string;
+  feeitemName: string;
+  /** 采集时刻（ISO8601 本地带偏移，如 `2026-09-19T17:20:31+08:00`） */
+  collectedAt: string;
+  /** 采集日期 `YYYY-MM-DD`（本地时区） */
+  date: string;
+  balance: number | null;
+  raw: string;
+  /** `"auto"`（启动补采）/ `"manual"`（用户手动采集） */
+  source: string;
+}
+
+/**
+ * `run_electricity_snapshot` → data。
+ *
+ * 失败不是这个形状：未登录 / 未绑定宿舍 / 房间号无效都会走 `CommandResult.message`
+ * （可读中文原因，如「尚未绑定宿舍房间：…」），前端据此给引导而不是弹技术错误。
+ */
+export interface ElectricitySnapshot {
+  /** 本次写入的那条快照（同日已有则被覆盖） */
+  entry: ElectricityHistoryEntry;
+  /** 是否覆盖了当天已有的那条（提示文案用「已更新今日记录」而非「已记录」） */
+  replaced: boolean;
+}

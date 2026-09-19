@@ -7,9 +7,12 @@ source_files:
   - tauri-app/src-tauri/src/commands/profile.rs
   - tauri-app/src-tauri/src/commands/portal.rs
   - tauri-app/src-tauri/src/commands/timetable.rs
+  - tauri-app/src-tauri/src/commands/electricity.rs
+  - tauri-app/src-tauri/src/commands/electricity_history.rs
   - tauri-app/src-tauri/src/commands/mod.rs
   - tauri-app/src-tauri/src/infra/state.rs
   - tauri-app/src-tauri/src/infra/timetable.rs
+  - tauri-app/src-tauri/src/infra/electricity_history.rs
   - tauri-app/src-tauri/src/infra/mod.rs
   - tauri-app/src-tauri/src/account/crypto.rs
   - tauri-app/src-tauri/src/account/store.rs
@@ -26,13 +29,16 @@ tags:
   - opener
   - apps
   - schedule
+  - electricity
+  - history
+  - m4
 ---
 
 # 接线层（campus-hub src-tauri）
 
 `tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-45`。
 
-## 34 条命令面
+## 命令面（下表覆盖 auth / profile / portal / timetable；慧新E校与电费的 31 条见 `modules/campus-synjones.md` 与下方 M4 小节；**全量 66 条**的命令面总账在根 `_architecture.md`「命令面与模块地图」）
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|
@@ -110,6 +116,23 @@ tags:
 - **`export_ics`**（`build_ics`，`timetable.rs:299`）：展开式 VEVENT（不依赖 RRULE）——每门未停开课程经 `campus_schedule::expand_occurrences`（批 2 2026-09-19 重写，决策 5 / 契约 §8.5，见 [[decisions/timetable-occurrence-expansion|课表生效实例展开]]）展开其每个教学周的**生效实例**，迭代周次 = `course.weeks ∪ 各 override.weeks`（复核 P1-b：补课周可不属于 course.weeks），只消费 `Solid`：停课不生成 VEVENT、调课原时段消失而新时段生成、补课新增、DESCRIPTION 追加「调课/补课」（复核 P3-b：经预建的 id→类型映射溯源，防逐事件 find 张冠李戴）；UID `{id}-w{week}d{day}s{start}@campushub`（复核 P3-a）：原位实例（含仅换教室）与旧版逐字节一致，**调课新位与补课实例追加 `-o{override 短 id}` 后缀**防同位撞 UID；VEVENT 日期命中 `config.skipped_dates` → 跳过；时刻取值 = **该日** `effective_slots_at(config, date)`（大节号 = `(起始小节+1)/2`，查不到跳过该实例），custom 课（节次 None）未被调整时 DTSTART/DTEND 直取 `custom_start_time/custom_end_time`（UID 用 `scustom` 段），被 resched 时新位走大节表（P3-c 口径）；周首日对齐沿用契约 §7.3（第 1 周首日 = 开学日按 first_day_of_week 回退，col = `(day-firstDay+7)%7`）；TEXT 转义（`,` `;` `\` 换行）+ CRLF 行尾；floating local time（无 `Z`/`TZID`，RFC 5545 合法、Outlook/Google 按导入时区解释）；缺 `semester_start_date` err「请先完成一次导入」。生成后由 `write_ics_to`（`timetable.rs:429`）写入 `dirs::download_dir()` 下的「课表.ics」——**覆盖写**（无时间戳后缀）、失败透出系统错误、取不到下载目录 err 中文提示；命令返回写入的完整路径，前端只展示（WebView2 不处理下载，交付禁走 Blob，见 [[learnings/tauri-webview-ui-verification|真机 UI 验收路径]]）。
 - **调课通知三命令**（M2.5 批次 3）：`parse_notice(text)` 本地课表 + `chrono::Local::now()` 现算 `current_week` 传入 `campus_schedule::parse_notice_text`（解析语义见 [[modules/campus-schedule|课表核心]]，取舍见 [[decisions/timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]），**不入库**；`apply_override(candidate)` 经 `candidate_to_override`（字段级拷贝 + `auto_applied`=High，纯函数与单测共用）写 overrides，`upsert_override` 以 noticeId+courseId 幂等覆盖、不同课程并存；`revoke_notice(noticeId)` 按 `source_notice_id` 整批删除返回条数。三者同样走 `mutate_timetable` 骨架、纯本地无会话。
 
+## 电费历史与绑定宿舍命令（`commands/electricity_history.rs`，M4 批 2，2026-09-19）
+
+与 `commands/electricity.rs`（片区/级联/常用房间/充值六条）**分文件**以免单模块膨胀；两者共用同一份常用房间存储与同一个进程级 synjones 客户端（token 单活，绝不自建第二套）。协议侧只读事实见 [[modules/campus-synjones|慧新E校协议核心]]，存储与合并语义见 `infra/electricity_history.rs` 模块头注与 [[decisions/electricity-daily-snapshot-and-merge|电费日快照与多端合并决策]]。
+
+| 命令 | 参数（camelCase） | data 形态 | 说明 |
+|---|---|---|---|
+| `get_electricity_bills` | `page?`, `size?`, `feeitemId?` | `BillPage{ total, records }` | 缴费账单（**金额单位元**，不要再除 100）；`total` 是全量条数不是本页条数 |
+| `get_electricity_monthly` | `year?` | `MonthTotal[12]` | **串行发 12 个请求**（空月 = 0），期间持全局锁 ⇒ 前端要独立三态、别叠着别的请求发 |
+| `get_electricity_orders` | `status?`（0 待支付/1 已完成/None 全部） | `Order[]` | **含待支付**（`personal_data` 头组齐备即可，旧「恒 500」结论已推翻）；待支付单的 `orderId` 交给已有的 `recharge_status` / `recharge_cancel` 处理，本模块**不新增任何写路径** |
+| `get_electricity_history` | `roomId?`（`SavedRoom.id`，None=全部房间）, `days?`（含今天；上限 3650） | `HistoryEntry[]`（**时间升序**） | 纯本地读，不需要会话；`roomId` 用常用房间 id 而非内部 `roomKey`（后者不下发 UI）；`days` 有上限是因为 `NaiveDate - Duration` 越界会 panic |
+| `bind_electricity_room` | `id`, `bound` | `SavedRoom[]` | 绑定「我的宿舍」（**最多一个**，绑新的自动解绑旧的；`set_bound` 保证）；保存房间（`save_electricity_room`）**沿用存量绑定**，不因前端没带 `bound` 而静默丢绑定 |
+| `run_electricity_snapshot` | — | `SnapshotOutcome{ entry, replaced }` | 对**绑定的**房间跑一次级联查询并落盘；未登录/未绑定返回**可读中文原因**（不 panic） |
+
+**启动补采**（`lib.rs` 新增 `.setup()`）：`tauri::async_runtime::spawn` 一个后台任务，三道静默护栏——今日已采过 / 未绑定宿舍 / **当前无内存会话**（无会话时不进 SSO，避免后台补采签发 token 顶掉用户正在用的会话）⇒ 都不满足才采一次。不弹窗、不阻塞启动，失败只 `log::warn`；日志只含错误文案与余额数值，**无 token / 账号 / 户号**。
+
+**采集策略取舍**：不注册 Windows 计划任务（token 单活会被后台采集顶掉）⇒ 应用没开的日子就是空档，图表留空（不插值、不补零）。
+
 ## 登录重试状态机
 
 `run_login` 内核三命令共享（`auth.rs:220-297`），登录用**全新 CasClient**（干净 jar，避免旧会话 cookie 干扰，`auth.rs:228`），密码仅在内存中存续、立即 RSA 加密（`auth.rs:230`）。
@@ -145,6 +168,8 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 | `accounts.json` | `{ accounts: [{ username, passwordB64(DPAPI), lastLogin(epoch 毫秒串), displayName? }] }`（`store.rs:13-29`） | `save_account`（同 username upsert 覆盖，`store.rs:43-62`）、`remove_account`（不存在报错，`store.rs:81-89`） |
 | `profile.json` | `{ localBase64?, officialBase64?, officialFetchedAt? }`（camelCase，字段缺省即不存在，`profile.rs:41-52`）——**明文 base64，不走 DPAPI** | `store_local_avatar` / `clear_local_avatar` / `store_official_avatar`（`profile.rs:127-153`）；读 `read_profile`（文件缺失/损坏按空档处理，`profile.rs:62-67`） |
 | `timetable.json` | `campus_schedule::Timetable`（camelCase：`config/courses/overrides/updatedAt`）——**非凭据明文**，与 profile.json 同级；`infra/timetable.rs`（M2.5 批次 1 新建）：`load_timetable`（缺失/损坏 → 空课表不报错、不删坏文件，`timetable.rs:41-54`）、`save_timetable`（整体读写，原子性由调用方保证——冻结契约 §2.2 单文件无数据库，`timetable.rs:56-60`）、`empty_timetable`（`DEFAULT_TABLE_ID="default"`，`timetable.rs:24-36`） | `import_timetable`（M2.5 批次 2）与手动课程三命令写入 |
+| `electricity_rooms.json` | `SavedRoom[]`（camelCase：`id/feeitemId/feeitemName/path/label/bound`）——非凭据明文；`id` = 本机 epoch 毫秒串（**撞号顺延**，见 [[learnings/history-dedupe-not-by-adjacent-sort\|历史去重不能靠排序后看相邻]]），`bound` = 「我的宿舍」（`serde(default)` 兼容旧文件，最多一个）；读写在 `commands/electricity.rs`（`load_rooms` / `write_rooms`，缺失/损坏 → 空列表不删坏文件） | `save_electricity_room` / `delete_electricity_room`（M3 批 3）、`bind_electricity_room`（M4 批 2） |
+| `electricity_history.json` | `HistoryEntry[]`（camelCase：`id/device?/roomKey/roomName/feeitemId/feeitemName/collectedAt/date/balance/raw/source`）——非凭据明文，**不含户号**（`map.data` 的 PII 在 crate 层就不透出）；`infra/electricity_history.rs`（M4 批 2 新建）：`load_history`（缺失/损坏 → 空列表、不删坏文件）、`save_history`（先 `normalize` 再整体写）、`normalize`（按 id 去重 → 时间升序 → 上限 `MAX_HISTORY=2000` 丢最旧）、`merge_history`（多端合并，可交换 + 幂等） | `run_electricity_snapshot` / 启动补采（M4 批 2） |
 
 启动回填 `restore_session()`（`state.rs:137-153`）：`run()` 在 `manage` 之前调用（避免 setup 内碰 tokio Mutex，`lib.rs:11-13`），读 session.json → 解密 → `jar.restore` 回填，**TGT 一并回填 `CasSession.tgt`**（旧格式文件无 tgtB64 → None，教务 901 时上层直接引导重新登录）；文件缺失/损坏/cookies 空 → None。落盘内容不含 cookie/TGT 明文有单测断言（`state.rs:168-196`，含旧格式兼容 `state.rs:198-224`）。`CasSession` 自 2026-09-18 起挂 `portal: PortalClient`（M2 批次 1）与 `tgt: Option<String>`（M2.5 批次 1，`state.rs:16-29`，仅内存明文、与 cookie 同级敏感）——`finish_login`（`auth.rs:343-350`）与 `restore_session`（`state.rs:144-152`）两处构造均 `PortalClient::new(client.clone())` 共享同一 jar，缓存生命周期 = 会话生命周期（详见 [[modules/campus-portal|门户业务协议核心]]）。
 
@@ -165,4 +190,6 @@ Windows `CryptProtectData` / `CryptUnprotectData`（CurrentUser 作用域，跨�
 
 ## 离线单测（`commands/auth.rs:506-626` + `commands/profile.rs:275-389`）
 
-错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）。`cargo test --workspace` 全量 **146 passed / 4 ignored**（2026-09-18 M2.5 批次 3 校验；campus-auth lib 18 + 集成 13、campus-hub 29（批次 2 新增 8：ICS 展开/时间锚点/停开过滤/大节越界/转义与 CRLF/开学日解析/手动入参校验/转义函数；批次 3 新增 3：override 幂等覆盖/整批撤销/auto_applied 置信度）、campus-schedule 37（diff 11 + notice 12：高置信/缺要素/同名多门/0 命中书名号/停课/「本周」与区间/节次/星期/教室形态/类型关键词/noticeId 稳定）、campus-portal 49；4 个 ignored 为 cas_live/jwglxt_live/captcha 评测，待真机凭据）。
+错误码→中文消息映射、重试状态机、计数提示解析与接近阈值文案、`login_saved` 解密失败路径（坏密文/账号不存在，不发起网络请求）、用户名打码（`mask_username`：前 2 位 + 末位，`auth.rs:157-165`）；profile 侧头像优先级轮转、2MB/200KB 体积校验（含 data URL 非法形态）、无会话文案契约；state 侧 session 往返（含 TGT DPAPI 密文落盘断言、TGT 缺省与旧格式兼容，`state.rs:166-224`）；timetable 存储往返 + 缺失/损坏回空（`timetable.rs:70-149`）；**M4 批 2 新增**：`electricity_history.json` 往返/损坏回空/同日同房间覆盖/上限丢最旧/`merge_history` 可交换且幂等/`roomKey` 稳定性与过滤窗口（`infra/electricity_history.rs`），`build_entry` 用三片区 live 原文钉余额提取与 `id` 推导、末级 `tipinfo` 拒绝采集、绑定唯一性与「保存房间不丢绑定」、`SavedRoom.id` 撞号顺延（`commands/electricity_history.rs` + `commands/electricity.rs`）。
+
+**当前全量**：`cargo test --workspace` = **322 passed / 0 failed / 13 ignored**（2026-09-19 M4 批 2 实跑；分目标 campus-auth 34、campus-hub 110、campus-portal 54、campus-schedule 55、campus-synjones 66 + 集成 3；13 个 ignored 全是需校园网/真机凭据的 live 测试，**开发期不跑**——会顶掉用户正在用的会话）。更早的分批计数（M2.5 批次 3 的 146/4）已随历次批次累加，以本次为准。
