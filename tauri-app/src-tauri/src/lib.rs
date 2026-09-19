@@ -68,7 +68,6 @@ pub fn run() {
             commands::electricity::get_electricity_rooms,
             commands::electricity::save_electricity_room,
             commands::electricity::delete_electricity_room,
-            commands::electricity::open_recharge_page,
             commands::electricity::open_recharge_in_browser,
         ])
         .run(tauri::generate_context!())

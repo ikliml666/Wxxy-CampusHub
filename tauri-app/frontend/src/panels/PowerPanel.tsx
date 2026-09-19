@@ -44,7 +44,8 @@ export function isNegativeLine(line: string): boolean {
 }
 
 /**
- * 电费页（M3 批 3）：片区 → 校区 → 楼栋 → 房间 级联查余额，常用房间本地存，充值是应用内 webview。
+ * 电费页（M3 批 3）：片区 → 校区 → 楼栋 → 房间 级联查余额，常用房间本地存，充值走官方页面
+ * （系统浏览器打开；客户端直调官方接口的充值在后续批次接入）。
  *
  * 两条 live 实测约束体现在 UI 上：
  * ① 末级（房间）是**输入级**（片区 `lastLevelIsInput`）：服务端在末级前一档不下发选项，
@@ -228,29 +229,10 @@ export function PowerPanel() {
     void runQuery(room.feeitemId, room.path);
   };
 
-  /** 充值：应用内 webview（官方页面，已是登录态）；`inBrowser` 为退路。 */
-  const recharge = async (inBrowser: boolean) => {
+  /** 充值：在系统浏览器打开官方充值页（2026-09-19 裁决：不做内嵌官方界面）。 */
+  const recharge = async () => {
     if (!areaId) return;
-    const args = inBrowser
-      ? { feeitemId: areaId }
-      : {
-          feeitemId: areaId,
-          // 房间参数仅用于「同一房间复用同一窗口」，官方页无法预填房间（其级联靠平台侧绑定）
-          room:
-            steps.length === levels.length
-              ? {
-                  id: steps[steps.length - 1]?.value ?? "",
-                  feeitemId: areaId,
-                  feeitemName: area?.name ?? "",
-                  path: steps,
-                  label: "",
-                }
-              : null,
-        };
-    const r = await invokeCommand(
-      inBrowser ? "open_recharge_in_browser" : "open_recharge_page",
-      args,
-    );
+    const r = await invokeCommand("open_recharge_in_browser", { feeitemId: areaId });
     setNotice(r.success ? "" : (r.message ?? "打开充值页失败"));
   };
 
@@ -482,12 +464,9 @@ export function PowerPanel() {
                 )}
 
                 <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <Button size="sm" onClick={() => void recharge(false)}>
+                  <Button size="sm" onClick={() => void recharge()}>
                     <Zap />
-                    去充值
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => void recharge(true)}>
-                    在浏览器打开
+                    去官网充值
                   </Button>
                   {notice && <span className="text-caption text-text-2">{notice}</span>}
                 </div>
@@ -497,11 +476,8 @@ export function PowerPanel() {
             {/* 未到末级也允许直接充值（官方页里可以自己选房间） */}
             {!view && phase !== "error" && (
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => void recharge(false)}>
-                  去充值
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => void recharge(true)}>
-                  在浏览器打开
+                <Button variant="outline" size="sm" onClick={() => void recharge()}>
+                  去官网充值
                 </Button>
                 {notice && <span className="text-caption text-text-2">{notice}</span>}
               </div>
