@@ -85,7 +85,10 @@ function previousOrSame(d: Date, firstDay: number): Date {
   return out;
 }
 
-/** 周次列表 → 紧凑文案："1-16" / "1,3,5" / "1-8,10"。 */
+/** 周次列表 → 紧凑文案："1-16" / "1,3,5(单周)" / "1-8,10"。
+ *  单双周后缀（批 5 §11.6，与 Rust crates/campus-schedule/src/diff.rs::format_weeks
+ *  同语义互锚，改一处必须同步另一处）：全奇数且 ≥3 项 → `(单周)`；全偶数
+ *  （任意项数）→ `(双周)`；其余不变。 */
 function fmtWeeks(weeks: number[]): string {
   if (weeks.length === 0) return "—";
   const sorted = [...weeks].sort((a, b) => a - b);
@@ -102,13 +105,25 @@ function fmtWeeks(weeks: number[]): string {
     prev = w;
   }
   parts.push(start === prev ? `${start}` : `${start}-${prev}`);
-  return parts.join(",");
+  const out = parts.join(",");
+  if (sorted.length >= 3 && sorted.every((w) => w % 2 === 1)) return `${out}(单周)`;
+  if (sorted.every((w) => w % 2 === 0)) return `${out}(双周)`;
+  return out;
 }
 
-/** 表单周次文本 → 显式周次列表（"1-8,10" / "1、3" 混排）；非法返回 null。 */
+/** 课程的时刻标签（批 5 §11.2）：custom 课显示自定义起止时刻，节次课显示小节范围。 */
+function courseTimeLabel(c: Course): string {
+  if (c.isCustomTime && c.customStartTime && c.customEndTime)
+    return `${c.customStartTime}-${c.customEndTime}`;
+  return `${c.startSection ?? "?"}-${c.endSection ?? "?"} 节`;
+}
+
+/** 表单周次文本 → 显式周次列表（"1-8,10" / "1、3" 混排）；非法返回 null。
+ *  容忍 fmtWeeks 回显的尾随 `(单周)/(双周)` 后缀（批 5 §11.6）。 */
 function parseWeeksInput(text: string): number[] | null {
+  const cleaned = text.replace(/\((单周|双周)\)\s*$/, "").trim();
   const out = new Set<number>();
-  for (const part of text.split(/[,，、\s]+/).filter(Boolean)) {
+  for (const part of cleaned.split(/[,，、\s]+/).filter(Boolean)) {
     const m = part.match(/^(\d+)(?:[-–~](\d+))?$/);
     if (!m) return null;
     const a = Number(m[1]);
@@ -169,6 +184,42 @@ function lastOverride(
   return null;
 }
 
+/** "HH:MM" → 分钟数；非法返回 null（批 5 §11.2 custom 相交判定用）。 */
+function parseHmMinutes(hm: string): number | null {
+  const m = hm.match(/^(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+/** custom 课（按时刻，无节次）→ 网格落块（批 5 §11.2）：取与各大节区间
+ *  **闭区间相交**（端点相触算相交：`start <= slot.endTime && slot.startTime <= end`）
+ *  的大节号的 min..max（中间空档一并覆盖）。无相交大节（如整段落在课间空隙）
+ *  或时间非法（非 HH:MM / end <= start）→ null：网格不渲染，仅详情/列表可见。 */
+function customBlockRange(
+  startHm: string,
+  endHm: string,
+  slots: TimeSlot[],
+): { startBlock: number; endBlock: number } | null {
+  const start = parseHmMinutes(startHm);
+  const end = parseHmMinutes(endHm);
+  if (start == null || end == null || end <= start) return null;
+  let startBlock: number | null = null;
+  let endBlock: number | null = null;
+  for (const s of slots) {
+    const ss = parseHmMinutes(s.startTime);
+    const se = parseHmMinutes(s.endTime);
+    if (ss == null || se == null) continue;
+    if (start <= se && ss <= end) {
+      if (startBlock == null || s.number < startBlock) startBlock = s.number;
+      if (endBlock == null || s.number > endBlock) endBlock = s.number;
+    }
+  }
+  return startBlock != null && endBlock != null ? { startBlock, endBlock } : null;
+}
+
 function buildWeekBlocks(
   view: TimetableView,
   week: number,
@@ -179,9 +230,6 @@ function buildWeekBlocks(
 
   for (const course of courses) {
     if (course.disabled || !course.weeks.includes(week)) continue;
-    if (course.startSection == null || course.endSection == null) continue;
-    const startBlock = blockOf(course.startSection);
-    const endBlock = blockOf(course.endSection);
     const resched = lastOverride(
       overrides,
       (o) => o.courseId === course.id && o.changeType === "rescheduled" && o.weeks.includes(week),
@@ -208,23 +256,43 @@ function buildWeekBlocks(
       ghost,
     });
 
+    /** 原时段落块（批 5 §11.2）：custom 课按 custom 时刻与各大节相交取 min..max
+     *  大节，节次课按小节折算大节；null = 无可渲染时段（custom 无相交/时间非法，
+     *  或无节次）→ 不渲染仅详情/列表可见。 */
+    const origRange: { startBlock: number; endBlock: number } | null = course.isCustomTime
+      ? course.customStartTime && course.customEndTime
+        ? customBlockRange(course.customStartTime, course.customEndTime, view.slots)
+        : null
+      : course.startSection != null && course.endSection != null
+        ? { startBlock: blockOf(course.startSection), endBlock: blockOf(course.endSection) }
+        : null;
+
     // 停课优先（冻结契约 §2.5.1 两档）：newDay 有值 = 只停「该周 · 星期 newDay」
     // 那一次——该课当天有排课才渲染虚线「已停」占位，本周其他星期的同课不受影响
     // （同课另一天的记录由挂在其 courseId 上的 override 单独处理）；
     // newDay = null = 通知未提星期 → 该课在 weeks 列出的周次内整周全停，
-    // 该周该课所有原时段渲染虚线「已停」。
+    // 该周该课所有原时段渲染虚线「已停」。custom 课按相交大节出占位。
     if (cancel && (cancel.newDay == null || cancel.newDay === course.day)) {
-      blocks.push(mk(course.day, startBlock, endBlock, course.position, cancel, "cancelled"));
+      if (origRange)
+        blocks.push(
+          mk(course.day, origRange.startBlock, origRange.endBlock, course.position, cancel, "cancelled"),
+        );
       continue;
     }
-    // 调课且新时间 ≠ 原时间 → 原时段虚线占位 + 新时段实体块
+    // 调课且新时间 ≠ 原时间 → 原时段虚线占位 + 新时段实体块（custom 课被调
+    // 也走新节次——契约 §8.4：新节次取 override 的 new_*，不取 custom 时刻）
     if (
       resched &&
       resched.newDay != null &&
       resched.newStartSection != null &&
-      (resched.newDay !== course.day || blockOf(resched.newStartSection) !== startBlock)
+      (resched.newDay !== course.day ||
+        !origRange ||
+        blockOf(resched.newStartSection) !== origRange.startBlock)
     ) {
-      blocks.push(mk(course.day, startBlock, endBlock, course.position, resched, "moved-out"));
+      if (origRange)
+        blocks.push(
+          mk(course.day, origRange.startBlock, origRange.endBlock, course.position, resched, "moved-out"),
+        );
       const newStart = blockOf(resched.newStartSection);
       // 单节补调：结束 = 起始（复核 P2 修复：缺省必须用已折算的大节 newStart，
       // 误用 raw 小节号会把块拉高数倍并挤压同列分列——与 Rust
@@ -236,10 +304,11 @@ function buildWeekBlocks(
       blocks.push(mk(resched.newDay, newStart, newEnd, resched.newPosition ?? course.position, resched, null));
       continue;
     }
-    // 原地（可能仅换教室）
-    blocks.push(
-      mk(course.day, startBlock, endBlock, resched?.newPosition ?? course.position, resched, null),
-    );
+    // 原地（可能仅换教室）；custom 课无相交大节 → origRange 为 null，仅列表可见
+    if (origRange)
+      blocks.push(
+        mk(course.day, origRange.startBlock, origRange.endBlock, resched?.newPosition ?? course.position, resched, null),
+      );
   }
 
   // 补课叠加：新时段新增实体块（独立于上方课程实体块分支——停课/调课周的补课
@@ -359,6 +428,9 @@ function CourseForm({
     weeks: number[];
     colorIndex: number;
     remark: string | null;
+    isCustomTime: boolean;
+    customStartTime: string | null;
+    customEndTime: string | null;
   }) => void;
   onCancel: () => void;
 }) {
@@ -375,7 +447,35 @@ function CourseForm({
     typeof initial.colorIndex === "number" ? initial.colorIndex % COURSE_PALETTE.length : 0,
   );
   const [remark, setRemark] = useState(initial.remark ?? "");
+  // 「按时刻」模式（批 5 §11.1）：导入课编辑不出现开关（永远节次制）
+  const [isCustomTime, setIsCustomTime] = useState(initial.isCustomTime ?? false);
+  const [customStartTime, setCustomStartTime] = useState(initial.customStartTime ?? "");
+  const [customEndTime, setCustomEndTime] = useState(initial.customEndTime ?? "");
   const [localErr, setLocalErr] = useState<string | null>(null);
+
+  // dirty 检测（批 5 §11.4）：state 与打开时 initial 快照比较；取消时确认放弃
+  const snapshot = () =>
+    JSON.stringify({
+      name,
+      teacher,
+      position,
+      day,
+      startSection,
+      endSection,
+      weeksText,
+      colorIndex,
+      remark,
+      isCustomTime,
+      customStartTime,
+      customEndTime,
+    });
+  const initialSnapRef = useRef<string | null>(null);
+  if (initialSnapRef.current === null) initialSnapRef.current = snapshot();
+  const dirty = snapshot() !== initialSnapRef.current;
+  const requestCancel = () => {
+    if (dirty && !window.confirm("放弃未保存的修改？")) return;
+    onCancel();
+  };
 
   const quickWeeks = (kind: "all" | "odd" | "even") => {
     const ws: number[] = [];
@@ -391,6 +491,8 @@ function CourseForm({
     const weeks = parseWeeksInput(weeksText);
     if (!name.trim()) return setLocalErr("课程名不能为空");
     if (!weeks) return setLocalErr("周次格式无法识别，示例：1-16 或 1,3,5-8");
+    if (isCustomTime && (!customStartTime || !customEndTime || customEndTime <= customStartTime))
+      return setLocalErr("自定义时间需填写起止，且结束须晚于开始");
     setLocalErr(null);
     onSubmit({
       name: name.trim(),
@@ -402,6 +504,9 @@ function CourseForm({
       weeks,
       colorIndex,
       remark: remark.trim() || null,
+      isCustomTime,
+      customStartTime: isCustomTime ? customStartTime : null,
+      customEndTime: isCustomTime ? customEndTime : null,
     });
   };
 
@@ -446,34 +551,78 @@ function CourseForm({
             ))}
           </select>
         </div>
-        <div className={field}>
-          <label className={label} htmlFor="tf-start">起始小节</label>
-          <select
-            id="tf-start"
-            value={startSection}
-            onChange={(e) => setStartSection(Number(e.target.value))}
-            className="h-9 rounded-control border border-line bg-surface px-2 text-body text-text"
-          >
-            {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>第 {n} 小节</option>
-            ))}
-          </select>
-        </div>
-        <div className={field}>
-          <label className={label} htmlFor="tf-end">结束小节（含）</label>
-          <select
-            id="tf-end"
-            value={Math.max(endSection, startSection)}
-            onChange={(e) => setEndSection(Number(e.target.value))}
-            className="h-9 rounded-control border border-line bg-surface px-2 text-body text-text"
-          >
-            {Array.from({ length: 12 }, (_, i) => i + 1)
-              .filter((n) => n >= startSection)
-              .map((n) => (
-                <option key={n} value={n}>第 {n} 小节</option>
-              ))}
-          </select>
-        </div>
+        {/* 「按时刻」开关（批 5 §11.1）：导入课编辑不出现（永远节次制） */}
+        {!(editing && initial.source === "import") && (
+          <div className={cn(field, "sm:col-span-2 lg:col-span-3")}>
+            <label className="flex items-center gap-2 text-body text-text">
+              <input
+                type="checkbox"
+                checked={isCustomTime}
+                onChange={(e) => setIsCustomTime(e.target.checked)}
+                className="size-4 accent-sched"
+              />
+              按时刻
+              <span className="text-caption text-text-2">
+                自定义起止时间（不按小节）；网格按与大节相交的时段落块
+              </span>
+            </label>
+          </div>
+        )}
+        {isCustomTime ? (
+          <>
+            <div className={field}>
+              <label className={label} htmlFor="tf-custom-start">开始时刻</label>
+              <input
+                id="tf-custom-start"
+                type="time"
+                value={customStartTime}
+                onChange={(e) => setCustomStartTime(e.target.value)}
+                className="tabular-num h-9 rounded-control border border-line bg-surface px-2 text-body text-text"
+              />
+            </div>
+            <div className={field}>
+              <label className={label} htmlFor="tf-custom-end">结束时刻</label>
+              <input
+                id="tf-custom-end"
+                type="time"
+                value={customEndTime}
+                onChange={(e) => setCustomEndTime(e.target.value)}
+                className="tabular-num h-9 rounded-control border border-line bg-surface px-2 text-body text-text"
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className={field}>
+              <label className={label} htmlFor="tf-start">起始小节</label>
+              <select
+                id="tf-start"
+                value={startSection}
+                onChange={(e) => setStartSection(Number(e.target.value))}
+                className="h-9 rounded-control border border-line bg-surface px-2 text-body text-text"
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={n}>第 {n} 小节</option>
+                ))}
+              </select>
+            </div>
+            <div className={field}>
+              <label className={label} htmlFor="tf-end">结束小节（含）</label>
+              <select
+                id="tf-end"
+                value={Math.max(endSection, startSection)}
+                onChange={(e) => setEndSection(Number(e.target.value))}
+                className="h-9 rounded-control border border-line bg-surface px-2 text-body text-text"
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1)
+                  .filter((n) => n >= startSection)
+                  .map((n) => (
+                    <option key={n} value={n}>第 {n} 小节</option>
+                  ))}
+              </select>
+            </div>
+          </>
+        )}
         <div className={cn(field, "sm:col-span-2")}>
           <label className={label} htmlFor="tf-weeks">周次（示例 1-16 或 1,3,5-8）</label>
           <div className="flex items-center gap-1.5">
@@ -515,10 +664,20 @@ function CourseForm({
           </div>
         </div>
         <div className={cn(field, "sm:col-span-2 lg:col-span-3")}>
-          <label className={label} htmlFor="tf-remark">
-            {editing && initial.source === "import" ? "性质 · 考核方式" : "备注"}
-          </label>
-          <Input id="tf-remark" value={remark} onChange={(e) => setRemark(e.target.value)} />
+          <div className="flex items-center justify-between">
+            <label className={label} htmlFor="tf-remark">
+              {editing && initial.source === "import" ? "性质 · 考核方式" : "备注"}
+            </label>
+            <span className="tabular-num text-caption text-text-2">{remark.length}/300</span>
+          </div>
+          <textarea
+            id="tf-remark"
+            value={remark}
+            maxLength={300}
+            rows={2}
+            onChange={(e) => setRemark(e.target.value)}
+            className="min-h-[56px] rounded-control border border-line bg-surface px-3 py-2 text-body text-text placeholder:text-text-2/60"
+          />
         </div>
       </div>
       {(localErr ?? error) && (
@@ -530,7 +689,7 @@ function CourseForm({
         <Button onClick={submit} disabled={busy}>
           {busy ? "保存中…" : editing ? "保存修改" : "添加课程"}
         </Button>
-        <Button variant="outline" onClick={onCancel} disabled={busy}>
+        <Button variant="outline" onClick={requestCancel} disabled={busy}>
           取消
         </Button>
       </div>
@@ -594,6 +753,17 @@ function SlotRowsEditor({
             aria-label={`第 ${i + 1} 大节结束时间`}
             disabled={disabled}
             className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+          />
+          {/* 别名（批 5 §11.3，maxlength 5 选填；保存随 TimeSlot.alias 透传，后端零改动） */}
+          <input
+            type="text"
+            value={r.alias ?? ""}
+            maxLength={5}
+            placeholder="别名"
+            aria-label={`第 ${i + 1} 大节别名（选填）`}
+            onChange={(e) => update(i, { alias: e.target.value || null })}
+            disabled={disabled}
+            className="h-9 w-20 shrink-0 rounded-control border border-line bg-surface px-2 text-caption text-text placeholder:text-text-2/60 disabled:opacity-50"
           />
           <button
             type="button"
@@ -665,14 +835,34 @@ function SlotsEditor({
   );
   const [rulesLocalErr, setRulesLocalErr] = useState<string | null>(null);
 
+  // dirty 检测（批 5 §11.4）：state 与打开时快照比较（主作息与规则任一变化即 dirty）；
+  // 取消 / Esc / 遮罩关闭三条路径统一走 requestClose 确认放弃
+  const dirty =
+    JSON.stringify(rows) !==
+      JSON.stringify(
+        initial.map((s) => ({ startTime: s.startTime, endTime: s.endTime, alias: s.alias })),
+      ) ||
+    JSON.stringify(rules) !==
+      JSON.stringify(
+        initialRules.map((r) => ({
+          startDate: r.startDate,
+          endDate: r.endDate,
+          rows: r.slots.map((s) => ({ startTime: s.startTime, endTime: s.endTime, alias: s.alias })),
+        })),
+      );
+  const requestClose = () => {
+    if (dirty && !window.confirm("放弃未保存的修改？")) return;
+    onClose();
+  };
+
   // Esc 关闭（busy 时忽略）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy && !rulesBusy) onClose();
+      if (e.key === "Escape" && !busy && !rulesBusy) requestClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [busy, rulesBusy, onClose]);
+  }, [busy, rulesBusy, requestClose]);
 
   const updateRule = (i: number, patch: Partial<{ startDate: string; endDate: string; rows: SlotRow[] }>) =>
     setRules((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -721,7 +911,7 @@ function SlotsEditor({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
+        if (e.target === e.currentTarget && !busy) requestClose();
       }}
     >
       <div
@@ -825,7 +1015,7 @@ function SlotsEditor({
             恢复本校默认
           </Button>
           <span className="flex-1" />
-          <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>
+          <Button variant="outline" size="sm" disabled={busy} onClick={requestClose}>
             取消
           </Button>
           <Button size="sm" disabled={busy} onClick={submit}>
@@ -1273,8 +1463,10 @@ export function TimetablePanel() {
     setDrag(d);
   }, []);
 
-  /** 可拖块：实体块且非 extra 补课；ghost（已停/已调出）不可拖（契约 §10.3）。 */
-  const isDraggable = (b: PlacedBlock) => b.ghost === null && b.override?.changeType !== "extra";
+  /** 可拖块：实体块且非 extra 补课；ghost（已停/已调出）不可拖（契约 §10.3）；
+   *  custom 课（startSection 为 null）无法生成 override 节次，不可拖（契约 §11.2）。 */
+  const isDraggable = (b: PlacedBlock) =>
+    b.ghost === null && b.override?.changeType !== "extra" && b.course.startSection != null;
 
   /** 落点命中测试（契约 §10.2 纯前端几何，不走 grid.rs 互转）：显示列 = 天列 rect
    *  命中（网格外 clamp 到首/末列）；目标大节 = clamp(floor((y-网格顶)/ROW_H)+1,
@@ -1530,14 +1722,28 @@ export function TimetablePanel() {
     weeks: number[];
     colorIndex: number;
     remark: string | null;
+    isCustomTime: boolean;
+    customStartTime: string | null;
+    customEndTime: string | null;
   }) => {
     setFormError(null);
     setBusyKey(null);
     if (editing) {
+      // custom 课无节次（契约 §8.4/§11.1）；节次课自定义时刻强制清空（§11.1 不变式）
       const updated: Course = {
         ...editing,
-        ...payload,
-        isCustomTime: false,
+        name: payload.name,
+        teacher: payload.teacher,
+        position: payload.position,
+        day: payload.day,
+        weeks: payload.weeks,
+        colorIndex: payload.colorIndex,
+        remark: payload.remark,
+        startSection: payload.isCustomTime ? null : payload.startSection,
+        endSection: payload.isCustomTime ? null : payload.endSection,
+        isCustomTime: payload.isCustomTime,
+        customStartTime: payload.customStartTime,
+        customEndTime: payload.customEndTime,
       };
       const r = await invokeCommand<Course>("update_course", { course: updated });
       if (r.success) {
@@ -1869,6 +2075,12 @@ export function TimetablePanel() {
                     <span className="tabular-num text-body font-medium text-text-2">
                       {s.number}
                     </span>
+                    {/* 节次别名（批 5 §11.3）：有 alias 时节号下显示小字 */}
+                    {s.alias && (
+                      <span className="max-w-[52px] truncate text-caption text-sched" title={s.alias}>
+                        {s.alias}
+                      </span>
+                    )}
                     <span className="tabular-num text-caption opacity-60 text-text-2">
                       {s.startTime}
                     </span>
@@ -2085,7 +2297,7 @@ export function TimetablePanel() {
                       {c.teacher && <div>教师：{c.teacher}</div>}
                       {c.classId && <div className="truncate">教学班：{c.classId}</div>}
                       <div className="tabular-num">
-                        {DAY_NAMES[c.day]} {c.startSection ?? "?"}-{c.endSection ?? "?"} 小节
+                        {DAY_NAMES[c.day]} {courseTimeLabel(c)}
                         （第 {fmtWeeks(c.weeks)} 周）
                       </div>
                       {c.position && <div>教室：{c.position}</div>}
@@ -2339,7 +2551,7 @@ export function TimetablePanel() {
                       <span className="shrink-0 rounded bg-line px-1 text-caption text-text-2">已停开</span>
                     )}
                     <span className="tabular-num min-w-0 truncate text-caption text-text-2">
-                      {DAY_NAMES[c.day]} {c.startSection ?? "?"}-{c.endSection ?? "?"} 节 · 第 {fmtWeeks(c.weeks)} 周
+                      {DAY_NAMES[c.day]} {courseTimeLabel(c)} · 第 {fmtWeeks(c.weeks)} 周
                       {c.position && ` · ${c.position}`}
                       {c.teacher && ` · ${c.teacher}`}
                     </span>

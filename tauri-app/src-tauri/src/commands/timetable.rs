@@ -123,7 +123,8 @@ pub struct ImportResult {
     pub changes: Vec<String>,
 }
 
-/// add_course_manual 入参（冻结契约 §2.3，camelCase）。
+/// add_course_manual 入参（冻结契约 §2.3 + 批 5 §11.1，camelCase；新增字段
+/// serde default 容忍旧调用方/旧 JSON）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualCourseInput {
@@ -142,6 +143,21 @@ pub struct ManualCourseInput {
     pub color_index: u16,
     #[serde(default)]
     pub remark: Option<String>,
+    /// 「按时刻」模式（批 5 §11.1）：true 时忽略节次、采用 custom_*_time
+    #[serde(default)]
+    pub is_custom_time: bool,
+    #[serde(default)]
+    pub custom_start_time: Option<String>,
+    #[serde(default)]
+    pub custom_end_time: Option<String>,
+}
+
+/// 备注双保险截断（批 5 §11.5：前端 maxLength 300，后端 `chars().take(300)`
+/// 防绕过；按字符截断保证多字节中文不截出非法 UTF-8）。
+fn truncate_remark(remark: &mut Option<String>) {
+    if let Some(r) = remark {
+        *r = r.chars().take(300).collect();
+    }
 }
 
 /// 从教务导入课表：SSO → 拉取 → diff 旧库 → 落库 → 返回变更摘要。
@@ -268,7 +284,18 @@ fn validate_manual_input(input: &ManualCourseInput) -> Result<(), String> {
     if !(1..=7).contains(&input.day) {
         return Err("星期必须在周一至周日之间".to_string());
     }
-    if input.start_section == 0 || input.end_section < input.start_section {
+    if input.is_custom_time {
+        // 批 5 §11.1：custom 模式起止必填、HH:MM 合法、结束晚于开始
+        let (Some(s), Some(e)) = (&input.custom_start_time, &input.custom_end_time) else {
+            return Err("自定义时间需填写开始与结束时间".to_string());
+        };
+        let (Some(ps), Some(pe)) = (parse_hm(s), parse_hm(e)) else {
+            return Err("自定义时间格式必须是 HH:MM（如 18:00）".to_string());
+        };
+        if pe <= ps {
+            return Err("自定义结束时间必须晚于开始时间".to_string());
+        }
+    } else if input.start_section == 0 || input.end_section < input.start_section {
         return Err("节次范围无效".to_string());
     }
     if input.weeks.is_empty() || input.weeks.iter().any(|&w| w == 0) {
@@ -283,6 +310,19 @@ pub async fn add_course_manual(input: ManualCourseInput) -> Result<CommandResult
     if let Err(e) = validate_manual_input(&input) {
         return Ok(CommandResult::err(&e));
     }
+    let mut remark = input.remark;
+    truncate_remark(&mut remark);
+    // 批 5 §11.1：custom 模式无节次（§8.4 口径），非 custom 时刻强制 None
+    let (start_section, end_section, custom_start, custom_end) = if input.is_custom_time {
+        (
+            None,
+            None,
+            input.custom_start_time.clone(),
+            input.custom_end_time.clone(),
+        )
+    } else {
+        (Some(input.start_section), Some(input.end_section), None, None)
+    };
     let course = Course {
         id: new_manual_id(),
         course_table_id: timetable::DEFAULT_TABLE_ID.to_string(),
@@ -290,13 +330,13 @@ pub async fn add_course_manual(input: ManualCourseInput) -> Result<CommandResult
         teacher: input.teacher.trim().to_string(),
         position: input.position.trim().to_string(),
         day: input.day,
-        start_section: Some(input.start_section),
-        end_section: Some(input.end_section),
-        is_custom_time: false,
-        custom_start_time: None,
-        custom_end_time: None,
+        start_section,
+        end_section,
+        is_custom_time: input.is_custom_time,
+        custom_start_time: custom_start,
+        custom_end_time: custom_end,
         color_index: input.color_index,
-        remark: input.remark,
+        remark,
         source: campus_schedule::model::CourseSource::Manual,
         weeks: input.weeks,
         class_id: None,
@@ -314,7 +354,8 @@ pub async fn add_course_manual(input: ManualCourseInput) -> Result<CommandResult
 
 /// 用户手工编辑课程（任意来源；自动更新仍只覆盖 Import 课程）。
 #[tauri::command]
-pub async fn update_course(course: Course) -> Result<CommandResult<Course>, String> {
+pub async fn update_course(mut course: Course) -> Result<CommandResult<Course>, String> {
+    truncate_remark(&mut course.remark); // 批 5 §11.5 双保险
     let dir = state::data_dir()?;
     match mutate_timetable(&dir, |tt| {
         match tt.courses.iter_mut().find(|c| c.id == course.id) {
@@ -1039,6 +1080,9 @@ mod tests {
             weeks: vec![1, 2],
             color_index: 0,
             remark: None,
+            is_custom_time: false,
+            custom_start_time: None,
+            custom_end_time: None,
         };
         assert!(validate_manual_input(&ok).is_ok());
         let blank = ManualCourseInput { name: "  ".into(), ..ok.clone() };
@@ -1051,6 +1095,95 @@ mod tests {
         assert!(validate_manual_input(&bad_weeks).unwrap_err().contains("周次"));
         let zero_week = ManualCourseInput { weeks: vec![0], ..ok };
         assert!(validate_manual_input(&zero_week).unwrap_err().contains("周次"));
+    }
+
+    // ---------------- 批 5：手动课程自定义时间与备注截断（契约 §11.1/§11.5） ----------------
+
+    fn manual_custom(start: Option<&str>, end: Option<&str>) -> ManualCourseInput {
+        ManualCourseInput {
+            name: "科研例会".into(),
+            teacher: String::new(),
+            position: String::new(),
+            day: 3,
+            start_section: 1,
+            end_section: 2,
+            weeks: vec![1],
+            color_index: 0,
+            remark: None,
+            is_custom_time: true,
+            custom_start_time: start.map(Into::into),
+            custom_end_time: end.map(Into::into),
+        }
+    }
+
+    /// custom 模式校验（契约 §11.1）：缺起止 / 坏格式 / end <= start 逐项拒绝；
+    /// 合法 custom 通过；非 custom 模式忽略 custom 字段。
+    #[test]
+    fn manual_input_custom_time_validation() {
+        assert!(validate_manual_input(&manual_custom(Some("18:00"), Some("19:30"))).is_ok());
+        // 起止缺失
+        assert!(validate_manual_input(&manual_custom(None, Some("19:30")))
+            .unwrap_err()
+            .contains("填写开始与结束时间"));
+        assert!(validate_manual_input(&manual_custom(Some("18:00"), None))
+            .unwrap_err()
+            .contains("填写开始与结束时间"));
+        // 坏格式
+        assert!(validate_manual_input(&manual_custom(Some("18:0"), Some("19:30")))
+            .unwrap_err()
+            .contains("HH:MM"));
+        assert!(validate_manual_input(&manual_custom(Some("25:00"), Some("26:00")))
+            .unwrap_err()
+            .contains("HH:MM"));
+        // end <= start
+        assert!(validate_manual_input(&manual_custom(Some("19:30"), Some("18:00")))
+            .unwrap_err()
+            .contains("晚于"));
+        assert!(validate_manual_input(&manual_custom(Some("18:00"), Some("18:00")))
+            .unwrap_err()
+            .contains("晚于"));
+
+        // 非 custom 模式：custom 字段即使非法/缺失也忽略，节次校验照常
+        let section = ManualCourseInput { is_custom_time: false, ..manual_custom(None, None) };
+        assert!(validate_manual_input(&section).is_ok());
+        let section_bad = ManualCourseInput {
+            is_custom_time: false,
+            start_section: 0,
+            ..manual_custom(Some("18:00"), Some("19:30"))
+        };
+        assert!(validate_manual_input(&section_bad).unwrap_err().contains("节次"));
+    }
+
+    /// 批 5 §11.1：旧调用方/旧 JSON（无 isCustomTime 等键）反序列化无损 →
+    /// 缺省 false / None，节次模式不受影响。
+    #[test]
+    fn manual_input_legacy_json_without_custom_fields_opens_clean() {
+        let input: ManualCourseInput = serde_json::from_str(
+            r#"{"name":"自习","day":6,"startSection":1,"endSection":2,"weeks":[1,2],"colorIndex":0}"#,
+        )
+        .unwrap();
+        assert!(!input.is_custom_time);
+        assert_eq!(input.custom_start_time, None);
+        assert_eq!(input.custom_end_time, None);
+        assert!(validate_manual_input(&input).is_ok());
+    }
+
+    /// 备注双保险截断（契约 §11.5）：300 字以内原样，301 字截 300（按字符，
+    /// 中文不产生非法 UTF-8）；None 保持 None。
+    #[test]
+    fn truncate_remark_takes_300_chars() {
+        let mut none = None;
+        truncate_remark(&mut none);
+        assert_eq!(none, None);
+
+        let mut short = Some("短的备注".into());
+        truncate_remark(&mut short);
+        assert_eq!(short, Some("短的备注".into()));
+
+        let long: String = "备".repeat(301);
+        let mut some = Some(long);
+        truncate_remark(&mut some);
+        assert_eq!(some.unwrap().chars().count(), 300);
     }
 
     /// TEXT 转义函数全覆盖。

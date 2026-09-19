@@ -309,7 +309,8 @@ export interface ImportResult {
   changes: string[];
 }
 
-/** add_course_manual 入参（冻结契约 §2.3）。 */
+/** add_course_manual 入参（冻结契约 §2.3 + 批 5 §11.1）。
+ *  ⚠️ Rust 侧新增字段 serde default：旧调用方可省略 isCustomTime/customStartTime/customEndTime。 */
 export interface ManualCourseInput {
   name: string;
   teacher: string;
@@ -323,6 +324,12 @@ export interface ManualCourseInput {
   /** 前端色板下标 */
   colorIndex: number;
   remark?: string | null;
+  /** 「按时刻」模式（批 5 §11.1）：true 时后端忽略节次、落库节次 null */
+  isCustomTime?: boolean;
+  /** "HH:MM"；custom 模式必填 */
+  customStartTime?: string | null;
+  /** "HH:MM"；custom 模式必填 */
+  customEndTime?: string | null;
 }
 
 /** 解析置信度。high = 要素齐全且课程名唯一精确匹配（自动应用）；low = 待确认。 */

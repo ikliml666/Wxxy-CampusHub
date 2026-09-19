@@ -100,6 +100,8 @@ fn format_sections(start: Option<u8>, end: Option<u8>) -> String {
 }
 
 /// 周次列表 → 紧凑文案：连续区间合并（`1,2,3,7,8` → `1-3,7-8`）。
+/// 单双周后缀（批 5 §11.6，与前端 fmtWeeks 同语义互锚，改一处必须同步另一处）：
+/// 全奇数且 ≥3 项 → 追加 `(单周)`；全偶数（任意项数）→ 追加 `(双周)`；其余不变。
 pub fn format_weeks(weeks: &[u32]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut iter = weeks.iter().copied();
@@ -117,7 +119,14 @@ pub fn format_weeks(weeks: &[u32]) -> String {
         run_prev = w;
     }
     push_week_run(&mut parts, run_start, run_prev);
-    parts.join(",")
+    let out = parts.join(",");
+    if weeks.len() >= 3 && weeks.iter().all(|w| w % 2 == 1) {
+        return format!("{out}(单周)");
+    }
+    if weeks.iter().all(|w| w % 2 == 0) {
+        return format!("{out}(双周)");
+    }
+    out
 }
 
 fn push_week_run(parts: &mut Vec<String>, start: u32, end: u32) {
@@ -351,6 +360,21 @@ mod tests {
         assert_eq!(format_weeks(&[]), "");
         // 教务 4095 位掩码展开 1..=12 → "1-12"
         assert_eq!(format_weeks(&crate::expand_week_mask(4095)), "1-12");
+    }
+
+    /// 单双周后缀（批 5 §11.6，与前端 fmtWeeks 同语义互锚）：全奇 ≥3 项 →
+    /// `(单周)`；全偶任意项数 → `(双周)`；混合 / 全奇不足 3 项 / 空列表不变。
+    #[test]
+    fn format_weeks_odd_even_suffix() {
+        assert_eq!(format_weeks(&[1, 3, 5]), "1,3,5(单周)");
+        assert_eq!(format_weeks(&[1, 3, 5, 7]), "1,3,5,7(单周)");
+        assert_eq!(format_weeks(&[1, 3, 5, 7, 9, 11, 13, 15]), "1,3,5,7,9,11,13,15(单周)");
+        assert_eq!(format_weeks(&[2, 4, 6]), "2,4,6(双周)");
+        assert_eq!(format_weeks(&[2]), "2(双周)", "全偶任意项数都加后缀");
+        assert_eq!(format_weeks(&[1, 2, 3]), "1-3", "混合奇偶不加后缀");
+        assert_eq!(format_weeks(&[1, 3]), "1,3", "全奇但不足 3 项不加后缀");
+        assert_eq!(format_weeks(&[5]), "5", "单项奇数不加后缀");
+        assert_eq!(format_weeks(&[]), "");
     }
 
     #[test]
