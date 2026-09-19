@@ -17,6 +17,7 @@
 
 - [[learnings\cas-sso-plaintext-redirect|CAS SSO 回跳的三处坑：重定向中断、明文落点、探测误判]]
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
+- [[learnings\tauri-multiwindow-cdp-verification|Tauri 多窗口应用的 CDP 点验：必须按 URL 选 target（附非主窗口 IPC 权限验证法）]]
 - [[learnings\tauri-webview-ui-verification|Tauri/WebView2 真机 UI 验收：vite 供旧模块与点击注入失效的可用替代路径]]
 - [[learnings\meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]
 - [[learnings\cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级设计（content.jsp 系不可抓）]]
@@ -24,12 +25,14 @@
 - [[learnings\subagent-batch-image-labeling|批量图片标注不可靠：改结构化拼图 + 客观特征交叉校验]]
 - [[learnings\jwglxt-sso-chain|正方教务 SSO 链与课表接口取证（ST 绑定 service / TGT 不落 cookie / 901 会话特征）]]
 - [[learnings\kaptcha-arithmetic-five-roots|算术验证码识别：从 2.9% 到 100% 的五个根因]]
+- [[learnings\portal-session-expiry-200-envelope|门户会话失效是 HTTP 200 信封而非错误码（误分类成「解析失败」的连锁）]]
 - [[learnings\portal-block-periods-and-school-timetable|门户大节语义与校本作息（14:50 误报教训）]]
 - [[learnings\portal-avatar-upload-protocol|门户头像上传协议与裁切器踩坑]]
 ## Module
 
 - [[modules\campus-auth|CAS 协议核心（campus-auth）]]
 - [[modules\frontend-shell|前端外壳（frontend-shell）]]
+- [[modules\campus-synjones|慧新E校协议核心（campus-synjones）]]
 - [[modules\campus-hub-tauri|接线层（campus-hub src-tauri）]]
 - [[modules\campus-schedule|课表核心（campus-schedule）]]
 - [[modules\campus-portal|门户业务协议核心（campus-portal）]]
