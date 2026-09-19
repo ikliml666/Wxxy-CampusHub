@@ -695,8 +695,81 @@ export function PowerPanel() {
                     </Button>
                   </div>
                 )}
-              </>
-            )}
+                </>
+              )}
+
+            {/* 常用房间（与「查询房间余额」**同一张卡**）：它本质是查询入口——点「查余额」走的就是
+                同一条级联查询，故由原右列独立卡融合进来（少一张卡、右列更短、操作聚在一处）。 */}
+            <div className="mt-4 border-t border-line pt-3">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-body font-medium text-text">常用房间</p>
+                {sortedRooms.length > 0 && (
+                  <span className="text-caption text-text-2">共 {sortedRooms.length} 个</span>
+                )}
+              </div>
+              {sortedRooms.length === 0 ? (
+                <EmptyState
+                  compact
+                  icon={History}
+                  domain="wallet"
+                  title="还没有常用房间"
+                  hint="查到房间后点「保存房间」，之后可一键查余额。"
+                />
+              ) : (
+                <ul className="mt-2 divide-y divide-line">
+                  {sortedRooms.map((r) => (
+                    <li key={r.id} className="flex items-center gap-3 py-2.5">
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1.5">
+                          {r.bound === true && (
+                            <span
+                              aria-label="我的宿舍"
+                              className="text-wallet inline-flex items-center"
+                            >
+                              <Home aria-hidden className="size-3.5" />
+                            </span>
+                          )}
+                          <span className="block truncate text-body text-text">{r.label}</span>
+                        </span>
+                        <span className="mt-0.5 block truncate text-caption text-text-2">
+                          {[r.feeitemName, r.path.map((s) => s.name || s.value).join(" · ")]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!authed}
+                        onClick={() => openRoom(r)}
+                      >
+                        查余额
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-pressed={r.bound === true}
+                        onClick={() => void toggleBind(r)}
+                      >
+                        {r.bound === true ? "解绑" : "绑定"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`删除 ${r.label}`}
+                        onClick={() => void removeRoom(r.id)}
+                      >
+                        删除
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {roomsNotice && <p className="mt-2 text-caption text-alert">{roomsNotice}</p>}
+              {!authed && rooms.length > 0 && (
+                <p className="mt-2 text-caption text-text-2">登录后才能查询，房间保存在本机。</p>
+              )}
+            </div>
           </Surface>
 
           {/* 结果卡：主数字 = 后端结构化余额 balanceYuan（null ⇒ 无数据，绝不当 0） */}
@@ -860,73 +933,6 @@ export function PowerPanel() {
           />
 
           <ElectricityPaymentsCard authed={authed} openLoginDialog={openLoginDialog} />
-
-          {/* 常用房间：本地存（重启仍在），绑定项置顶标「我的宿舍」 */}
-          <Surface className="px-4 py-4">
-            <p className="text-body font-medium text-text">常用房间</p>
-            {sortedRooms.length === 0 ? (
-              <EmptyState
-                compact
-                icon={History}
-                domain="wallet"
-                title="还没有常用房间"
-                hint="查到房间后点「保存房间」，之后可一键查余额。"
-              />
-            ) : (
-              <ul className="mt-2 divide-y divide-line">
-                {sortedRooms.map((r) => (
-                  <li key={r.id} className="flex items-center gap-3 py-2.5">
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5">
-                        {r.bound === true && (
-                          <span
-                            aria-label="我的宿舍"
-                            className="text-wallet inline-flex items-center"
-                          >
-                            <Home aria-hidden className="size-3.5" />
-                          </span>
-                        )}
-                        <span className="block truncate text-body text-text">{r.label}</span>
-                      </span>
-                      <span className="mt-0.5 block truncate text-caption text-text-2">
-                        {[r.feeitemName, r.path.map((s) => s.name || s.value).join(" · ")]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </span>
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!authed}
-                      onClick={() => openRoom(r)}
-                    >
-                      查余额
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-pressed={r.bound === true}
-                      onClick={() => void toggleBind(r)}
-                    >
-                      {r.bound === true ? "解绑" : "绑定"}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={`删除 ${r.label}`}
-                      onClick={() => void removeRoom(r.id)}
-                    >
-                      删除
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {roomsNotice && <p className="mt-2 text-caption text-alert">{roomsNotice}</p>}
-            {!authed && rooms.length > 0 && (
-              <p className="mt-2 text-caption text-text-2">登录后才能查询，房间保存在本机。</p>
-            )}
-          </Surface>
         </div>
       </div>
     </section>
