@@ -27,7 +27,7 @@ import type {
   JsonImportResult,
   MoveResult,
   NoticeCandidate,
-  ScheduleNoticeBrief,
+  NoticeAutoParse,
   OverrideKind,
   SemesterConfigInput,
   SlotRule,
@@ -70,10 +70,6 @@ const KIND_LABEL: Record<OverrideKind, string> = {
   extra: "补课",
 };
 
-/** 公告发现区强关键词着色表（批 B 契约 §19）：与
- *  crates/campus-portal/src/parse.rs NOTICE_KEYWORDS_STRONG 互锚，命中判定
- *  在后端，前端只用于 tag 着色（强 = 红、弱 = 灰），改词表两处同步。 */
-const NOTICE_STRONG_WORDS = new Set(["调课", "停课", "补课"]);
 
 /** 单小节行高（px）；网格行数 = view.slots.length（契约 §18：生效小节表，默认 11 行）。 */
 const ROW_H_S = 60;
@@ -1569,11 +1565,10 @@ export function TimetablePanel() {
   /** 导入 / 导出聚合弹层（契约 §17）：顶栏单入口，ICS/JSON 导出与 JSON 导入收拢 */
   const [ioOpen, setIoOpen] = useState(false);
 
-  /** 公告发现（批 B 契约 §19）：null = 尚未检查过；noticeMsg/candidates 与
-   *  候选确认流共用（粘贴解析卡片已删，后端 parse_notice 命令保留） */
+  /** 公告自动发现+解析（契约 §21）：一次点击完成扫描→旧通知过滤→逐条解析；
+   *  null = 尚未检查过。candidates 为全部通知候选的扁平合并，确认流不变。 */
   const [scanning, setScanning] = useState(false);
-  const [noticeBriefs, setNoticeBriefs] = useState<ScheduleNoticeBrief[] | null>(null);
-  const [parsingUrl, setParsingUrl] = useState<string | null>(null);
+  const [noticeResults, setNoticeResults] = useState<NoticeAutoParse[] | null>(null);
   const [candidates, setCandidates] = useState<NoticeCandidate[] | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -1995,35 +1990,34 @@ export function TimetablePanel() {
     }
   };
 
-  /** 扫描公告（批 B 契约 §19）：只发现不解析——结果列表供用户逐条点「解析」；
-   *  需登录（未登录/网络错误透传后端中文 message）。 */
-  const scanNotices = async () => {
+  /** 一键自动发现+解析（契约 §21）：扫描→过滤本学期以前的旧通知→逐条解析，
+   *  全部候选合并进确认流（仍不自动 apply）。重复通知的候选 noticeId 相同
+   *  （正文哈希），apply_override 幂等，重复采纳无害。 */
+  const autoParseNotices = async () => {
     setScanning(true);
     setNoticeMsg(null);
-    const r = await invokeCommand<ScheduleNoticeBrief[]>("list_schedule_notices");
+    const r = await invokeCommand<NoticeAutoParse[]>("auto_parse_notices");
     setScanning(false);
-    if (r.success && r.data) {
-      setNoticeBriefs(r.data);
-    } else {
-      setNoticeMsg({ ok: false, text: r.message ?? "公告扫描失败" });
+    if (!r.success || !r.data) {
+      setNoticeMsg({ ok: false, text: r.message ?? "公告自动解析失败" });
+      return;
     }
-  };
-
-  /** 解析单条公告正文（批 B 契约 §19）：结果喂给现有候选确认流（不自动 apply）；
-    空候选 / needsBrowser / 空正文等失败均以 noticeMsg 呈现后端中文 message。 */
-  const parseNoticeUrl = async (n: ScheduleNoticeBrief) => {
-    setParsingUrl(n.url);
-    setNoticeMsg(null);
-    const r = await invokeCommand<NoticeCandidate[]>("parse_notice_from_url", { url: n.url });
-    setParsingUrl(null);
-    if (r.success && r.data) {
-      if (r.data.length === 0) {
-        setNoticeMsg({ ok: false, text: `未从《${n.title}》中识别出调课/停课/补课信息` });
-      } else {
-        setCandidates(r.data);
-      }
+    setNoticeResults(r.data);
+    const all = r.data.flatMap((n) => n.candidates);
+    const failed = r.data.filter((n) => n.error !== null).length;
+    if (all.length > 0) {
+      setCandidates(all);
+      setNoticeMsg({
+        ok: true,
+        text:
+          `已解析 ${r.data.length} 条公告：${all.length} 条候选待确认` +
+          (failed > 0 ? `（${failed} 条未能解析，见下方说明）` : "") +
+          "，采纳后才会生效。",
+      });
+    } else if (failed > 0) {
+      setNoticeMsg({ ok: false, text: `${r.data.length} 条公告命中，但均未能解析出调整内容` });
     } else {
-      setNoticeMsg({ ok: false, text: r.message ?? "解析失败" });
+      setNoticeMsg({ ok: true, text: "命中公告均未包含新的调课/停课/补课信息" });
     }
   };
 
@@ -2890,15 +2884,15 @@ export function TimetablePanel() {
                     variant="outline"
                     size="sm"
                     disabled={scanning}
-                    onClick={() => void scanNotices()}
+                    onClick={() => void autoParseNotices()}
                   >
                     <RefreshCw aria-hidden="true" className={cn("size-3.5", scanning && "animate-spin")} />
-                    {scanning ? "扫描中…" : noticeBriefs === null ? "检查公告调整" : "重新检查"}
+                    {scanning ? "解析中…" : noticeResults === null ? "自动解析公告" : "重新解析"}
                   </Button>
                 </span>
               </div>
               <p className="mt-1 text-caption text-text-2">
-                自动扫描「通知公告」与「教务处」栏目，发现调课/停课/补课通知；解析结果确认后才会生效。
+                自动扫描两个栏目并解析本学期以来的调课/停课/补课通知（更早的旧通知已过滤）；候选需逐条采纳才会生效。
               </p>
 
               {noticeMsg && (
@@ -2910,12 +2904,12 @@ export function TimetablePanel() {
                 </p>
               )}
 
-              {noticeBriefs !== null && noticeBriefs.length === 0 && (
-                <p className="mt-2 text-caption text-text-2">近期公告中未发现调课类通知。</p>
+              {noticeResults !== null && noticeResults.length === 0 && (
+                <p className="mt-2 text-caption text-text-2">本学期公告中未发现调课类通知。</p>
               )}
-              {noticeBriefs !== null && noticeBriefs.length > 0 && (
+              {noticeResults !== null && noticeResults.length > 0 && (
                 <ul className="mt-2.5 space-y-1.5">
-                  {noticeBriefs.map((n) => (
+                  {noticeResults.map((n) => (
                     <li
                       key={n.url}
                       className="rounded-inner border border-line bg-surface-2 px-3 py-2"
@@ -2933,28 +2927,24 @@ export function TimetablePanel() {
                         <span className="shrink-0 rounded bg-line px-1.5 py-0.5 text-caption text-text-2">
                           {n.column}
                         </span>
-                        {n.matchedKeywords.map((k) => (
+                        {n.error !== null ? (
                           <span
-                            key={k}
-                            className={cn(
-                              "shrink-0 rounded px-1.5 py-0.5 text-caption",
-                              NOTICE_STRONG_WORDS.has(k)
-                                ? "bg-alert/10 font-medium text-alert"
-                                : "bg-line text-text-2",
-                            )}
+                            className="shrink-0 rounded bg-alert/10 px-1.5 py-0.5 text-caption text-alert"
+                            title={n.error}
                           >
-                            {k}
+                            未能解析
                           </span>
-                        ))}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={parsingUrl === n.url || scanning}
-                          onClick={() => void parseNoticeUrl(n)}
-                        >
-                          {parsingUrl === n.url ? "解析中…" : "解析"}
-                        </Button>
+                        ) : n.candidates.length > 0 ? (
+                          <span className="shrink-0 rounded bg-sched/10 px-1.5 py-0.5 text-caption font-medium text-sched">
+                            {n.candidates.length} 条候选
+                          </span>
+                        ) : (
+                          <span className="shrink-0 rounded bg-line px-1.5 py-0.5 text-caption text-text-2">
+                            无调整
+                          </span>
+                        )}
                       </div>
+                      {n.error !== null && <p className="mt-1 text-caption text-alert">{n.error}</p>}
                     </li>
                   ))}
                 </ul>
