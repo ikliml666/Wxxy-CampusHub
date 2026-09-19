@@ -34,6 +34,43 @@ type QueryPhase = "idle" | "loading" | "error";
 const MAX_CASCADE_STEPS = 10;
 
 /**
+ * 「最近查过」的房间（**本机 localStorage 记录**，不是已保存房间）。
+ *
+ * 2026-09-19 用户反馈修正：这块原先渲染的是「已保存房间的 `label`」，只保存过一个房间时
+ * 就只有一个 chips、内容还是用户自起的名字（如「1」），查过的房间号根本看不到。现在改成
+ * 每次查到末级房间即记一条（片区 + 完整路径），chips 显示**房间号**（路径末级的 `value`），
+ * 不要求用户先保存——这才对得上「最近查过」的字面语义。
+ */
+type RecentRoom = { feeitemId: string; path: RoomStep[]; at: number };
+
+const RECENT_KEY = "campushub-elec-recent";
+const RECENT_MAX = 8;
+
+/** 房间的稳定比对键（片区 + 各层 `value`）：用于「同房间只留最新一条」。 */
+function roomPathKey(feeitemId: string, path: RoomStep[]): string {
+  return `${feeitemId}|${path.map((s) => s.value).join(">")}`;
+}
+
+function loadRecent(): RecentRoom[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    const v = raw ? JSON.parse(raw) : [];
+    return Array.isArray(v) ? (v as RecentRoom[]) : [];
+  } catch {
+    // 存储被禁用或内容损坏：静默回空，绝不影响查询主流程
+    return [];
+  }
+}
+
+function saveRecent(list: RecentRoom[]) {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX)));
+  } catch {
+    /* 配额满/被禁用：这只是便利记录，忽略 */
+  }
+}
+
+/**
  * 服务端那句展示文本 → 折行数组。**只按分隔符折行、不做语义解构**（2026-09-19 live 实测：
  * 三个片区的 `信息` 文案格式各不相同且由学校侧自由填写，任何「剩余金额/单价」式的键名或
  * 格式硬编码都会随文案漂移而静默失效）。
@@ -81,6 +118,7 @@ export function PowerPanel() {
   const [roomText, setRoomText] = useState("");
 
   const [rooms, setRooms] = useState<SavedRoom[]>([]);
+  const [recent, setRecent] = useState<RecentRoom[]>(() => loadRecent());
   const [saveLabel, setSaveLabel] = useState("");
   const [notice, setNotice] = useState("");
   const [noticeBad, setNoticeBad] = useState(false);
@@ -162,6 +200,20 @@ export function PowerPanel() {
     setLevels(r.data.levels);
     setOptions(r.data.options);
     setView(r.data.isFinal ? (r.data.view ?? null) : null);
+
+    // 查到末级房间即记入「最近查过」（本机）：同房间去重后置顶、最多 RECENT_MAX 条。
+    // 只在真的走到房间这一级时记——中间层级的路径不是用户要找的房间。
+    if (r.data.isFinal && path.length > 0) {
+      setRecent((prev) => {
+        const key = roomPathKey(feeitemId, path);
+        const next = [
+          { feeitemId, path, at: Date.now() },
+          ...prev.filter((x) => roomPathKey(x.feeitemId, x.path) !== key),
+        ].slice(0, RECENT_MAX);
+        saveRecent(next);
+        return next;
+      });
+    }
 
     const only = r.data.options.length === 1 ? r.data.options[0] : undefined;
     const last = path[path.length - 1];
@@ -255,10 +307,13 @@ export function PowerPanel() {
         )
       : undefined;
 
-  /** 房间号输入级的一键重查 chips：已存房间中路径前缀（除房间号那步外）与当前选中完全一致者。 */
+  /**
+   * 房间号输入级的一键重查 chips：**本机记录**中，片区与已选层级（除房间号那步）完全一致者。
+   * 数据源是 `recent`（查过即记）而非 `rooms`（要用户先保存），故查过的房间立刻可一键重查。
+   */
   const recentRooms =
     area && steps.length > 0 && isInputLevelSafe(levels, steps, area)
-      ? rooms.filter(
+      ? recent.filter(
           (r) =>
             r.feeitemId === areaId &&
             r.path.length === steps.length + 1 &&
@@ -380,6 +435,18 @@ export function PowerPanel() {
     setAutoLevels([]);
     setRoomText("");
     void runQuery(room.feeitemId, room.path);
+  };
+
+  /** 点「最近查过」的 chip：直接重查该房间（本机记录，无需先保存为常用房间）。 */
+  const openRecent = (r: RecentRoom) => {
+    setAreaId(r.feeitemId);
+    setSteps(r.path);
+    setLevels([]);
+    setOptions([]);
+    setView(null);
+    setAutoLevels([]);
+    setRoomText("");
+    void runQuery(r.feeitemId, r.path);
   };
 
   /** 充值：在系统浏览器打开官方充值页（2026-09-19 裁决：不做内嵌官方界面）。 */
@@ -586,16 +653,20 @@ export function PowerPanel() {
                         {recentRooms.length > 0 && (
                           <div className="mt-2 flex flex-wrap items-center gap-1.5">
                             <span className="text-caption text-text-2">最近查过：</span>
-                            {recentRooms.map((r) => (
-                              <Button
-                                key={r.id}
-                                variant="outline"
-                                size="sm"
-                                onClick={() => openRoom(r)}
-                              >
-                                {r.label}
-                              </Button>
-                            ))}
+                            {recentRooms.map((r) => {
+                              // 显示房间号（路径末级的 value），不是用户自起的房间名
+                              const room = r.path[r.path.length - 1];
+                              return (
+                                <Button
+                                  key={roomPathKey(r.feeitemId, r.path)}
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => openRecent(r)}
+                                >
+                                  {room?.value || room?.name || "—"}
+                                </Button>
+                              );
+                            })}
                           </div>
                         )}
                       </>

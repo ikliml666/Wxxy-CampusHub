@@ -28,6 +28,44 @@ function shortTime(t: string): string {
   return t.slice(5, 16);
 }
 
+/**
+ * 本机记录的「已取消订单」。
+ *
+ * 2026-09-19 实测（用户反馈后复核）：学校侧的取消是**物理删除**——取消后该订单在「全部」
+ * 查询里也不再返回（`status=0` / `1` / `2` / 不带 status 四种查询都查不到它），所以
+ * **学校侧根本没有「已取消」这个状态可供渲染**。用户取消完就再也看不到那笔单的归宿，
+ * 故由本机留痕，并在界面上明确标注「本机记录」，与学校侧下发的状态区分开。
+ */
+type CancelledOrder = {
+  orderId: string;
+  amountYuan: number | null;
+  commitDate: string;
+  abstracts: string;
+  cancelledAt: string;
+};
+
+const CANCELLED_KEY = "campushub-elec-cancelled";
+const CANCELLED_MAX = 10;
+
+function loadCancelled(): CancelledOrder[] {
+  try {
+    const raw = localStorage.getItem(CANCELLED_KEY);
+    const v = raw ? JSON.parse(raw) : [];
+    return Array.isArray(v) ? (v as CancelledOrder[]) : [];
+  } catch {
+    // 存储被禁用或内容损坏：静默回空，不影响缴费记录主流程
+    return [];
+  }
+}
+
+function saveCancelled(list: CancelledOrder[]) {
+  try {
+    localStorage.setItem(CANCELLED_KEY, JSON.stringify(list.slice(0, CANCELLED_MAX)));
+  } catch {
+    /* 配额满/被禁用：忽略 */
+  }
+}
+
 export function ElectricityPaymentsCard({
   authed,
   openLoginDialog,
@@ -41,6 +79,8 @@ export function ElectricityPaymentsCard({
   const [ordersTick, setOrdersTick] = useState(0);
   const [cancelBusyId, setCancelBusyId] = useState("");
   const [cancelMsg, setCancelMsg] = useState("");
+  /** 本机留痕的已取消订单（学校侧取消即删除、无状态可查，见 CancelledOrder 注释）。 */
+  const [cancelled, setCancelled] = useState<CancelledOrder[]>(() => loadCancelled());
 
   // —— 月度缴费（慢请求，独立 loading）——
   const [monthly, setMonthly] = useState<ElectricityMonthTotal[]>([]);
@@ -120,13 +160,27 @@ export function ElectricityPaymentsCard({
     };
   }, [authed, billsPage, billsTick]);
 
-  /** 取消遗留订单：成功后订单列表与账单各刷一次。副作用命令，不重试。 */
+  /** 取消遗留订单：成功后订单列表与账单各刷一次，并在**本机**留下「已取消」痕迹。副作用命令，不重试。 */
   const cancelOrder = async (orderId: string) => {
+    // 先抓下这条单的摘要——取消后学校侧就不再返回它了，之后没机会再取
+    const target = orders.find((o) => o.orderId === orderId);
     setCancelBusyId(orderId);
     setCancelMsg("");
     const r = await invokeCommand("recharge_cancel", { orderId });
     setCancelBusyId("");
     if (r.success) {
+      const next = [
+        {
+          orderId,
+          amountYuan: target?.amountYuan ?? null,
+          commitDate: target?.commitDate ?? "",
+          abstracts: target?.abstracts ?? "",
+          cancelledAt: new Date().toISOString(),
+        },
+        ...cancelled.filter((c) => c.orderId !== orderId),
+      ].slice(0, CANCELLED_MAX);
+      saveCancelled(next);
+      setCancelled(next);
       setOrdersTick((t) => t + 1);
       setBillsTick((t) => t + 1);
       setCancelMsg("订单已取消");
@@ -196,6 +250,33 @@ export function ElectricityPaymentsCard({
               >
                 取消订单
               </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* 已取消订单（**本机记录**）：学校侧取消即物理删除、不留状态，故痕迹只能本机留 */}
+      {cancelled.length > 0 && (
+        <ul className="mt-2 divide-y divide-line rounded-inner border border-line bg-surface-2 px-3">
+          {cancelled.map((c) => (
+            <li key={c.orderId} className="flex items-center gap-3 py-2.5">
+              <span className="min-w-0 flex-1">
+                <span className="block text-body text-text-2">
+                  已取消
+                  {c.amountYuan != null && (
+                    <span className="tabular-num ml-1 text-text-2 line-through">
+                      ¥ {c.amountYuan.toFixed(2)}
+                    </span>
+                  )}
+                </span>
+                <span className="mt-0.5 block truncate text-caption text-text-2">
+                  {[c.commitDate ? shortTime(c.commitDate) : "", c.abstracts]
+                    .filter(Boolean)
+                    .join(" · ")}
+                  {c.commitDate || c.abstracts ? " · " : ""}
+                  本机记录
+                </span>
+              </span>
             </li>
           ))}
         </ul>
