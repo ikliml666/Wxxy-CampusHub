@@ -165,7 +165,9 @@ export function RechargeFlow({
     setCanRetry(false);
 
     const created = await invokeCommand<RechargeCreated>("recharge_create", {
-      feeItemId: feeitem.id,
+      // IPC 键名必须是 `feeitemId`（Rust 侧 `feeitem_id` 的 camelCase）；写成 feeItemId 会被
+      // Tauri 判为缺参：`invalid args feeitemId ... missing required key feeitemId`（真机点验抓到的坑）
+      feeitemId: feeitem.id,
       // 原样透传用户输入（红线：客户端不改写金额）
       tranamt: amount.trim(),
       // 房间路径：`third_party` 由后端按它合成（PII 不出后端）。空路径时后端会回可读文案，
