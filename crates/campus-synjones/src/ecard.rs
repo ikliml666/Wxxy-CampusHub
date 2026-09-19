@@ -21,6 +21,7 @@
 //! |---|---|---|---|
 //! | 当前卡 | GET | `/berserker-app/ykt/tsm/queryCurrentCard`（无参） | Berserker |
 //! | 卡明细 | GET | `/berserker-app/ykt/tsm/queryCard?account=…` / `?scene=recharge` | Berserker |
+//! | 全卡列表 | GET | `/berserker-app/ykt/tsm/getCampusCards`（无参） | Berserker |
 //! | 流水 | GET | `/berserker-search/search/personal/turnover` | Search |
 //!
 //! 流水 `type` 是**收支方向**：`"1"`=收入 / `"2"`=支出 / `"3"`=空；传空串 = 不带该参数。
@@ -34,6 +35,8 @@ use serde_json::Value;
 pub const EP_CURRENT_CARD: &str = "/berserker-app/ykt/tsm/queryCurrentCard";
 /// 卡明细（`account=<卡号>` 或 `scene=recharge`）。
 pub const EP_QUERY_CARD: &str = "/berserker-app/ykt/tsm/queryCard";
+/// 全卡列表（无参；`data.card[]`，字段与 [`EP_QUERY_CARD`] 同源）。
+pub const EP_CARDS_FULL: &str = "/berserker-app/ykt/tsm/getCampusCards";
 /// 消费流水（search 系）。
 pub const EP_TURNOVER: &str = "/berserker-search/search/personal/turnover";
 
@@ -70,6 +73,16 @@ pub struct Transaction {
     pub pay_name: String,
     /// 消费地点（`locationName`）。
     pub location_name: String,
+    /// 流水单号（`orderId`，实测存在；单条详情查询用）。
+    pub order_id: String,
+    /// 分类 id（`typeId`，如 `"1"` 消费）。
+    pub type_id: String,
+    /// 分类名（`turnoverType`，如 `"消费"`）。
+    pub turnover_type: String,
+    /// 标签（`labelName`，常为空串）。
+    pub label_name: String,
+    /// 标签备注（`labelRemark`，常为空串）。
+    pub label_remark: String,
     /// **该笔交易后的余额快照**（元；`cardBalance` 字段，服务端单位分）。
     ///
     /// M4 新增的「事件级余额」数据源：一卡通流水每笔都带这个字段，故「某时刻的余额」是**可回溯**的
@@ -90,7 +103,7 @@ pub struct Transactions {
 // ---------------- 纯解析（单测覆盖，无网络） ----------------
 
 /// 整数字段（金额分 / 状态码共用）：数字或数字字符串均可，缺失/非数值 → None。
-fn int_of(v: Option<&Value>) -> Option<i64> {
+pub fn int_of(v: Option<&Value>) -> Option<i64> {
     let v = v?;
     match v {
         Value::Number(n) => n
@@ -107,7 +120,7 @@ fn int_of(v: Option<&Value>) -> Option<i64> {
 }
 
 /// 文本字段：字符串原样（trim），数字转字符串，缺失 → 空串。
-fn text_of(v: Option<&Value>) -> String {
+pub fn text_of(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.trim().to_string(),
         Some(Value::Number(n)) => n.to_string(),
@@ -116,7 +129,7 @@ fn text_of(v: Option<&Value>) -> String {
 }
 
 /// 分 → 元（整数分先算后除）。
-fn yuan(fen: i64) -> f64 {
+pub fn yuan(fen: i64) -> f64 {
     fen as f64 / 100.0
 }
 
@@ -156,6 +169,141 @@ pub fn parse_card(v: &Value) -> CardInfo {
     }
 }
 
+/// 卡号脱敏（契约 §2.5）：够长时前 5 + `****` + 后 2；**短卡号**（本校实测 5 位，如 `42940`）
+/// 首位 + `****` + 末 2 —— 旧实现短号一律给 `****`，界面等于什么都没显示。
+fn mask_account(acc: &str) -> String {
+    let chars: Vec<char> = acc.trim().chars().collect();
+    if chars.len() >= 8 {
+        let head: String = chars[..5].iter().collect();
+        let tail: String = chars[chars.len() - 2..].iter().collect();
+        format!("{head}****{tail}")
+    } else if chars.len() > 3 {
+        let head = chars[0];
+        let tail: String = chars[chars.len() - 2..].iter().collect();
+        format!("{head}****{tail}")
+    } else {
+        "****".to_string()
+    }
+}
+
+/// 只保留末尾 `n` 位（银行卡号尾号）；不足 `n` 位 → 空串（不回显全号）。
+fn tail_of(s: &str, n: usize) -> String {
+    let chars: Vec<char> = s.trim().chars().collect();
+    if chars.len() >= n {
+        chars[chars.len() - n..].iter().collect()
+    } else {
+        String::new()
+    }
+}
+
+/// 一个子账户（卡 `accinfo[]` 条目，单位全为分→元）。
+///
+/// ⚠️ 服务端的 `accinfo[].name` 实测形态未知（live 探针按 PII 键名打了码），按「PII 不透出」红线
+/// **不解析**；子账户的展示名由前端按 `type` 自行映射。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccInfo {
+    /// 子账户类型码（`type`，实测如 `"42940-000"`）。
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 子账户余额（元，`balance` 分→元）。
+    pub balance_yuan: f64,
+    /// 当日已消费（元，`daycostamt`）。
+    pub day_cost_amt_yuan: f64,
+    /// 单日消费限额（元，`daycostlimit`）。
+    pub day_cost_limit_yuan: f64,
+    /// 免密限额（元，`nonpwdlimit`）。
+    pub nonpwd_limit_yuan: f64,
+    /// 单笔限额（元，`singlelimit`）。
+    pub single_limit_yuan: f64,
+}
+
+/// 解析一个子账户（纯函数）。
+fn parse_acc_info(v: &Value) -> AccInfo {
+    AccInfo {
+        kind: text_of(v.get("type")),
+        balance_yuan: yuan(int_of(v.get("balance")).unwrap_or(0)),
+        day_cost_amt_yuan: yuan(int_of(v.get("daycostamt")).unwrap_or(0)),
+        day_cost_limit_yuan: yuan(int_of(v.get("daycostlimit")).unwrap_or(0)),
+        nonpwd_limit_yuan: yuan(int_of(v.get("nonpwdlimit")).unwrap_or(0)),
+        single_limit_yuan: yuan(int_of(v.get("singlelimit")).unwrap_or(0)),
+    }
+}
+
+/// 一张卡的完整视图（`getCampusCards` 口径，卡设置/卡详情页用；单位一律元）。
+///
+/// # 脱敏（契约 §2.5）
+///
+/// - 卡号只给 [`Self::account_masked`]（前 5 + `****` + 后 2），**不含原号**；
+/// - 银行卡只给 [`Self::bankacc_tail`] 尾号；
+/// - 持卡人姓名 / 手机号 / 证件 / 学号一律不解析（`getCampusCards` 返回里有，全部丢弃）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardDetail {
+    /// 脱敏卡号。
+    pub account_masked: String,
+    /// 卡类型名（回落链同 [`CardInfo::cardname`]：cardname → card_name → cardtype）。
+    pub card_type_name: String,
+    /// 中文状态标签（同 [`CardInfo::status_label`]）。
+    pub status_label: String,
+    /// 卡账户余额（元）= `(db_balance + unsettle_amount) / 100`。
+    pub balance_yuan: f64,
+    /// 电子账户余额（元，`elec_accamt` 分→元）。
+    pub elec_balance_yuan: f64,
+    /// 已挂失（`lostflag == 1`）。
+    pub lost: bool,
+    /// 已冻结（`freezeflag == 1`）。
+    pub frozen: bool,
+    /// 卡状态码（`acc_status`，实测 0 = 正常；缺失 → None）。
+    pub acc_status: Option<i64>,
+    /// 卡有效期（`expdate` 原文）。
+    pub exp_date: String,
+    /// 自动转账（圈存）开关（`autotrans_flag == 1`）。
+    pub autotrans_flag: bool,
+    /// 自动转账金额（元，`autotrans_amt` 分→元）。
+    pub autotrans_amt_yuan: f64,
+    /// 自动转账余额下限（元，`autotrans_limite` 分→元）。
+    pub autotrans_limite_yuan: f64,
+    /// 单日消费限额（元，`daycostlimit` 分→元；实测 0 = 未设置）。
+    pub day_cost_limit_yuan: f64,
+    /// 免密限额（元，`nonpwdlimit`）。
+    pub nonpwd_limit_yuan: f64,
+    /// 单笔限额（元，`singlelimit`）。
+    pub single_limit_yuan: f64,
+    /// 绑定银行卡**尾号**（`bankacc` 末 4 位；未绑定 → 空串）。
+    pub bankacc_tail: String,
+    /// 子账户列表（`accinfo[]`）。
+    pub acc_infos: Vec<AccInfo>,
+}
+
+/// 解析一张完整卡（纯函数，单测覆盖；金额/状态复用 [`parse_card`] 的已测口径）。
+pub fn parse_card_detail(v: &Value) -> CardDetail {
+    let info = parse_card(v);
+    CardDetail {
+        account_masked: mask_account(&info.account),
+        card_type_name: info.cardname,
+        status_label: info.status_label,
+        balance_yuan: info.balance_yuan,
+        elec_balance_yuan: info.elec_accamt_yuan,
+        lost: int_of(v.get("lostflag")) == Some(1),
+        frozen: int_of(v.get("freezeflag")) == Some(1),
+        acc_status: int_of(v.get("acc_status")),
+        exp_date: text_of(v.get("expdate")),
+        autotrans_flag: int_of(v.get("autotrans_flag")) == Some(1),
+        autotrans_amt_yuan: yuan(int_of(v.get("autotrans_amt")).unwrap_or(0)),
+        autotrans_limite_yuan: yuan(int_of(v.get("autotrans_limite")).unwrap_or(0)),
+        day_cost_limit_yuan: yuan(int_of(v.get("daycostlimit")).unwrap_or(0)),
+        nonpwd_limit_yuan: yuan(int_of(v.get("nonpwdlimit")).unwrap_or(0)),
+        single_limit_yuan: yuan(int_of(v.get("singlelimit")).unwrap_or(0)),
+        bankacc_tail: tail_of(&text_of(v.get("bankacc")), 4),
+        acc_infos: v
+            .get("accinfo")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(parse_acc_info).collect())
+            .unwrap_or_default(),
+    }
+}
+
 /// 解析单条流水（纯函数，单测覆盖）：`typeFrom` 决定符号。
 pub fn parse_transaction(rec: &Value) -> Transaction {
     let is_income = text_of(rec.get("typeFrom")) == "1";
@@ -177,6 +325,11 @@ pub fn parse_transaction(rec: &Value) -> Transaction {
         location_name: text_of(rec.get("locationName")),
         // 交易后余额快照（分→元）；缺失/垃圾值 → None（不臆造 0：0 元与「没有该字段」语义不同）
         card_balance_yuan: int_of(rec.get("cardBalance")).map(yuan),
+        order_id: text_of(rec.get("orderId")),
+        type_id: text_of(rec.get("typeId")),
+        turnover_type: text_of(rec.get("turnoverType")),
+        label_name: text_of(rec.get("labelName")),
+        label_remark: text_of(rec.get("labelRemark")),
     }
 }
 
@@ -220,24 +373,79 @@ pub async fn fetch_cards(
         .unwrap_or_default())
 }
 
-/// 消费流水（分页）。`direction` 为收支方向（`"1"` 收入 / `"2"` 支出；空串 = 不过滤）。
+/// 全卡列表（无参）→ 完整卡视图（脱敏后）。缺 `data.card` → 空列表。
+pub async fn fetch_cards_full(
+    client: &SynjonesClient,
+) -> Result<Vec<CardDetail>, CampusSynjonesError> {
+    let v = client.get(EP_CARDS_FULL, &[], Envelope::Berserker).await?;
+    Ok(v["data"]["card"]
+        .as_array()
+        .map(|a| a.iter().map(parse_card_detail).collect())
+        .unwrap_or_default())
+}
+
+/// 流水查询的增强筛选（契约 §1.4：全部实测生效）。
+///
+/// `None` / 空串的参数**不进 query**（避免改变服务端语义——实测 `type` 不传即全量）。
+#[derive(Debug, Clone, Default)]
+pub struct TurnoverFilter<'a> {
+    /// 卡号（空 = 不带 `account` 参数，查本人全部流水）。
+    pub account: &'a str,
+    /// 收支方向（`"1"` 收入 / `"2"` 支出 / None 全量）。
+    pub direction: Option<&'a str>,
+    /// 分类 id（`typeId`，取自 `turnoverType` 字典）。
+    pub type_id: Option<&'a str>,
+    /// 关键词搜索（自动附带 `highlightFieldsClass=text-primary`，官方同款）。
+    pub info: Option<&'a str>,
+    /// 单条详情（`orderId`，实测命中时 `total=1`）。
+    pub order_id: Option<&'a str>,
+    /// 排序字段（如 `tranamt`，实测生效）。
+    pub sort_fields: Option<&'a str>,
+    /// 排序方向（`asc` / `desc`）。
+    pub sort_type: Option<&'a str>,
+}
+
+/// 组装流水 query 参数（纯函数，单测覆盖：未传的可选参数**不出现**）。
+fn build_turnover_params(f: &TurnoverFilter<'_>, page: u32, size: u32) -> Vec<(String, String)> {
+    let mut p = vec![
+        ("current".to_string(), page.max(1).to_string()),
+        ("size".to_string(), size.to_string()),
+    ];
+    let account = f.account.trim();
+    if !account.is_empty() {
+        p.push(("account".to_string(), account.to_string()));
+    }
+    if let Some(d) = f.direction.map(str::trim).filter(|s| !s.is_empty()) {
+        p.push(("type".to_string(), d.to_string()));
+    }
+    if let Some(t) = f.type_id.map(str::trim).filter(|s| !s.is_empty()) {
+        p.push(("typeId".to_string(), t.to_string()));
+    }
+    if let Some(i) = f.info.map(str::trim).filter(|s| !s.is_empty()) {
+        p.push(("info".to_string(), i.to_string()));
+        p.push(("highlightFieldsClass".to_string(), "text-primary".to_string()));
+    }
+    if let Some(o) = f.order_id.map(str::trim).filter(|s| !s.is_empty()) {
+        p.push(("orderId".to_string(), o.to_string()));
+    }
+    if let Some(sf) = f.sort_fields.map(str::trim).filter(|s| !s.is_empty()) {
+        p.push(("sortFields".to_string(), sf.to_string()));
+    }
+    if let Some(st) = f.sort_type.map(str::trim).filter(|s| !s.is_empty()) {
+        p.push(("sortType".to_string(), st.to_string()));
+    }
+    p
+}
+
+/// 消费流水（分页 + 增强筛选）。
 pub async fn fetch_transactions(
     client: &SynjonesClient,
-    account: &str,
+    filter: &TurnoverFilter<'_>,
     page: u32,
     size: u32,
-    direction: &str,
 ) -> Result<Transactions, CampusSynjonesError> {
-    let current = page.max(1).to_string();
-    let size = size.to_string();
-    let mut params: Vec<(&str, &str)> = vec![("current", &current), ("size", &size)];
-    if !account.trim().is_empty() {
-        params.push(("account", account.trim()));
-    }
-    let direction = direction.trim();
-    if !direction.is_empty() {
-        params.push(("type", direction));
-    }
+    let pairs = build_turnover_params(filter, page, size);
+    let params: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let v = client.get(EP_TURNOVER, &params, Envelope::Search).await?;
     Ok(parse_transactions(&v))
 }
@@ -402,5 +610,183 @@ mod tests {
         // total 为字符串（服务端形态不定）→ 按 0 处理，不 panic
         let weird = parse_transactions(&json!({"data": {"total": "12", "records": []}}));
         assert_eq!(weird.total, 0);
+    }
+
+    /// 流水新字段（2026-09-19 live 实测记录形态）：orderId/typeId/turnoverType/labelName/labelRemark。
+    #[test]
+    fn transaction_reads_enhanced_fields() {
+        // 实测样本（C1，字段值已脱敏的保持脱敏）
+        let rec = json!({
+            "orderId": "***",
+            "tranamt": 10,
+            "typeFrom": "2",
+            "typeId": "1",
+            "turnoverType": "消费",
+            "payName": "电子账户消费",
+            "locationName": "1-017",
+            "labelName": "",
+            "labelRemark": "",
+            "cardBalance": 7996
+        });
+        let t = parse_transaction(&rec);
+        assert_eq!(t.type_id, "1");
+        assert_eq!(t.turnover_type, "消费");
+        assert_eq!(t.pay_name, "电子账户消费");
+        assert_eq!(t.location_name, "1-017");
+        assert_eq!(t.card_balance_yuan, Some(79.96));
+        assert!(!t.order_id.is_empty(), "orderId 原样透传（值不写入测试）");
+        assert_eq!(t.label_name, "");
+        assert_eq!(t.label_remark, "");
+    }
+
+    /// 卡号 / 银行卡脱敏（契约 §2.5）：前 5 + **** + 后 2；短号全掩；银行卡只留末 4。
+    #[test]
+    fn account_and_bankacc_are_masked() {
+        assert_eq!(mask_account("1234567890"), "12345****90");
+        assert_eq!(
+            mask_account("42940"),
+            "4****40",
+            "本校实测 5 位卡号：露首位与末 2 位，界面能对上自己的卡"
+        );
+        assert_eq!(mask_account("1234567"), "1****67");
+        assert_eq!(mask_account("123"), "****", "3 位及以下不给可辨识片段");
+        assert_eq!(mask_account(""), "****");
+        assert_eq!(tail_of("6222021234567890123", 4), "0123");
+        assert_eq!(tail_of("123", 4), "", "不足 4 位不给尾号（防全号回显）");
+        assert_eq!(tail_of("", 4), "");
+    }
+
+    /// **实测样本**（2026-09-19 live，`getCampusCards` 首卡，PII 键已脱敏）：
+    /// `elec_accamt=7996`、`db_balance=0`、`unsettle_amount=0`、`autotrans_flag=1`、
+    /// `autotrans_amt=5000`、`autotrans_limite=2000`、三项限额 0、`acc_status=0`。
+    fn card_detail_fixture() -> Value {
+        json!({
+            "acc_status": 0,
+            "accinfo": [{
+                "type": "42940-000",
+                "balance": 7996,
+                "daycostamt": null,
+                "daycostlimit": null,
+                "nonpwdlimit": null,
+                "singlelimit": null,
+                "autotrans_flag": 0
+            }],
+            "account": "0000000000",
+            "autotrans_amt": 5000,
+            "autotrans_flag": 1,
+            "autotrans_limite": 2000,
+            "bankacc": "6222021234567890123",
+            "card_name": "本科生卡",
+            "cardname": "",
+            "cardtype": "800#正式卡",
+            "db_balance": 0,
+            "elec_accamt": 7996,
+            "expdate": "2027-09-01",
+            "freezeflag": 0,
+            "lostflag": 0,
+            "name": "某人",
+            "nonpwdlimit": 0,
+            "phone": "13800000000",
+            "singlelimit": 0,
+            "sno": "20230000",
+            "unsettle_amount": 0
+        })
+    }
+
+    /// 卡详情映射：金额全部分→元、状态/开关布尔化、限额三件、autotrans 三件（实测原值）。
+    #[test]
+    fn card_detail_maps_live_fixture() {
+        let c = parse_card_detail(&card_detail_fixture());
+        assert_eq!(c.account_masked, "00000****00", "卡号脱敏（前5+****+后2）");
+        assert_eq!(c.card_type_name, "本科生卡", "cardname 空回落 card_name");
+        assert_eq!(c.status_label, "正常");
+        assert_eq!(c.elec_balance_yuan, 79.96, "电子账户分→元（实测 7996 分）");
+        assert_eq!(c.balance_yuan, 0.0, "卡账户 = db + unsettle");
+        assert!(!c.lost);
+        assert!(!c.frozen);
+        assert_eq!(c.acc_status, Some(0));
+        assert_eq!(c.exp_date, "2027-09-01");
+        assert!(c.autotrans_flag, "实测 autotrans_flag=1");
+        assert_eq!(c.autotrans_amt_yuan, 50.0, "5000 分 → 50 元");
+        assert_eq!(c.autotrans_limite_yuan, 20.0, "2000 分 → 20 元");
+        assert_eq!(c.day_cost_limit_yuan, 0.0);
+        assert_eq!(c.nonpwd_limit_yuan, 0.0);
+        assert_eq!(c.single_limit_yuan, 0.0);
+        assert_eq!(c.bankacc_tail, "0123", "银行卡只留末 4 位");
+        assert_eq!(c.acc_infos.len(), 1);
+        assert_eq!(c.acc_infos[0].kind, "42940-000");
+        assert_eq!(c.acc_infos[0].balance_yuan, 79.96);
+    }
+
+    /// PII 红线：卡详情 DTO 不得含姓名 / 手机号 / 证件 / 学号 / 原始卡号 / 银行卡全号。
+    #[test]
+    fn card_detail_dto_carries_no_pii() {
+        let text = serde_json::to_string(&parse_card_detail(&card_detail_fixture())).unwrap();
+        for leaked in [
+            "某人", "13800000000", "20230000", "0000000000", "6222021234567890123", "phone",
+            "cert", "sno", "bankacc\",", "\"account\"",
+        ] {
+            assert!(!text.contains(leaked), "不得透出 {leaked}：{text}");
+        }
+        assert!(text.contains("accountMasked"));
+    }
+
+    /// 卡详情容错：空对象 / null 字段不 panic（开关全 false、金额 0、accinfo 缺失为空表）。
+    #[test]
+    fn card_detail_tolerates_missing_fields() {
+        let c = parse_card_detail(&json!({}));
+        assert_eq!(c.account_masked, "****");
+        assert!(!c.lost && !c.frozen && !c.autotrans_flag);
+        assert_eq!(c.acc_status, None);
+        assert!(c.acc_infos.is_empty());
+        // 挂失 / 冻结状态
+        let lost = parse_card_detail(&json!({"lostflag": 1, "freezeflag": 1, "account": "12345678"}));
+        assert!(lost.lost && lost.frozen);
+    }
+
+    /// 流水增强参数：**未传的可选参数不进 query**（实测语义：不传 = 不过滤）。
+    #[test]
+    fn turnover_params_omit_unset_options() {
+        let f = TurnoverFilter::default();
+        let p = build_turnover_params(&f, 1, 15);
+        assert_eq!(p, vec![("current".into(), "1".into()), ("size".into(), "15".into())]);
+        assert!(!p.iter().any(|(k, _)| k == "type"), "缺省不得带 type");
+
+        let f = TurnoverFilter {
+            account: " 123 ",
+            direction: Some("2"),
+            type_id: Some("1"),
+            info: Some("食堂"),
+            order_id: Some("ORD1"),
+            sort_fields: Some("tranamt"),
+            sort_type: Some("desc"),
+        };
+        let p = build_turnover_params(&f, 0, 20);
+        assert_eq!(
+            p,
+            vec![
+                ("current".to_string(), "1".to_string()),
+                ("size".to_string(), "20".to_string()),
+                ("account".to_string(), "123".to_string()),
+                ("type".to_string(), "2".to_string()),
+                ("typeId".to_string(), "1".to_string()),
+                ("info".to_string(), "食堂".to_string()),
+                ("highlightFieldsClass".to_string(), "text-primary".to_string()),
+                ("orderId".to_string(), "ORD1".to_string()),
+                ("sortFields".to_string(), "tranamt".to_string()),
+                ("sortType".to_string(), "desc".to_string()),
+            ]
+        );
+
+        // info 传了才带 highlightFieldsClass；只给 sortFields 不强加 sortType
+        let partial = build_turnover_params(
+            &TurnoverFilter { info: Some("x"), ..Default::default() },
+            3,
+            10,
+        );
+        assert!(partial.contains(&("info".to_string(), "x".to_string())));
+        assert!(partial.contains(&("highlightFieldsClass".to_string(), "text-primary".to_string())));
+        assert!(!partial.iter().any(|(k, _)| k == "typeId"));
+        assert!(!partial.iter().any(|(k, _)| k == "sortType"));
     }
 }

@@ -146,8 +146,9 @@ export interface TodoPage {
   items: TodoItem[];
 }
 
-// PanelId 现为 9 项（2026-09-18 M2.5 批次 4 追加 "timetable"）：三处同步 = 本类型 +
-// DockNav DOCK_ITEMS + AppShell PANEL_MAP；uiStore persist 的 migrate 校验非法值兜底。
+// PanelId 现为 8 项（M4.5：原 "wallet" + "power" 合并为 "ecard"，宫格首页 + 子页）：
+// 四处同步 = 本类型 + DockNav DOCK_ITEMS + AppShell PANEL_MAP + uiStore 的 PANEL_IDS；
+// uiStore persist 的 migrate 负责把旧值 "wallet"/"power" 迁移到 "ecard"。
 export type PanelId =
   | "today"
   | "timetable"
@@ -155,8 +156,7 @@ export type PanelId =
   | "todo"
   | "schedule"
   | "apps"
-  | "wallet"
-  | "power"
+  | "ecard"
   | "settings";
 
 // ---------- M2 批次 3：应用页 / 日程页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
@@ -525,6 +525,21 @@ export interface EcardTransaction {
   isIncome: boolean;
   payName: string;
   locationName: string;
+  /** 流水单号（`orderId`）——账单详情按它单查一条 */
+  orderId: string;
+  /** 分类 id（实测 1 消费 / 2 充值 / 3 退款 / 4 扫码付 / 5 补贴，字典见 `get_ecard_types`） */
+  typeId: string;
+  /** 分类中文名（服务端已给，如「消费」） */
+  turnoverType: string;
+  /** 标签（常为空串） */
+  labelName: string;
+  /** 标签备注（常为空串） */
+  labelRemark: string;
+  /**
+   * **该笔交易后的余额快照**（元）。服务端未给时为 `null`（**不是 0**）——
+   * 这是「某时刻余额」的可回溯来源，与电费自采快照同语义。
+   */
+  cardBalanceYuan: number | null;
 }
 
 /** 流水一页（不带方向过滤 = 全量；`total` 供「加载更多」判断）。 */
@@ -841,4 +856,153 @@ export interface ElectricitySnapshot {
   entry: ElectricityHistoryEntry;
   /** 是否覆盖了当天已有的那条（提示文案用「已更新今日记录」而非「已记录」） */
   replaced: boolean;
+}
+
+// ==================== M4.5 一卡通页契约（2026-09-19，live 实测钉住） ====================
+//
+// 单位口径：后端已把**分**换算成元（一卡通侧一切金额字段都是分），前端一律按元展示、不再除 100。
+// 脱敏：卡号只给 `accountMasked`；持卡人姓名/手机号/证件/户号后端不透出，前端也没有。
+// 详见 `.codewiki/modules/campus-synjones.md` 与 `docs/superpowers/plans/2026-09-19-ecard-full-replica.md`。
+
+/** 卡上一个子账户（`accinfo[]`）：电子账户 / 卡账户。 */
+export interface EcardAccountInfo {
+  /** 子账户类型码（实测形如 `42940-000`） */
+  type: string;
+  balanceYuan: number;
+  /** 当日已消费 */
+  dayCostAmtYuan: number;
+  dayCostLimitYuan: number;
+  nonpwdLimitYuan: number;
+  singleLimitYuan: number;
+}
+
+/** 一张一卡通（`get_ecard_overview` → `cards[]`）。 */
+export interface EcardCard {
+  /** 脱敏卡号（前 5 + `****` + 后 2）；全号只在查询密码校验通过后由 `ecard_check_pwd` 单独返回 */
+  accountMasked: string;
+  cardTypeName: string;
+  /** 中文状态标签（正常 / 已挂失 / 已冻结…） */
+  statusLabel: string;
+  /** 卡账户余额（`db_balance + unsettle_amount`） */
+  balanceYuan: number;
+  /** 电子账户余额（主口径，`elec_accamt`） */
+  elecBalanceYuan: number;
+  lost: boolean;
+  frozen: boolean;
+  accStatus: number | null;
+  expDate: string;
+  /** 自动转账（圈存）开关 */
+  autotransFlag: boolean;
+  autotransAmtYuan: number;
+  autotransLimiteYuan: number;
+  dayCostLimitYuan: number;
+  nonpwdLimitYuan: number;
+  singleLimitYuan: number;
+  /** 已绑银行卡尾号（未绑为空串） */
+  bankaccTail: string;
+  accInfos: EcardAccountInfo[];
+}
+
+/**
+ * 学校侧下发的一卡通客户端配置（`frontInfo` 白名单键 + 应用清单）。
+ *
+ * `enabledApps` 是官方「服务大厅」应用清单里的 `appCode`（status=1）——宫格入口按它门控
+ * （如该校清单里**没有** `bind-campus-card` ⇒ 不显示多卡绑定）。
+ */
+export interface EcardClientConfig {
+  /** `getEcardConfig.type !== "2"` ⇒ 主余额口径为电子账户（本校 `type=1`，即电子账户） */
+  balanceShowsElectronic: boolean;
+  showSno: boolean;
+  /** 是否展示「挂失·解挂」入口（本校 1） */
+  showLost: boolean;
+  freezeRecharge: boolean;
+  manageFee: boolean;
+  /** 一卡通充值片区 id（本校 `401`，来自 `getFrontConfig.recharge`） */
+  rechargeFeeitemId: string;
+  /** 扫码付片区 id（本校 `407`） */
+  scanFeeitemId: string;
+  /** 查询密码规则（本校 `A/a/Num/#/leng_6`，6 位） */
+  passwordRule: string;
+  /** 电子账户服务时间（`["05:00","23:50"]`） */
+  serviceTime: string[];
+  enabledApps: string[];
+}
+
+/** `get_ecard_overview` → data。 */
+export interface EcardCardsOverview {
+  cards: EcardCard[];
+  config: EcardClientConfig;
+}
+
+/**
+ * 一卡通页内的视图（宫格首页 + 子页）。
+ *
+ * 存在 uiStore 而不是面板局部 state：今日页「查电费」「卡片充值」两个快捷动作要
+ * **直达子页**（合并成一个 Dock 入口后，否则要多点一次）。
+ */
+export type EcardView =
+  | "home"
+  | "balance"
+  | "bill"
+  | "stats"
+  | "recharge"
+  | "power";
+
+/** 流水分类字典（`get_ecard_types` → 项；id 语义实测 1 消费 2 充值 3 退款 4 扫码付 5 补贴）。 */
+export interface EcardTurnoverType {
+  id: number;
+  name: string;
+  nameEn: string;
+  icon: string;
+  showOrder: number;
+}
+
+/** `get_ecard_stats_summary` → data（区间收支合计）。 */
+export interface EcardStatsSummary {
+  expensesYuan: number;
+  incomeYuan: number;
+}
+
+/** `get_ecard_stats_series` → 项（后端已按 key 升序、**零值保留**）。 */
+export interface EcardStatsPoint {
+  /** 月视图为 `YYYY-MM-DD`，年视图为 `YYYY-MM` */
+  label: string;
+  amountYuan: number;
+}
+
+/** `get_ecard_stats_assort` → 项（按分类聚合）。 */
+export interface EcardStatsAssortItem {
+  typeId: string;
+  turnoverType: string;
+  nameEn: string;
+  amountYuan: number;
+}
+
+/** `get_ecard_transfer_accounts` → 项（卡账户↔电子账户转账的可用账户）。 */
+export interface EcardTransferAccount {
+  /** 账户原号（转账提交时原样回传） */
+  account: string;
+  payAcc: string;
+  /** `CARD`（卡账户）/ `ACCOUNT`（电子账户） */
+  code: string;
+  /** 后端派生中文名（卡账户 / 电子账户） */
+  label: string;
+  balanceYuan: number;
+  canTransferOut: boolean;
+  lostFlag: boolean;
+}
+
+/**
+ * `get_ecard_secure_keyboard` → data：**安全键盘**。
+ *
+ * 红线（与电费充值 `passwordMap` 同构）：前端只拿 `keys`（位置 → 显示字符）渲染、
+ * 只回传 `padId` + **用户点击的位置下标序列**；密码明文只在后端拼装，用完即弃。
+ */
+export interface EcardSecurePad {
+  /** 后端随机化的一次性键盘 id（真实 `uuid` 不外泄） */
+  padId: string;
+  /** 位置 i → 该位置显示的字符（渲染用；提交的是**位置**不是字符） */
+  keys: string[];
+  /** 位置 i 对应的官方键盘图片（data URL / base64 片段，可能为空） */
+  images: string[];
 }

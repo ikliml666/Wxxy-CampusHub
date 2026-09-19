@@ -34,13 +34,17 @@ import type {
  * - **不实现跳转分支**（`webUrl`/`paysubmit`/`paymentcashierStr`/`qrCodeUrl`）：后端遇到会报错，
  *   这里只把服务端 `msg` 原样展示。
  *
- * # `third_party` 与 `path`（批 C 收口后）
+ * # `third_party` 与 `path`（批 C 收口后；M4.5 加无级联分支）
  *
  * 房间上下文串 `third_party`（= 末级 IEC 响应 `map.data` 的 JSON，含户号等 PII）**由后端按房间路径
  * 合成**（`recharge.rs::third_party_for_room`），前端只把**当前级联路径** `path` 交给
  * `recharge_create(feeitemId, tranamt, path)`。`path` 在命令层是 `Option`（只为兼容旧前端），
  * 缺失时后端回可读文案（「缺少房间信息，请返回上一步重新选择房间后再试（客户端需更新）」）——
  * 本组件经 `setMsg(created.message)` **原样展示**，不吞错误。
+ *
+ * **无级联片区**（一卡通充值 401）：`skipThirdParty` 为 true 时不传 `path`、改传
+ * `noContext: true`——后端建单体**不带 `third_party`**（401 没有级联上下文，实测
+ * `getThirdData` 恒 `code=500`）。电费流程不传该 prop，行为不变。
  */
 
 /** 结果轮询：间隔 2s、上限 15 次（≈30s）。 */
@@ -48,6 +52,11 @@ const POLL_INTERVAL_MS = 2_000;
 const POLL_MAX_ATTEMPTS = 15;
 /** 校园卡查询密码位数（点满自动提交）。 */
 const PASSWORD_LEN = 6;
+/**
+ * 金额形态（正数、至多两位小数）。一卡通充值（401）服务端**两侧都不校验**金额上下限，
+ * 前端必须把关「> 0 且至多两位小数」；电费片区同样适用（货币本就至多两位小数）。
+ */
+const AMOUNT_RE = /^\d+(\.\d{1,2})?$/;
 
 /** 下拉样式（与 `PowerPanel` 同款；面板内联 const 不值得到处导）。 */
 const SELECT_CLS =
@@ -71,12 +80,18 @@ export function RechargeFlow({
   feeitem,
   roomLabel,
   path,
+  skipThirdParty = false,
 }: {
   feeitem: FeeItem;
   /** 当前房间的人类可读标签（面包屑 name 拼接），仅展示 */
   roomLabel: string;
   /** 当前房间的完整级联路径（校区 → 楼栋 → 房间）：后端据它合成 `third_party`（PII 不出后端） */
   path: RoomStep[];
+  /**
+   * **无级联片区**（一卡通充值 401）：true ⇒ 建单不传 `path`、改传 `noContext: true`，
+   * 后端不带 `third_party`。电费流程保持缺省 false，行为不变。
+   */
+  skipThirdParty?: boolean;
 }) {
   const [amount, setAmount] = useState("");
   /** 风险声明勾选（计划 §2.4：勾选后方可继续） */
@@ -103,11 +118,13 @@ export function RechargeFlow({
       ? ""
       : !amountValid
         ? "请输入有效金额"
-        : feeitem.retainMoney != null && numeric < feeitem.retainMoney
-          ? `单次充值不能少于 ¥${feeitem.retainMoney}`
-          : feeitem.maxmoney != null && numeric > feeitem.maxmoney
-            ? `单次充值不能超过 ¥${feeitem.maxmoney}`
-            : "";
+        : !AMOUNT_RE.test(amount.trim())
+          ? "金额最多支持两位小数"
+          : feeitem.retainMoney != null && numeric < feeitem.retainMoney
+            ? `单次充值不能少于 ¥${feeitem.retainMoney}`
+            : feeitem.maxmoney != null && numeric > feeitem.maxmoney
+              ? `单次充值不能超过 ¥${feeitem.maxmoney}`
+              : "";
   const rangeCaption = [
     feeitem.retainMoney != null ? `单次 ${feeitem.retainMoney} 元起` : "",
     feeitem.maxmoney != null ? `单次最多 ${feeitem.maxmoney} 元` : "",
@@ -171,8 +188,10 @@ export function RechargeFlow({
       // 原样透传用户输入（红线：客户端不改写金额）
       tranamt: amount.trim(),
       // 房间路径：`third_party` 由后端按它合成（PII 不出后端）。空路径时后端会回可读文案，
-      // 走下面的 setMsg 原样展示。
-      path,
+      // 走下面的 setMsg 原样展示。无级联片区（skipThirdParty）则不带 path、显式声明 noContext，
+      // 后端建单体不带 third_party（见 skipThirdParty prop 注释）。
+      path: skipThirdParty ? undefined : path,
+      noContext: skipThirdParty ? true : undefined,
     });
     if (!created.success || !created.data?.orderId) {
       setPhase("error");

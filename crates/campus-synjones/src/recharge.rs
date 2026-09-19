@@ -386,15 +386,20 @@ pub async fn third_party_for_room(
 /// 建单：`POST /blade-pay/pay`（`paystep=0`），返回 `orderid`。
 ///
 /// `tranamt` **原样透传**（字符串，元）；`path` 是当前房间的完整级联路径（校区 → 楼栋 → 房间），
-/// `third_party` 由 [`third_party_for_room`] 在 crate 内合成——**调用方无法（也不需要）自己拼**，
-/// 房间上下文因此不会被伪造或写错。
+/// `Some(path)` 时 `third_party` 由 [`third_party_for_room`] 在 crate 内合成——**调用方无法
+/// （也不需要）自己拼**，房间上下文因此不会被伪造或写错。
+///
+/// `path = None` ⇒ **无级联片区**（2026-09-19 live 实测：一卡通充值 `feeitemid=401` 的
+/// `getThirdData` 回 `code=500`，没有级联上下文），建单体**不带 `third_party` 字段**——
+/// 官方建单体对该字段本就是可选的（电费带、其它缴费项不带）。注意 `Some(空路径)` 仍按
+/// 电费口径报「请先选择房间」（空路径 ≠ 无级联，见 [`third_party_for_room`]）。
 ///
 /// **副作用请求**：超时不重试（红线 3）；失败后若已产生订单，调用方须 `cancel_order` 清理（红线 6）。
 pub async fn create_order(
     client: &SynjonesClient,
     feeitem_id: &str,
     tranamt: &str,
-    path: &[RoomStep],
+    path: Option<&[RoomStep]>,
 ) -> Result<String, CampusSynjonesError> {
     let feeitem_id = feeitem_id.trim().to_string();
     if feeitem_id.is_empty() {
@@ -410,15 +415,20 @@ pub async fn create_order(
             ))
         }
     }
-    let third_party = third_party_for_room(client, &feeitem_id, path).await?;
-    let form: Vec<(&str, String)> = vec![
+    let third_party = match path {
+        Some(path) => Some(third_party_for_room(client, &feeitem_id, path).await?),
+        None => None,
+    };
+    let mut form: Vec<(&str, String)> = vec![
         ("feeitemid", feeitem_id),
         ("tranamt", tranamt),
         ("flag", FLAG_CHOOSE.to_string()),
         ("source", SOURCE_APP.to_string()),
         ("paystep", PAYSTEP_CREATE.to_string()),
-        ("third_party", third_party),
     ];
+    if let Some(third_party) = third_party {
+        form.push(("third_party", third_party));
+    }
     let v = client.post_form(EP_BLADE_PAY, &form, Envelope::Berserker).await?;
     let order_id = text_of(v["data"].get("orderid"));
     if order_id.is_empty() {
@@ -858,29 +868,35 @@ mod tests {
             ]
         };
 
-        let e = create_order(&c, " ", "1", &room_path("101"))
+        let e = create_order(&c, " ", "1", Some(&room_path("101")))
             .await
             .expect_err("空片区 id 应报错");
         assert!(matches!(e, CampusSynjonesError::Parse(_)), "实际 {e:?}");
 
         for bad in ["", "0", "-1", "abc"] {
-            let e = create_order(&c, "450", bad, &room_path("101"))
+            let e = create_order(&c, "450", bad, Some(&room_path("101")))
                 .await
                 .expect_err("非法金额应报错");
             assert!(matches!(e, CampusSynjonesError::Parse(_)), "{bad} 实际 {e:?}");
         }
 
-        let e = create_order(&c, "450", "1", &[])
+        let e = create_order(&c, "450", "1", Some(&[][..]))
             .await
             .expect_err("空路径应报错");
         assert!(matches!(e, CampusSynjonesError::Parse(_)), "实际 {e:?}");
         assert!(e.to_string().contains("请先选择房间"), "实际 {e}");
 
-        let e = create_order(&c, "450", "1", &room_path("  "))
+        let e = create_order(&c, "450", "1", Some(&room_path("  ")))
             .await
             .expect_err("空房间号应报错");
         assert!(matches!(e, CampusSynjonesError::Parse(_)), "实际 {e:?}");
         assert!(e.to_string().contains("第 3 级未填值"), "实际 {e}");
+
+        // 无级联片区（path=None，如一卡通充值 401）：入参校验全过、**不合成 third_party**，
+        // 直接走到发请求——无 TGT 客户端在此必然撞 `NotLogin`（不发网络），据此反证
+        // 「没有先去 third_party_for_room 报『请先选择房间』」。
+        let e = create_order(&c, "401", "1", None).await.expect_err("无会话应报错");
+        assert!(matches!(e, CampusSynjonesError::NotLogin), "实际 {e:?}");
 
         let e = third_party_for_room(&c, "450", &[])
             .await

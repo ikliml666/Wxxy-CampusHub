@@ -20,8 +20,7 @@ import { InfoPanel } from "@/panels/InfoPanel";
 import { TodoPanel } from "@/panels/TodoPanel";
 import { SchedulePanel } from "@/panels/SchedulePanel";
 import { AppsPanel } from "@/panels/AppsPanel";
-import { WalletPanel } from "@/panels/WalletPanel";
-import { PowerPanel } from "@/panels/PowerPanel";
+import { EcardsPanel } from "@/panels/EcardsPanel";
 import { SettingsPanel } from "@/panels/SettingsPanel";
 
 const PANEL_MAP: Record<PanelId, ComponentType> = {
@@ -31,8 +30,7 @@ const PANEL_MAP: Record<PanelId, ComponentType> = {
   todo: TodoPanel,
   schedule: SchedulePanel,
   apps: AppsPanel,
-  wallet: WalletPanel,
-  power: PowerPanel,
+  ecard: EcardsPanel,
   settings: SettingsPanel,
 };
 

@@ -25,7 +25,14 @@ source_files:
   - tauri-app/frontend/src/panels/TodoPanel.tsx
   - tauri-app/frontend/src/panels/SchedulePanel.tsx
   - tauri-app/frontend/src/panels/AppsPanel.tsx
-  - tauri-app/frontend/src/panels/WalletPanel.tsx
+  - tauri-app/frontend/src/panels/EcardsPanel.tsx
+  - tauri-app/frontend/src/components/ecard/EcardHome.tsx
+  - tauri-app/frontend/src/components/ecard/EcardBalanceView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardBillView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardStatsView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardPowerView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardRechargeView.tsx
+  - tauri-app/frontend/src/components/ecard/MiniLine.tsx
   - tauri-app/frontend/src/panels/SettingsPanel.tsx
 tags:
   - react
@@ -39,12 +46,12 @@ tags:
 
 # 前端外壳（frontend-shell）
 
-`tauri-app/frontend/src`：React 19 + TypeScript + Tailwind v4。分层：`shared/`（IPC 契约与工具）、`stores/`（zustand：authStore 登录态 + uiStore 界面态）、`components/`（外壳与共享组件 + shadcn 源码入库的 `ui/*`）、`panels/`（9 面板）。设计语言与域色 token 见 [[concepts/domain-color-system|域色编码系统]]；游客模式与账号系统的取舍见 [[decisions/guest-mode-account-shell|游客优先与账号外壳决策]]。
+`tauri-app/frontend/src`：React 19 + TypeScript + Tailwind v4。分层：`shared/`（IPC 契约与工具）、`stores/`（zustand：authStore 登录态 + uiStore 界面态）、`components/`（外壳与共享组件 + shadcn 源码入库的 `ui/*`）、`panels/`（8 面板，M4.5 起——原「钱包」「电费」合并为 `EcardsPanel`，取舍见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]，页面结构见 [[modules/ecard-panel|一卡通页]]）。设计语言与域色 token 见 [[concepts/domain-color-system|域色编码系统]]；游客模式与账号系统的取舍见 [[decisions/guest-mode-account-shell|游客优先与账号外壳决策]]。
 
 ## IPC 出口与契约类型（shared/）
 
 - `tauriApi.ts:8-17`：`invokeCommand<T>(cmd, args)` 是**唯一 IPC 出口**，invoke 抛错包装为 `{ success:false, message:String(e) }`，调用方只处理 CommandResult（契约详见 [[modules/campus-hub-tauri|接线层]] 与 [[_architecture|架构总览]]）。
-- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:127-177`：M2 批次 3 契约 7 接口（`AppAccess` 四值联合类型 + `AppItem`（含 `access`，M2 遗留项新增）/ `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全，`extra` 承载会议附加信息）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` 9 项（today/**timetable**/info/todo/schedule/apps/wallet/power/settings，M2.5 批次 4 追加 "timetable"，注释明示三处同步：本类型 + DockNav DOCK_ITEMS + AppShell PANEL_MAP）；`types.ts:188` 起：M2.5 课表契约 12 接口（镜像 `campus-schedule::model` 与 `commands/timetable.rs` 的 camelCase 序列化：`CourseSource` / `Course`（`startSection/endSection/classId/remark` 为 `| null` 恒存在；`colorIndex` 导入课程是**课名哈希大数**，取色必须 `% 色板长度`）/ `CourseTableConfig` / `OverrideKind` / `CourseOverride` / `Timetable` / `TimeSlot` / `TimetableView`（批次 4 修订契约）/ `ImportResult` / `ManualCourseInput` / `NoticeConfidence` / `NoticeCandidate`——⚠️ `NoticeCandidate` 的 Option 字段 Rust 侧 `skip_serializing_if` 缺省省略 → TS 用**可选属性**（非 `| null`），与 Course/Override 的恒存在 null 字段区分）。
+- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:127-177`：M2 批次 3 契约 7 接口（`AppAccess` 四值联合类型 + `AppItem`（含 `access`，M2 遗留项新增）/ `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全，`extra` 承载会议附加信息）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` **8 项**（M4.5：today/timetable/info/todo/schedule/apps/**ecard**/settings，原 "wallet"+"power" 合并为 "ecard"，注释明示三处同步：本类型 + DockNav DOCK_ITEMS + AppShell PANEL_MAP）；`types.ts:188` 起：M2.5 课表契约 12 接口（镜像 `campus-schedule::model` 与 `commands/timetable.rs` 的 camelCase 序列化：`CourseSource` / `Course`（`startSection/endSection/classId/remark` 为 `| null` 恒存在；`colorIndex` 导入课程是**课名哈希大数**，取色必须 `% 色板长度`）/ `CourseTableConfig` / `OverrideKind` / `CourseOverride` / `Timetable` / `TimeSlot` / `TimetableView`（批次 4 修订契约）/ `ImportResult` / `ManualCourseInput` / `NoticeConfidence` / `NoticeCandidate`——⚠️ `NoticeCandidate` 的 Option 字段 Rust 侧 `skip_serializing_if` 缺省省略 → TS 用**可选属性**（非 `| null`），与 Course/Override 的恒存在 null 字段区分）。
 - `cn.ts:3-5`：clsx + tailwind-merge 的 `cn()`。
 
 ## authStore：登录态单一来源（zustand + persist）
@@ -60,7 +67,7 @@ tags:
 
 ## uiStore：界面态（面板路由 / 主题 / 弹层开关）
 
-`stores/uiStore.ts:11-58`：`activePanel` + `theme`（两者持久化，键 `campushub-ui`，persist `version: 1`）+ `loginDialogOpen` / `avatarDialogOpen`（一次性 UI 状态，`partialize` 排除，`uiStore.ts:55`）。displayName 已迁往 authStore。登录/头像弹层的**唯一开关**在此：`openLoginDialog()` / `openAvatarDialog()` 供任意入口调用，弹层组件挂载在 App 根部监听同一状态。M2.5 批次 4 追加 `"timetable"` 面板时加了 `migrate`（`uiStore.ts:59-69`）：旧持久化值（无 version 字段按 0 处理触发迁移）原样保留、非法 `activePanel` 兜底回 `"today"`，防止 `PANEL_MAP` 查空白屏。
+`stores/uiStore.ts:11-58`：`activePanel` + `theme` + `ecardView`（三者持久化，键 `campushub-ui`，persist `version: 3`）+ `loginDialogOpen` / `avatarDialogOpen`（一次性 UI 状态，`partialize` 排除，`uiStore.ts:55`）。displayName 已迁往 authStore。登录/头像弹层的**唯一开关**在此：`openLoginDialog()` / `openAvatarDialog()` 供任意入口调用，弹层组件挂载在 App 根部监听同一状态。M2.5 批次 4 追加 `"timetable"` 面板时加了 `migrate`（`uiStore.ts:59-69`）：旧持久化值（无 version 字段按 0 处理触发迁移）原样保留、非法 `activePanel` 兜底回 `"today"`，防止 `PANEL_MAP` 查空白屏。**M4.5 v3 迁移（`uiStore.ts:92-112`）**：旧 `activePanel` 的 `"wallet"`/`"power"` **显式映射到 `"ecard"`**（不依赖非法值兜底——兜底会把老用户踢回今日页、白丢一次点击）；新增 `ecardView`/`setEcardView`（持久化，非法值兜底 `"home"`），支撑今日页快捷动作**直达一卡通子页**（取舍见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]）。
 
 ## App.tsx：游客模式（壳恒渲染）
 
@@ -72,7 +79,7 @@ tags:
 
 - **新顶栏**（`AppShell.tsx:51-112`）：sticky、`bg-bg/85` 毛玻璃。左：品牌块（渐变方标「锡」+ 双行标识，`AppShell.tsx:53-69`）；中：搜索胶囊（**命令面板已实现**（2026-09-19 补做，原为 M2 遗留的 `aria-disabled` 占位）：点击或 `Cmd/Ctrl+K` 呼起，`AppShell.tsx:75-97` 触发条、`:137` 挂载 `<CommandPalette />`；面板本体 `CommandPalette.tsx`，数据源 = DockNav `DOCK_ITEMS` 页面项 + 现有 store 动作 + 设置跳转，键盘 `↑/↓/Enter/Esc` 可全程操作）；右：铃铛占位（M5 接入）+ AccountMenu 账号胶囊（`AppShell.tsx:94-110`）。
 - **主题单向同步**：`useEffect` 把 uiStore `theme` 同步到 `documentElement.classList.toggle("dark")`（`AppShell.tsx:43-46`）；开关入口在 AccountMenu 的「深色模式」行。
-- **面板注册表** `PANEL_MAP: Record<PanelId, ComponentType>`（`AppShell.tsx:26-36`），9 面板静态 import。
+- **面板注册表** `PANEL_MAP: Record<PanelId, ComponentType>`（`AppShell.tsx:26-36`），8 面板静态 import（`ecard` → `EcardsPanel`，`AppShell.tsx:33`）。
 - **切换动画**：`useDeferredValue(activePanel)` 保证快速连切时只渲染最终面板、AnimatePresence 不闪烁（`AppShell.tsx:39-41`）；`<AnimatePresence mode="wait">` 包 `motion.div`（key=deferredPanel，进入 spring stiffness 400 / damping 40，退出 0.04s 淡出，`AppShell.tsx:114-129`）。
 
 ## AccountMenu：账号系统（顶栏右上角）
@@ -112,7 +119,11 @@ tags:
 
 ## 面板：游客空态与数据接入中
 
-8→9 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」（如 WalletPanel.tsx:50-54）。已接真实数据的面板：TodayPanel（M2 批次 1，见下节）、InfoPanel 与 TodoPanel（M2 批次 2，见下两节）、AppsPanel 与 SchedulePanel（M2 批次 3，见下两节）、TimetablePanel（M2.5 批次 4，见下节）。TodayPanel 游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
+8 面板统一节奏：`PanelHeader` 页头 + `Surface` 卡片 + `EmptyState` 空态。**游客**（status=guest）显示「登录后查看×××」+ 登录按钮（经 `openLoginDialog`）；**已登录未接线**显示「数据接入中」。已接真实数据的面板：TodayPanel（M2 批次 1，见下节）、InfoPanel 与 TodoPanel（M2 批次 2，见下两节）、AppsPanel 与 SchedulePanel（M2 批次 3，见下两节）、TimetablePanel（M2.5 批次 4，见下节）、EcardsPanel（M4.5，见下节）。TodayPanel 游客态保留可关闭的登录引导条（本地 state 不持久化，`TodayPanel.tsx:153-166`）与分时段问候；快捷动作为游客点已落地项先登录、未落地项禁用 + tooltip（`TodayPanel.tsx:231` 起）。
+
+## EcardsPanel：一卡通页（M4.5，9→8 面板合并）
+
+原「钱包」（WalletPanel）与「电费」（PowerPanel）合并为 `panels/EcardsPanel.tsx`（宫格首页 ⇄ 子页，`EcardView` 六值），两个旧面板文件已删除；电费内容整体迁入 `components/ecard/EcardPowerView.tsx`（级联/常用房间/结果卡逻辑未动，见 [[modules/electricity-panel|电费页]]）。子页与数据源、命令面、门控、单位口径与脱敏策略详见 [[modules/ecard-panel|一卡通页]]，合并决策见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]。TodayPanel 快捷动作「查电费」「卡片充值」改指 `ecard` 面板并**直达子页**（`TodayPanel.tsx:109-110` 设 `ecardView: "power"/"recharge"`，`TodayPanel.tsx:441` 应用）。
 
 ## TodayPanel：今日页真实数据（M2 批次 1）
 
@@ -176,11 +187,11 @@ tags:
 - **四态**：guest → 登录空态；loading 骨架；ready 且 0 门 → 「导入课表/手动添加」引导；error 可重试。另：`currentWeek === null`（未设开学日）时显示琥珀提示「按第 N 周展示，导入可自动设置」。
 
 
-## DockNav：悬浮 Dock 导航（M2.5 批次 4 起 9 项）
+## DockNav：悬浮 Dock 导航（M4.5 起 8 项）
 
 `components/DockNav.tsx`，macOS Dock 式底部悬浮导航：
 
-- **9 项配置** `DOCK_ITEMS`（`DockNav.tsx:26-44`）：每项 `{ id, label, icon, color }`，color 引用域色 CSS 变量（今日=brand、**课表=sched**（`CalendarRange` 图标，2026-09-18 M2.5 批次 4 追加，置于「今日」之后；9 项总宽约 416px，1280px 默认窗口不溢出，磁吸/胶囊动画按 DOCK_ITEMS 遍历注册无需额外适配）、资讯=info、待办=todo、日程/应用=sched、钱包/电费=wallet、设置=text-2）。
+- **8 项配置** `DOCK_ITEMS`（`DockNav.tsx:26-44`）：每项 `{ id, label, icon, color }`，color 引用域色 CSS 变量（今日=brand、课表=sched、资讯=info、待办=todo、日程/应用=sched、**一卡通=wallet**（`Wallet` 图标 + wallet 域色，label「一卡通」，M4.5 由「钱包/电费」两项合并而来）、设置=text-2）。
 - **gsap 磁吸**：注册每项 `gsap.quickTo(btn, "scale"/"y")`（duration 0.35，ease expo.out，`DockNav.tsx:68-79`）；容器 `onMouseMove` 以 RAF 节流，按指针到各项中心的距离插值——80px 半径内 scale 最高 1.35、上浮最高 -14px（`MAGNETIC_RANGE/MAX_SCALE/MAX_LIFT` `DockNav.tsx:41-43`；插值逻辑 `DockNav.tsx:107-124`）。
 - **reduced-motion 降级**：`prefers-reduced-motion: reduce` 命中则不注册磁吸（`magnetEnabled=false` 直接短路，`DockNav.tsx:61-63`）；清理时 `gsap.killTweensOf` + 移除 resize 监听（`DockNav.tsx:95-103`）。
 - **域色胶囊**：激活项用 `layoutId="dock-pill"` 的 motion.span 共享布局动画（spring 500/34），背景 `color-mix(in srgb, 域色 14%, transparent)`；底部 `layoutId="dock-dot"` 同域色圆点（`DockNav.tsx:159-187`）。两个 layoutId 使胶囊/圆点在项间平滑滑动。

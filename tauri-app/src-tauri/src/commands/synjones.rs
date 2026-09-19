@@ -25,7 +25,7 @@
 use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use campus_synjones::ecard::{
-    fetch_cards, fetch_current_card, fetch_transactions, CardInfo, Transactions,
+    fetch_cards, fetch_current_card, fetch_transactions, CardInfo, Transactions, TurnoverFilter,
 };
 use campus_synjones::{CampusSynjonesError, SynjonesClient};
 use serde::Serialize;
@@ -33,7 +33,7 @@ use std::sync::OnceLock;
 use tauri::State;
 
 /// 无会话时的约定文案（与 portal.rs / profile.rs / timetable.rs 同口径）。
-const ERR_NO_SESSION: &str = "请先登录";
+pub(crate) const ERR_NO_SESSION: &str = "请先登录";
 
 /// 流水每页条数（前端「加载更多」按 `total` 判断是否还有下一页）。
 const PAGE_SIZE: u32 = 15;
@@ -144,17 +144,22 @@ pub async fn get_ecard(state: State<'_, AppState>) -> Result<CommandResult<Ecard
     }))
 }
 
-/// 流水一页：`account` 为卡号（先取 [`get_ecard`]），`page` 从 1 起。
-/// 不带方向过滤 = 全量（实测 1042 = 支出 1006 + 收入 36）。
+/// 流水一页（一卡通面板批 1 扩展了筛选参数，契约 §2.2）：
+/// `account` 可选（缺省查本人全部流水）；`type`（`r#type`）：`"1"` 收入 / `"2"` 支出 /
+/// 缺省全量；`type_id` 分类、`info` 关键词、`order_id` 单条详情。`page` 从 1 起，`size` 缺省 15。
+///
+/// 未传的可选筛选参数不会出现在服务端 query 里（crate 层保证，实测语义：不传 = 不过滤）。
 #[tauri::command]
 pub async fn get_ecard_transactions(
     state: State<'_, AppState>,
-    account: String,
+    account: Option<String>,
     page: u32,
+    size: Option<u32>,
+    r#type: Option<String>,
+    type_id: Option<String>,
+    info: Option<String>,
+    order_id: Option<String>,
 ) -> Result<CommandResult<Transactions>, String> {
-    if account.trim().is_empty() {
-        return Ok(CommandResult::err("卡号缺失，请刷新余额后重试"));
-    }
     let Some(guard) = synjones_session(&state).await else {
         return Ok(CommandResult::err(ERR_NO_SESSION));
     };
@@ -163,8 +168,17 @@ pub async fn get_ecard_transactions(
     };
     let client = &sess.client;
 
+    let filter = TurnoverFilter {
+        account: account.as_deref().unwrap_or(""),
+        direction: r#type.as_deref(),
+        type_id: type_id.as_deref(),
+        info: info.as_deref(),
+        order_id: order_id.as_deref(),
+        sort_fields: None,
+        sort_type: None,
+    };
     Ok(
-        match fetch_transactions(client, &account, page, PAGE_SIZE, "").await {
+        match fetch_transactions(client, &filter, page, size.unwrap_or(PAGE_SIZE)).await {
             Ok(t) => CommandResult::ok(t),
             Err(e) => CommandResult::err(&err_text(&e)),
         },

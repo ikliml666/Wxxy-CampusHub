@@ -32,7 +32,7 @@ use campus_auth::cas::CasClient;
 use campus_auth::rsa::rsa_encrypt_hex;
 use campus_synjones::charge::{list_feeitems, query_cascade, RoomStep, EP_FEEITEM, EP_SINGLE_FEEITEM};
 use campus_synjones::client::Envelope;
-use campus_synjones::ecard::{fetch_current_card, fetch_transactions, EP_TURNOVER};
+use campus_synjones::ecard::{fetch_current_card, fetch_transactions, TurnoverFilter, EP_TURNOVER};
 use campus_synjones::sso::{default_target_url, ly_cas_service_url, ly_cas_redirect_url, sso_token};
 use campus_synjones::{SynjonesClient, SynjonesToken, BERSERKER_BASE};
 use serde_json::Value;
@@ -832,9 +832,14 @@ async fn synjones_ecard_live() {
     );
 
     // ---------- 2) 流水（支出方向，批 1 实测 total=1006） ----------
-    let page = fetch_transactions(&client, &card.account, 1, 5, "2")
-        .await
-        .expect("turnover?type=2 应成功");
+    let page = fetch_transactions(
+        &client,
+        &TurnoverFilter { account: &card.account, direction: Some("2"), ..Default::default() },
+        1,
+        5,
+    )
+    .await
+    .expect("turnover?type=2 应成功");
     println!("[流水 type=2] total={} 本页条数={}", page.total, page.records.len());
     assert!(!page.records.is_empty(), "支出方向流水应有记录");
     if let Some(first) = page.records.first() {
@@ -852,7 +857,14 @@ async fn synjones_ecard_live() {
     }
 
     // 收支两个方向都取一页（收入方向 total 批 1 实测 36）
-    if let Ok(income) = fetch_transactions(&client, &card.account, 1, 3, "1").await {
+    if let Ok(income) = fetch_transactions(
+        &client,
+        &TurnoverFilter { account: &card.account, direction: Some("1"), ..Default::default() },
+        1,
+        3,
+    )
+    .await
+    {
         println!("[流水 type=1] total={} 本页条数={}", income.total, income.records.len());
     }
     // 不带 type = 全部？决定钱包页流水列表要不要过滤方向

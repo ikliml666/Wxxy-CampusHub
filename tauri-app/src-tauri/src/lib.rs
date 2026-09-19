@@ -87,6 +87,13 @@ pub fn run() {
             commands::electricity_history::get_electricity_history,
             commands::electricity_history::bind_electricity_room,
             commands::electricity_history::run_electricity_snapshot,
+            commands::ecard::get_ecard_overview,
+            commands::ecard::get_ecard_types,
+            commands::ecard::get_ecard_stats_summary,
+            commands::ecard::get_ecard_stats_series,
+            commands::ecard::get_ecard_stats_assort,
+            commands::ecard::get_ecard_transfer_accounts,
+            commands::ecard::get_ecard_secure_keyboard,
         ])
         // M4 批 2 启动补采：今天还没采过 + 有内存会话时，后台补一次日余额快照。
         // 不弹窗、不阻塞启动（spawn 后立刻返回）、失败只记日志（不出现 token/账号/户号）。

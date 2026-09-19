@@ -12,6 +12,7 @@ import {
 import type { PanelDomain } from "@/components/PanelHeader";
 import type {
   CourseBrief,
+  EcardView,
   PanelId,
   PortalOverview,
   TodayCourse,
@@ -100,11 +101,13 @@ const QUICK_ACTIONS: {
   label: string;
   icon: LucideIcon;
   panel?: PanelId;
+  /** 目标是「一卡通」面板时直达的子页（M4.5：钱包/电费合并成一个入口后仍一步到位） */
+  ecardView?: EcardView;
   enabled: boolean;
   arrow?: boolean;
 }[] = [
-  { label: "查电费", icon: Zap, panel: "power", enabled: true },
-  { label: "卡片充值", icon: CreditCard, panel: "wallet", enabled: true },
+  { label: "查电费", icon: Zap, panel: "ecard", ecardView: "power", enabled: true },
+  { label: "卡片充值", icon: CreditCard, panel: "ecard", ecardView: "recharge", enabled: true },
   { label: "网络报修", icon: Wrench, enabled: false },
   { label: "办事大厅", icon: Landmark, enabled: false },
   { label: "全部应用", icon: LayoutGrid, panel: "apps", enabled: true, arrow: true },
@@ -156,6 +159,7 @@ export function TodayPanel() {
   const avatarBase64 = useAuthStore((s) => s.avatarBase64);
   const openLoginDialog = useUiStore((s) => s.openLoginDialog);
   const setActivePanel = useUiStore((s) => s.setActivePanel);
+  const setEcardView = useUiStore((s) => s.setEcardView);
   const [guideDismissed, setGuideDismissed] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ phase: "loading" });
   const [localCourses, setLocalCourses] = useState<LocalCoursesState>({ phase: "loading" });
@@ -434,6 +438,7 @@ export function TodayPanel() {
                       return;
                     }
                     if (action.panel) setActivePanel(action.panel);
+                    if (action.ecardView) setEcardView(action.ecardView);
                   }}
                 >
                   <action.icon aria-hidden="true" />

@@ -23,7 +23,8 @@
 //!    `code=500`，见 `tests/recharge_live.rs::recharge_diag_live`），故无法在进入流程前预检遗留单。
 //! 7. **`third_party` 由后端合成**：`recharge_create` 收「房间路径」而不是上下文串——crate 内部按路径
 //!    重放一次 `getThirdData` 取末级 `map.data`（含户号 PII）拼串后随建单发出，PII 全程不出后端，
-//!    前端也无从伪造房间上下文（见 `recharge::third_party_for_room`）。
+//!    前端也无从伪造房间上下文（见 `recharge::third_party_for_room`）。**例外**：显式传
+//!    `no_context: true`（一卡通充值 401，无级联上下文）时不带 `third_party`，见 `recharge_create`。
 //!
 //! # token 单活 → 沿用批 2 的全局唯一客户端
 //!
@@ -400,8 +401,18 @@ pub struct RechargeAccounts {
 
 /// **建单**（电费 `paystep=0`，金额 1 元起；副作用请求只发一次）。
 ///
-/// `path` = 当前房间的完整级联路径（校区 → 楼栋 → 房间，与 `query_electricity` 的入参同构）——**必填语义**。
+/// `path` = 当前房间的完整级联路径（校区 → 楼栋 → 房间，与 `query_electricity` 的入参同构）。
 /// `third_party`（房间上下文串）**由后端按该路径合成**——前端拿不到也不需要（见模块头注红线 7）。
+///
+/// `no_context = true` ⇒ **无级联片区**（2026-09-19 live 实测：一卡通充值 `feeitemid=401`
+/// 没有级联上下文，`getThirdData` 恒 `code=500`）：`path` 可缺省，建单体**不带 `third_party`**。
+///
+/// # 为什么用显式开关而不是「缺省 path 即放行」
+///
+/// 若把「`path` 缺省 ⇒ 不带上下文」当默认语义，电费片区前端忘传 `path` 会从**报错**退化成
+/// **静默无上下文建单**——学校侧会报一个与「忘传参数」毫不相干的错，排查成本高。故维持
+/// 「缺 `path` 即报『缺少房间信息』」的旧契约，只有调用方**显式**声明 `no_context: true`
+/// （目前仅一卡通充值 401）才走无上下文分支；显式开关是调用方有意识的选择，不易误用。
 ///
 /// ⚠️ `path` 声明成 `Option` **只为兼容尚未升级的旧前端**：批 D 已提交的调用没传 `path`
 /// （它在等后端给上下文串）。不声明 `Option` 时 Tauri 会在反序列化阶段就报 `invalid args`（IPC 层错误，
@@ -414,17 +425,26 @@ pub async fn recharge_create(
     feeitem_id: String,
     tranamt: String,
     path: Option<Vec<RoomStep>>,
+    no_context: Option<bool>,
 ) -> Result<CommandResult<RechargeCreated>, String> {
-    let Some(path) = path.filter(|p| !p.is_empty()) else {
-        return Ok(CommandResult::err(
-            "缺少房间信息，请返回上一步重新选择房间后再试（客户端需更新）",
-        ));
+    let path = if no_context.unwrap_or(false) {
+        // 无级联片区：即使带了 path 也不发上下文（一卡通充值没有房间语义，带了必是误传）
+        None
+    } else {
+        let Some(p) = path.filter(|p| !p.is_empty()) else {
+            return Ok(CommandResult::err(
+                "缺少房间信息，请返回上一步重新选择房间后再试（客户端需更新）",
+            ));
+        };
+        Some(p)
     };
     with_synjones!(state, |client| {
-        Ok(match recharge::create_order(client, &feeitem_id, &tranamt, &path).await {
-            Ok(order_id) => CommandResult::ok(RechargeCreated { order_id }),
-            Err(e) => CommandResult::err(&elec_err(&e)),
-        })
+        Ok(
+            match recharge::create_order(client, &feeitem_id, &tranamt, path.as_deref()).await {
+                Ok(order_id) => CommandResult::ok(RechargeCreated { order_id }),
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
     })
 }
 

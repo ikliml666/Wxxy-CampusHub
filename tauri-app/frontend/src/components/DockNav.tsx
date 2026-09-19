@@ -8,7 +8,6 @@ import {
   Settings,
   SunMedium,
   Wallet,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -29,7 +28,7 @@ export const DOCK_ITEMS: {
   icon: LucideIcon;
   color: string;
 }[] = [
-  // 9 项（M2.5 批次 4 追加课表）：总宽约 9×40 + 8×4 + 24 = 416px，
+  // 8 项（M4.5：原「钱包」+「电费」两个入口合并成「一卡通」）：总宽约 8×40 + 7×4 + 24 = 372px，
   // 1280px 默认窗口下不溢出；磁吸/胶囊动画按 DOCK_ITEMS 遍历注册，无需额外适配。
   { id: "today",     label: "今日", icon: SunMedium,      color: "var(--color-brand)" },
   { id: "timetable", label: "课表", icon: CalendarRange,  color: "var(--color-sched)" },
@@ -37,8 +36,7 @@ export const DOCK_ITEMS: {
   { id: "todo",      label: "待办", icon: ListChecks,     color: "var(--color-todo)" },
   { id: "schedule",  label: "日程", icon: CalendarDays,   color: "var(--color-sched)" },
   { id: "apps",      label: "应用", icon: LayoutGrid,     color: "var(--color-sched)" },
-  { id: "wallet",    label: "钱包", icon: Wallet,         color: "var(--color-wallet)" },
-  { id: "power",     label: "电费", icon: Zap,            color: "var(--color-wallet)" },
+  { id: "ecard",     label: "一卡通", icon: Wallet,       color: "var(--color-wallet)" },
   { id: "settings",  label: "设置", icon: Settings,       color: "var(--color-text-2)" },
 ];
 

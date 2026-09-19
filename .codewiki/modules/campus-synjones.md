@@ -9,7 +9,10 @@ source_files:
   - crates/campus-synjones/src/charge.rs
   - crates/campus-synjones/src/recharge.rs
   - crates/campus-synjones/src/turnover.rs
+  - crates/campus-synjones/src/ecard_stats.rs
+  - crates/campus-synjones/src/ecard_ops.rs
   - crates/campus-synjones/tests/m4_history_probe_live.rs
+  - crates/campus-synjones/tests/ecard_features_probe_live.rs
   - tauri-app/frontend/src/components/RechargeFlow.tsx
   - crates/campus-synjones/tests/synjones_live.rs
   - tauri-app/src-tauri/src/commands/synjones.rs
@@ -28,7 +31,7 @@ tags:
 
 # 慧新E校协议核心（campus-synjones）
 
-`crates/campus-synjones`：校内慧新E校平台（`http://10.3.100.110`，哈尔滨新中中/synjones）的**协议单点**，供 M3 的「钱包（一卡通）」与「电费」两条业务使用。分层与 [[modules/campus-portal|门户协议核心]] 对称：一个外部系统一个 crate，鉴权与信封不与会话/门户混用。命令层落在 `commands/synjones.rs`（一卡通）与 `commands/electricity.rs`（电费 + 充值窗口），只做「锁内 clone → 调 crate → 映射 `CommandResult`」。
+`crates/campus-synjones`：校内慧新E校平台（`http://10.3.100.110`，哈尔滨新中中/synjones）的**协议单点**，供「一卡通」（M4.5 起含电费缴费与充值，页面见 [[modules/ecard-panel|一卡通页]]）业务使用。分层与 [[modules/campus-portal|门户协议核心]] 对称：一个外部系统一个 crate，鉴权与信封不与会话/门户混用。模块划分：`ecard.rs`（卡/流水）、`ecard_stats.rs`（统计四端点，2026-09-19 新增）、`ecard_ops.rs`（安全键盘，2026-09-19 新增）、`charge.rs`（电费级联）、`turnover.rs`（缴费历史）、`recharge.rs`（充值支付链路）。命令层落在 `commands/synjones.rs`（一卡通流水）、`commands/ecard.rs`（一卡通总览/统计/键盘）与 `commands/electricity.rs`（电费 + 充值窗口），只做「锁内 clone → 调 crate → 映射 `CommandResult`」。
 
 ## 一、鉴权：四件必须记住的事
 
@@ -54,10 +57,18 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 ### 一卡通（`ecard.rs`，全部需 token）
 
 - 卡信息 `GET /berserker-app/ykt/tsm/queryCurrentCard`（无参）/ `queryCard?account=` / `?scene=recharge`；`data.card[]`。
-- **余额口径（易错点）**：`elec_accamt`（单位**分**）是**电子账户**余额（`elec` = electronic），不是电费；卡账户是 `(db_balance + unsettle_amount)`。两者可差很远（实测样本里一个非零、另一个为 0），**UI 以电子账户为主、卡账户次级展示**（`WalletPanel`）。
+- **余额口径（易错点）**：`elec_accamt`（单位**分**）是**电子账户**余额（`elec` = electronic），不是电费；卡账户是 `(db_balance + unsettle_amount)`。两者可差很远（实测样本里一个非零、另一个为 0），**UI 以电子账户为主、卡账户次级展示**（现由 `EcardClientConfig.balanceShowsElectronic` 按 `getEcardConfig.type` 判定，见 [[modules/ecard-panel|一卡通页]]）。
 - `cardname` 实测**可能是空串** → 回落链 `cardname → card_name → cardtype`（`ecard.rs`）。
 - 消费流水在**独立服务** `GET /berserker-search/search/personal/turnover`（`size`/`current`/`account`/`type`；信封用 `Envelope::Search`）→ `{code,data:{total,records[]}}`。**`type` 是收支方向**：`1`=收入、`2`=支出、`3`=空；**不传 `type` 即全量**（实测全量 = 收入 + 支出总数）。记录字段：`jndatetimeStr`、`resume`、`tranamt`（分）、`typeFrom`（`"1"` 为收入）、`cardBalance`（交易后余额快照，分）、`locationName`、`payName`、`consumeTypeName`。
-- 「今日/本月消费」**无解**：`statistics/turnover/sum/user` 需五参、多种参数组合实测全部返回空 `data`；`statistics/turnover/count` 给的是**全时段**总额且无视日期参数。故 UI 显示「暂不可用」，不要用 count 冒充。
+- **统计四端点（2026-09-19 live 实测，全部可用；⚠️ 本文件早前记录的「今日/本月消费无解、UI 显示暂不可用」结论已被探针推翻——根因是旧探针参数形态不对，接口本就支持，更正过程与完整参数表见 [[learnings/ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘]]）**：
+  - `GET /berserker-search/statistics/turnover/count`：`timeFrom`/`timeTo` **实测生效**（无参 533160 分 / 2026 全年 241540 分 / 2020-01 为 0，三组互不相同），回 `data.expenses`/`data.income`（分）。
+  - `GET /berserker-search/statistics/turnover/sum/user`：`dateStr`（`2026-09`/`2026`）+ `dateType`（`month`/`year`）+ `statisticsDateStr`（`day`/`month`）+ `type`（1 收入/2 支出），回 `data` 为 `{"日期": 金额分}` map（年视图键 `"2026-03"`）；实现于新模块 `ecard_stats.rs`（`fetch_stats_series`），后端转**按 key 升序数组、零值保留**（`parse_series`）。
+  - `GET /berserker-search/statistics/turnover`（分类聚合）：`type`+`timeFrom`+`timeTo`，回 `{amount(分), typeId, turnoverType, nameEn}`。
+  - `GET /berserker-search/search/turnoverType`（分类字典）：5 项（1 消费/2 充值/3 退款/4 扫码付/5 补贴）。
+  - 四者前缀都在 `/berserker-search/` ⇒ 信封一律 `Envelope::Search`。
+- **消费流水增强（`ecard.rs` 的 `TurnoverFilter`，2026-09-19）**：在原 `type`（收支方向）之上新增 `typeId`（分类 id，取自 turnoverType 字典）/`info`（关键词搜索，自动附带 `highlightFieldsClass=text-primary` 官方同款）/`orderId`（单条详情，命中时 `total=1`）/`sortFields`+`sortType`；`build_turnover_params` 保证**未传的可选参数不进 query**。`Transaction` 补 6 字段：`orderId/typeId/turnoverType/labelName/labelRemark/cardBalanceYuan`。
+- **多卡视图与脱敏**：`fetch_cards_full`（`GET /berserker-app/ykt/tsm/getCampusCards`）+ `CardDetail`/`AccInfo`（脱敏卡视图，金额分→元）；`mask_account` 策略：够长前 5+`****`+后 2，**短卡号**（本校 5 位）首位+`****`+末 2（旧实现短号一律 `****`，等于没显示）。
+- **安全键盘（`ecard_ops.rs`，写操作预备件）**：`GET /berserker-secure/keyboard?type=Number|Standard`（信封 `Berserker`）取 `numberKeyboard` 乱序串 + 图片 + uuid；进程级缓存（uuid→映射，TTL 300s、至多 8 把、`take_pad` 取走即删）；提交协议 `pwd = "1$1$" + 位置下标序列 + "$1$" + uuid`。本批只到「取键盘 + 缓存」，机制与安全红线见 [[learnings/ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘]]。
 
 ### 电费（`charge.rs`）
 
@@ -69,6 +80,7 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 - **结果字段是单键自由文本**：`map.showData` 的键名**恒为 `信息`**，值是各片区**格式互不相同**的自由文本（有的含「剩余金额 + 单价」，有的含「余额 + 剩余电量」，有的只有「剩余电费」）；`map.money` / `map.iectranamt` 实测**都不存在**（恒 `null`）。所以 `ElectricityView.fields` 做**通用字典渲染**、前端按逗号折行、负数标红——**绝不做文本解构**（三片区格式各异，解构会随文案漂移静默失效）。
 - **结构化余额 `ElectricityView.balance_yuan`（元，2026-09-19 批 2 补的契约口）**：末级视图除 `fields` 外**必须**带一个后端提取好的数值——`final_query` 构造视图时对 `fields` 调一次 `balance_from_fields`，结果放进该字段（serde ⇒ 前端 `balanceYuan`）。**前端结果卡主数字与趋势/统计一律读它，不许自己解析 `fields` 文本**（解析实现只有 `charge` 一处，复制到前端会随校方文案漂移）。语义：`None` = 未提取到（UI 显示「无数据」），**绝不用 0 代替**（`0.00` 是合法余额）。桌面端自采快照（`commands/electricity_history.rs::build_entry`）同样**直接透传**该字段、不重算。
 - `map.data`（末级对象）含户号等 PII：**不透出、不入日志**。
+- **无级联片区（2026-09-19 实测）**：一卡通充值片区 **401**（`getFrontConfig.recharge`）没有级联上下文——`getThirdData(401)` 恒回 500、建单**不带 `third_party`**（`recharge.rs::create_order` 的 `path` 为 `Option<&[RoomStep]>`，`None` 即省略该参数；命令层要求显式 `no_context: true` 而非「忘传 path」，取舍见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]）。
 - **余额提取（M4，`charge::balance_from_text` / `balance_from_fields`，结果进 `ElectricityView.balance_yuan`）**：既然不做文本解构，余额就从那句自由文本里按**严格形态**（`关键词 + 分隔符 + 数字`，只认相邻、不跨字段拼接、不做位置解构）提取，提不到返回 `None`（UI 显示「无数据」，**绝不臆造 0**）。关键词表刻意**排除**「剩余电量/电量」——`448` 的原文「当前余额517.05元,**当前剩余电量957.50度**」里两者同句，把 kWh 当钱是错报；千分位（`1,234.56`）歧义时也宁可 `None`。单测用三片区 live 原文钉住，并有一条**在视图构造路径上**（`final_query`）断言三条原文的取数与 camelCase 键名。
 
 ### 缴费历史与订单（`turnover.rs`，M4 批 1；端点 2026-09-19 live 实测）

@@ -36,9 +36,9 @@ tags:
 
 # 接线层（campus-hub src-tauri）
 
-`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，全部注册于 `lib.rs:19-45`。
+`tauri-app/src-tauri`（crate 名 `campus-hub`）是协议核心与前端之间的 IPC 接线层：命令面、AppState、DPAPI 持久化。协议逻辑零实现——「协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化」（`src/lib.rs:2`）。登录/账号命令定义在 `src/commands/auth.rs`，头像/资料命令定义在 `src/commands/profile.rs`，门户数据命令定义在 `src/commands/portal.rs`，一卡通命令（M4.5）定义在 `src/commands/ecard.rs`，全部注册于 `lib.rs:19-45`。
 
-## 命令面（下表覆盖 auth / profile / portal / timetable；慧新E校与电费的 31 条见 `modules/campus-synjones.md` 与下方 M4 小节；**全量 66 条**的命令面总账在根 `_architecture.md`「命令面与模块地图」）
+## 命令面（下表覆盖 auth / profile / portal / timetable；慧新E校与电费的 28 条（synjones 3 / ecard 7 / electricity 12 / electricity_history 6）见 `modules/campus-synjones.md`、`modules/ecard-panel.md` 及下方 M4 小节；**全量 77 条**的命令面总账在根 `_architecture.md`「命令面与模块地图」）
 
 | 命令 | 参数（camelCase） | data 形态 | 位置 |
 |---|---|---|---|

@@ -449,7 +449,7 @@ async fn recharge_live() {
     let mut notes: Vec<String> = Vec::new();
 
     let (order_id, pay_info) =
-        match recharge::create_order(&client, FEEITEM, TRANAMT, &steps).await {
+        match recharge::create_order(&client, FEEITEM, TRANAMT, Some(&steps)).await {
             Ok(id) => {
                 println!("[建单] ✅ 成功：orderid 长度={}（third_party 由后端合成）", id.len());
                 created.push(id.clone());
@@ -833,7 +833,7 @@ async fn recharge_diag_live() {
     let steps = cascade_to_room(&client).await;
     let (third_party, tp_keys) = product_third_party(&client, &steps).await;
     println!("[诊断] third_party 长度={} 键=[{tp_keys}]", third_party.len());
-    let order_id = recharge::create_order(&client, FEEITEM, TRANAMT, &steps)
+    let order_id = recharge::create_order(&client, FEEITEM, TRANAMT, Some(&steps))
         .await
         .expect("诊断需要一笔订单作为实验对象（建单失败）");
     println!("[诊断] 实验订单 orderid 长度={}（值不打印）", order_id.len());

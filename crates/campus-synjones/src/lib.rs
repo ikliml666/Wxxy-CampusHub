@@ -31,6 +31,8 @@
 pub mod charge;
 pub mod client;
 pub mod ecard;
+pub mod ecard_ops;
+pub mod ecard_stats;
 pub mod recharge;
 pub mod sso;
 pub mod turnover;

@@ -1,5 +1,20 @@
 # 更新日志
 
+## 2026-09-19 · M4.5 批 1+2：一卡通页（宫格首页 + 子页）——钱包与电费合并、官方读类能力补齐
+
+- **模块**：`crates/campus-synjones/src/{ecard,ecard_stats,ecard_ops,recharge,lib}.rs`、`tauri-app/src-tauri/src/commands/{ecard,synjones,electricity,mod}.rs` + `src/lib.rs`、`tauri-app/frontend/src/{panels/EcardsPanel.tsx, components/ecard/*, components/{AppShell,DockNav,RechargeFlow}.tsx, panels/TodayPanel.tsx, shared/types.ts, stores/uiStore.ts}`
+- **用户裁决（AskUserQuestion）**：① 功能范围**全选**——读类补齐 + 一卡通充值 + 安全类写操作 + 银行卡与多卡管理；② 布局**宫格首页 + 子页**；③ 导航**合并为一个入口**（Dock 9 → 8）
+- **缘由（用户）**：「钱包页面还未完善，请打开融合门户的一卡通系统查看，把一卡通系统功能搬下来单独做一个页面，将钱包和电费都融合至一卡通系统页面」。抓官方 `campus-card-pc` 前端 bundle 反查后确认：**官方一卡通系统本身就含电费**（服务大厅清单里 `电费桃1-李8`/`李9-李11`/`梅1-梅3` 即我们的 448/449/450 三片区），而**一卡通充值就是 `/charge` 体系的 401 片区**——三者本就是同一套缴费引擎，合并成一个页面是还原官方形态而非新造
+- **删除**：`panels/WalletPanel.tsx`、`panels/PowerPanel.tsx`（后者内容整体迁入 `components/ecard/EcardPowerView.tsx`，交互与四态零回归）
+- **live 实测推翻两条旧结论（重要）**：新建只读探针 `crates/campus-synjones/tests/ecard_features_probe_live.rs` 实测，`/berserker-search/statistics/turnover/count` **吃** `timeFrom/timeTo`（无参 533160 分 / 2026 全年 241540 / 2020-01 为 0，三组互不相同），`statistics/turnover/sum/user` 的正确参数是 `dateStr + dateType(month|year) + statisticsDateStr(day|month) + type(1 收入/2 支出)` 且**有数据**（回 `{"2026-09-03": 1800.0, …}` 日期→金额 map，值为分）⇒ 此前 wiki 与代码注释里写的「统计接口无解、UI 暂不可用」**是参数形态猜错导致的误判**，本次改为真实统计能力（支出/收入/结余 + 按日按月双折线 + 分类聚合 + 分类字典）
+- **后端新增（全部只读）**：`ecard.rs` 扩 `CardDetail`/`AccInfo` 脱敏卡视图（`getCampusCards` 全字段，金额分→元）与流水 `TurnoverFilter`（`type/typeId/info/orderId/sortFields`，**未传的参数不进 query**）、记录补 `orderId/typeId/turnoverType/labelName/labelRemark/cardBalanceYuan`；`ecard_stats.rs`（统计三件套 + 分类字典，信封 `Search`，series map 在后端转**升序数组且零值保留**）；`ecard_ops.rs`（安全键盘 `GET /berserker-secure/keyboard` + 进程级缓存：TTL 300s、至多 8 把、随机 `padId`、`take_pad` 取走即删）；命令层 `commands/ecard.rs` 7 条新命令 + `get_ecard_transactions` 原地扩参
+- **前端结构**：容器 `panels/EcardsPanel.tsx`（宫格首页 ⇄ 子页，返回栏）+ `components/ecard/{EcardHome,EcardBalanceView,EcardBillView,EcardStatsView,EcardPowerView,EcardRechargeView,MiniLine}.tsx`；`PanelId` 9→8（`wallet`+`power` → `ecard`），`uiStore` persist **v3** 把旧值显式迁移到 `ecard`（否则用户升级后被兜底踢回今日页）、新增持久化 `ecardView`；今日页「查电费」「卡片充值」两个快捷动作改指 `ecard` 并**直达子页**（合并成一个入口后不必多点一次）
+- **脱敏与安全**：卡号默认只透出脱敏形态（够长前 5+`****`+后 2；**本校 5 位短卡号**改首位+`****`+末 2——旧实现一律给 `****`，界面等于什么都没显示）；持卡人姓名/手机号/证件/户号一律不解析不进 DTO；`frontInfo` 的 `getFrontConfig` 串里**含学校侧下发的 `privateKey`**，实现只取白名单键、整串不落盘不透传（该观察已写入 wiki learnings）
+- **充值片区 401**：`singleFeeitem?feeitemid=401` 实测 `layout="1,10,50,100"`、金额上下限均为 null；`getThirdData(401, level=0)` 回 **code=500** ⇒ 401 **没有级联上下文**，建单**不带 `third_party`**——为此 `recharge::create_order` 的 `path` 改 `Option`，命令层加**显式开关** `no_context`（不做「缺 path 即静默无上下文」，避免电费片区忘传房间时从报错退化成难排查的静默失败）
+- **真机点验（CDP + WebView2 调试端口，逐页截图）**：宫格首页显示真实余额 **￥79.96**（电子账户）+ 卡账户 ￥0.00 · 正常 · `4****40` · 本科生卡；流水子页取到真实 **1046 条**记录并可按方向/分类/关键词筛选（分类 chips 为服务端真实分类名）；统计子页 2026-09 支出 ￥195.55 / 收入 ￥201.00 / 结余 ￥5.45 + 双折线（含极值标注）+ 分类占比；电费子页三个片区、常用房间、缴费记录（含「已取消 · 本机记录」）、今年每月缴费全部正常；充值子页按 401 显示 1/10/50/100 元快捷金额与风险说明
+- **验证**：`cargo test --workspace` **353 passed / 0 failed**、`tsc --noEmit` 零错误、真机点验如上（写路径按红线**只到提交前一步，未提交任何支付/挂失/改密**）
+- **未做（批 3）**：安全类写操作子页（挂失·解挂、修改/找回查询密码、免密与支付限额、转账标识、卡账户↔电子账户转账、银行卡绑定/解绑）与多卡绑定（该校 `getAllApps` 无 `bind-campus-card`，按官方开关不显示入口）。后端的安全键盘缓存与写操作协议形态已就位（bundle 反查 + 401 实测），写路径按红线**未经 live 验证**，需接好后由用户真机操作确认
+
 ## 2026-09-19 · M4 布局微调：「常用房间」并入「查询房间余额」卡（用户要求融合）
 
 - **模块**：`frontend/src/panels/PowerPanel.tsx`（仅前端）

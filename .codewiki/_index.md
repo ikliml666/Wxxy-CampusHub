@@ -5,6 +5,7 @@
 - [[concepts\domain-color-system|域色编码系统（domain-color-system）]]
 ## Decision
 
+- [[decisions\ecard-panel-merge|一卡通面板合并决策（钱包 + 电费 → ecard）]]
 - [[decisions\timetable-editable-slots|作息时间表可编辑（save_time_slots 与 effective_slots 单点取值）]]
 - [[decisions\recording-jar-session|决策记录 - RecordingJar 自实现与会话持久化]]
 - [[decisions\guest-mode-account-shell|决策记录 - 游客优先外壳、账号系统与头像三态]]
@@ -21,6 +22,7 @@
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
 - [[learnings\tauri-multiwindow-cdp-verification|Tauri 多窗口应用的 CDP 点验：必须按 URL 选 target（附非主窗口 IPC 权限验证法）]]
 - [[learnings\tauri-webview-ui-verification|Tauri/WebView2 真机 UI 验收：vite 供旧模块与点击注入失效的可用替代路径]]
+- [[learnings\ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘机制]]
 - [[learnings\meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]
 - [[learnings\history-dedupe-not-by-adjacent-sort|历史去重不能靠「排序后看相邻」（同 id 会被别的房间插在中间）]]
 - [[learnings\cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级设计（content.jsp 系不可抓）]]
@@ -36,6 +38,7 @@
 ## Module
 
 - [[modules\campus-auth|CAS 协议核心（campus-auth）]]
+- [[modules\ecard-panel|一卡通页（前端 + 命令面，M4.5）]]
 - [[modules\frontend-shell|前端外壳（frontend-shell）]]
 - [[modules\campus-synjones|慧新E校协议核心（campus-synjones）]]
 - [[modules\campus-hub-tauri|接线层（campus-hub src-tauri）]]

@@ -2,7 +2,7 @@
 title: 电费页（前端）
 type: module
 source_files:
-  - tauri-app/frontend/src/panels/PowerPanel.tsx
+  - tauri-app/frontend/src/components/ecard/EcardPowerView.tsx
   - tauri-app/frontend/src/components/ElectricityTrendCard.tsx
   - tauri-app/frontend/src/components/ElectricityPaymentsCard.tsx
   - tauri-app/frontend/src/components/RechargeFlow.tsx
@@ -10,6 +10,8 @@ tags: [frontend, electricity, recharge, charts, cascade]
 ---
 
 # 电费页（前端）
+
+> ⚠️ 2026-09-19 M4.5：原 `PowerPanel.tsx` 已删除，本页内容整体迁入 `components/ecard/EcardPowerView.tsx`（一卡通面板的 `power` 子页）；下文的 `PowerPanel.tsx` 行号引用读作 `EcardPowerView.tsx` 对应逻辑。迁移动机见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]。
 
 协议与数据来源见 [[modules/campus-synjones|慧新E校协议]]，自采与合并见 [[decisions/electricity-daily-snapshot-and-merge|电费日快照与合并]]，本轮重设计的取舍见 [[decisions/electricity-panel-redesign|电费页重设计决策]]。
 
