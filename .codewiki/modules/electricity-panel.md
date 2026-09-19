@@ -50,3 +50,13 @@ tags: [frontend, electricity, recharge, charts, cascade]
 - IPC 键名必须与 Rust `snake_case` 转出的 camelCase 完全一致（`feeitemId` / `roomId` / `orderId`）——写成 `feeItemId` 会被 Tauri 判为缺参、建单根本发不出去（M3.1 真机点验才抓到）。
 - `types.ts` 里有两个 `balanceYuan`：`EcardOverview.balanceYuan`（一卡通）与 `ElectricityView.balanceYuan`（宿舍电费），语义不同别串。
 - `SavedRoom.bound` 在 TS 里是**可选**字段（后端 `serde(default)` 兼容旧 JSON），保存房间**不改变绑定**，绑定只经 `bind_electricity_room`。
+
+## 两处用户反馈修正（2026-09-19）
+
+**「最近查过」的语义修正**：这块原先取的是「已保存房间」、渲染的又是 `SavedRoom.label`（用户自起的房间名）——于是只保存过一个房间时只有一个 chips、内容还不是房间号（用户反馈「只显示一个 1，我查的是 125」）。现在改为**本机 `localStorage`**（`campushub-elec-recent`，上限 8 条）：每次查到**末级房间**即记一条（片区 + 完整路径），chips 显示**路径末级的房间号**，点击直接重查，**不要求用户先保存**。判据仍是「片区一致 + 除房间号外各层 `value` 一致」。
+
+**「已取消订单」只能本机留痕**：实测（`get_electricity_orders` 分别按不带 status / `0` / `1` / `2` 查询）确认**学校侧的取消是物理删除**——取消后该订单在四种查询里都不返回，**学校侧没有「已取消」状态可供渲染**。故取消成功时先抓下该单摘要（订单号/金额/提交时间/摘要）写入本机 `localStorage`（`campushub-elec-cancelled`，上限 10 条），在缴费记录卡显示为「已取消」灰条（金额划线）并标注「**本机记录**」，明确区分学校侧状态与本机留痕。对应地，`cancelOrder` 在调命令**之前**先把这条单从 `orders` 里取出来（取消后就没机会再取了）。
+
+两处都是 `localStorage`（便利性数据，不进 `%APPDATA%` 业务文件、不参与跨端合并）；存储被禁用或损坏时静默回空，不影响主流程。
+
+**已知小缺口（未修，YAGNI）**：充值卡建单成功后不会通知右列缴费记录卡刷新，故刚建的待支付单要等切页重挂载才在右列出现（充值卡自身有完整的订单信息与「取消订单」，用户不会被误导）。若将来要修，给 `RechargeFlow` 加一个「订单变化」回调、由 `PowerPanel` 抬高缴费卡的刷新 tick 即可。
