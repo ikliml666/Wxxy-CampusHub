@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-09-19 · 仓库卫生续：PLAN.md 移出 git 跟踪 + 个人脚本防误提交
+
+- **模块**：`.gitignore`、git 索引（PLAN.md `git rm --cached`，本地文件保留）
+- **要点**：`PLAN.md`（项目计划，含内网地址与侦察结论，与 docs/ 同性质的本地工作文档）移出跟踪；根目录个人油猴脚本 `一键填分4.user.js` 加入 ignore 防误提交（此前仅未跟踪）；`m4_history_probe_live.rs` 属于其他会话（sess-36e5d8e0）开发物，不动
+- **验证**：`git rm --cached` 后本地文件在、`check-ignore` 两条规则命中、主目录 ff 后已 restore PLAN.md 工作区文件
+
 ## 2026-09-19 · 仓库卫生：docs/ 移出 git 跟踪（本地工作文档不进远端）
 
 - **模块**：`.gitignore`、git 索引（docs/ 下 30 个文件 `git rm -r --cached`，本地文件全保留）
