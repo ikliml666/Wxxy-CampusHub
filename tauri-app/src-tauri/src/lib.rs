@@ -59,6 +59,7 @@ pub fn run() {
             commands::timetable::import_timetable_json,
             commands::timetable::move_day_courses,
             commands::timetable::quick_delete,
+            commands::timetable::get_today_courses,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

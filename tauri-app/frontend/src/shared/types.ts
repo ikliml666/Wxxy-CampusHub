@@ -40,6 +40,37 @@ export interface PortalOverview {
   fetchedAt: number;
 }
 
+// ---------- 批 9：get_today_courses（tauri commands/timetable.rs::TodayCoursesView） ----------
+
+/** 今日单节课（ongoing/next 由后端按本机时钟算好下发，前端不自算时钟）。 */
+export interface TodayCourse {
+  courseId: string;
+  name: string;
+  room: string;
+  teacher: string;
+  /** "HH:MM" */
+  startHm: string;
+  /** "HH:MM" */
+  endHm: string;
+  /** start <= now < end（恰在开始时刻 = 进行中） */
+  ongoing: boolean;
+}
+
+/** get_today_courses → data；hasLocal=false（未导入/未配置）回落门户 nextCourse。 */
+export interface TodayCoursesView {
+  /** "YYYY-MM-DD" */
+  date: string;
+  currentWeek: number | null;
+  /** "normal" | "no_semester" | "vacation" | "skipped" */
+  state: string;
+  /** 本地课表已导入且有课程（课程数 > 0 且已设开学日） */
+  hasLocal: boolean;
+  /** 按开始时刻升序；停课实例不进列表 */
+  courses: TodayCourse[];
+  /** 第一门未结束（end > now）；全部已结束为 null */
+  next: TodayCourse | null;
+}
+
 // ---------- M2 批次 2：资讯页 / 待办页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
 
 /** 资讯栏目（后端 = 订阅接口 + 实测全量兜底，固定 7 栏）。 */

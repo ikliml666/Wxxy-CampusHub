@@ -1061,6 +1061,153 @@ pub async fn quick_delete(weeks: Vec<u32>, days: Vec<u8>) -> Result<CommandResul
     }
 }
 
+// ---------------- 今日页本地课表（2026-09-19 批 9，契约 §15，决策 3） ----------------
+
+/// get_today_courses → data（契约 §15.1）：本地课表的今日视图。前端在
+/// `has_local == false` 时回落门户 `nextCourse`（现状零变化）；`ongoing` /
+/// `next` 全由后端按 now 算好下发（时钟口径单点，前端不自算——风险 R9）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayCoursesView {
+    /// 本机今天 "YYYY-MM-DD"
+    pub date: String,
+    pub current_week: Option<u32>,
+    /// "normal" | "no_semester" | "vacation" | "skipped"（契约 §15.2 优先级）
+    pub state: String,
+    /// 本地课表已导入且有课程（课程数 > 0 且已设开学日，两者都满足才信任本地）
+    pub has_local: bool,
+    /// 今日课程，按开始时刻升序；停课实例不进列表（与 ICS 同语义）
+    pub courses: Vec<TodayCourse>,
+    /// 第一门未结束（end > now）的课程；全部已结束 → None
+    pub next: Option<TodayCourse>,
+}
+
+/// 今日单节课（契约 §15.1）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayCourse {
+    pub course_id: String,
+    pub name: String,
+    pub room: String,
+    pub teacher: String,
+    /// "HH:MM"
+    pub start_hm: String,
+    pub end_hm: String,
+    /// start <= now < end（恰在开始时刻 = 进行中；恰在结束时刻 = 已结束）
+    pub ongoing: bool,
+}
+
+/// 今日页本地课表纯函数（契约 §15.2，可脱离 Tauri 单测）：`now` 由命令层传
+/// 本机 `Local::now().naive_local()`。
+///
+/// - state 判定顺序 = 优先级：无开学日 → `no_semester`；有开学日但
+///   `current_week` 越界 → `vacation`；today 命中 `skipped_dates` → `skipped`；
+///   其余 `normal`。非 normal 态 courses 恒空、next 恒 None。
+/// - normal 态展开：每门未 disabled 课程经 [`campus_schedule::expand_occurrences`]
+///   取本周实体，**只消费 Solid**、过滤 `occ.day == 今天星期`；时刻取值与
+///   [`build_ics`] 同口径（契约 §8.5）：节次课查 `effective_slots_at(config,
+///   today)`（大节 = `(s+1)/2`），custom 课（节次 None）取 `custom_*_time`；
+///   任一查不到 → 该实例不进列表。
+/// - 以分钟粒度比较：「未结束」= `end > now`；ongoing = `start <= now < end`。
+fn today_courses(tt: &Timetable, now: chrono::NaiveDateTime) -> TodayCoursesView {
+    use chrono::Timelike;
+    let today = now.date();
+    let now_min = now.hour() * 60 + now.minute();
+    let current_week = current_week(today, &tt.config);
+    let state = if tt.config.semester_start_date.is_none() {
+        "no_semester"
+    } else if current_week.is_none() {
+        "vacation"
+    } else if tt.config.skipped_dates.contains(&today) {
+        "skipped"
+    } else {
+        "normal"
+    };
+    let has_local = !tt.courses.is_empty() && tt.config.semester_start_date.is_some();
+
+    let mut courses: Vec<TodayCourse> = Vec::new();
+    if state == "normal" {
+        let week = current_week.unwrap();
+        let weekday = today.weekday().number_from_monday() as u8;
+        // 当天生效作息整日一份（收敛点契约 §8.3；放循环外免逐实例重算）
+        let slots = effective_slots_at(&tt.config, today);
+        for course in &tt.courses {
+            if course.disabled {
+                continue;
+            }
+            for occ in expand_occurrences(course, &tt.overrides, week) {
+                if occ.kind != OccurrenceKind::Solid || occ.day != weekday {
+                    continue; // 停课/调出 ghost 不进今日页；非今天的实例过滤
+                }
+                let (start_hm, end_hm) = match (occ.start_section, occ.end_section) {
+                    (Some(s), Some(e)) => {
+                        let (bs, be) = ((u32::from(s) + 1) / 2, (u32::from(e) + 1) / 2);
+                        let (Some(ss), Some(se)) = (
+                            slots.iter().find(|t| u32::from(t.number) == bs),
+                            slots.iter().find(|t| u32::from(t.number) == be),
+                        ) else {
+                            continue;
+                        };
+                        (ss.start_time.clone(), se.end_time.clone())
+                    }
+                    _ => {
+                        let (Some(cs), Some(ce)) =
+                            (&course.custom_start_time, &course.custom_end_time)
+                        else {
+                            continue;
+                        };
+                        (cs.clone(), ce.clone())
+                    }
+                };
+                let (Some(sm), Some(em)) = (parse_hm(&start_hm), parse_hm(&end_hm)) else {
+                    continue; // 时刻非法（手改 JSON 防御），无时刻可比
+                };
+                courses.push(TodayCourse {
+                    course_id: course.id.clone(),
+                    name: course.name.clone(),
+                    room: occ.position.clone(),
+                    teacher: course.teacher.clone(),
+                    start_hm,
+                    end_hm,
+                    ongoing: sm <= now_min && now_min < em,
+                });
+            }
+        }
+        // 按开始时刻升序（同开始按结束时刻；sort_by_key 稳定）
+        courses.sort_by_key(|c| {
+            (
+                parse_hm(&c.start_hm).unwrap_or(0),
+                parse_hm(&c.end_hm).unwrap_or(0),
+            )
+        });
+    }
+
+    let next = courses
+        .iter()
+        .find(|c| parse_hm(&c.end_hm).is_some_and(|em| em > now_min))
+        .cloned();
+    TodayCoursesView {
+        date: today.format("%Y-%m-%d").to_string(),
+        current_week,
+        state: state.into(),
+        has_local,
+        courses,
+        next,
+    }
+}
+
+/// 今日页本地课表（契约 §15.1）：无入参、读本地课表 + 本机时钟，不需要登录态
+/// （未登录本地课表照常可读，has_local 口径决定前端是否消费）。
+#[tauri::command]
+pub async fn get_today_courses() -> Result<CommandResult<TodayCoursesView>, String> {
+    let dir = state::data_dir()?;
+    let tt = timetable::load_timetable(&dir);
+    Ok(CommandResult::ok(today_courses(
+        &tt,
+        chrono::Local::now().naive_local(),
+    )))
+}
+
 // ---------------- 作息时间表编辑（冻结契约 §2.3，2026-09-18 收尾轮追加） ----------------
 
 /// 自定义作息条数上限（防误填：正常学校大节不会超过这个量级）。
@@ -2819,5 +2966,258 @@ mod tests {
         assert_eq!(quick_delete_impl(&mut tt, &[25, 30], &[1]).unwrap(), 0, "越界周次忽略");
         assert_eq!(tt.courses[0].weeks.len(), 2, "课程未被改动");
         assert!(tt.overrides.is_empty());
+    }
+
+    // ---------------- 批 9：今日页本地课表（契约 §15） ----------------
+
+    /// 2026-09-07（周一，第 1 周首日）的 NaiveDateTime 便捷构造。
+    fn at(day: u32, h: u32, m: u32) -> chrono::NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 9, day)
+            .unwrap()
+            .and_hms_opt(h, m, 0)
+            .unwrap()
+    }
+
+    /// normal 态基线（契约 §15.2）：周一两门课按开始时刻升序；ongoing/next 按
+    /// now 推进切换；全部已结束 → next=None（已结束课程保留在列表，置灰由前端）；
+    /// 非今天的课程（周三）不进列表；camelCase 序列化键。
+    #[test]
+    fn today_courses_normal_expansion_sorting_and_next() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![
+                course("c-late", "晚课", 1, 3, 4, vec![1]),  // 周一 10:10-11:50
+                course("c-early", "早课", 1, 1, 2, vec![1]), // 周一 08:00-09:40
+                course("c-wed", "周三课", 3, 1, 2, vec![1]), // 周三，不进周一列表
+            ],
+        );
+        tt.courses[0].teacher = "李老师".into();
+        tt.courses[0].position = "LX-101".into();
+
+        // 08:30：早课进行中，next = 早课
+        let v = today_courses(&tt, at(7, 8, 30));
+        assert_eq!(v.state, "normal");
+        assert_eq!(v.current_week, Some(1));
+        assert_eq!(v.date, "2026-09-07");
+        assert!(v.has_local);
+        assert_eq!(v.courses.len(), 2, "周三课不进周一列表");
+        assert_eq!(v.courses[0].name, "早课", "按开始时刻升序");
+        assert_eq!((v.courses[0].start_hm.as_str(), v.courses[0].end_hm.as_str()), ("08:00", "09:40"));
+        assert!(v.courses[0].ongoing);
+        assert!(!v.courses[1].ongoing);
+        let next = v.next.clone().unwrap();
+        assert_eq!(next.course_id, "c-early");
+        assert_eq!(next.teacher, "张老师");
+
+        // 09:50：早课已结束（仍在列表）、晚课未开始 → next = 晚课
+        let v = today_courses(&tt, at(7, 9, 50));
+        assert!(!v.courses[0].ongoing);
+        assert_eq!(v.next.as_ref().unwrap().course_id, "c-late");
+        assert_eq!(v.next.as_ref().unwrap().room, "LX-101", "room 取 occ.position");
+
+        // 12:00：全部已结束 → next = None
+        let v = today_courses(&tt, at(7, 12, 0));
+        assert_eq!(v.next, None);
+        assert_eq!(v.courses.len(), 2, "已结束课程保留在列表");
+
+        // camelCase 序列化键（前端镜像契约）
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("\"hasLocal\":true"));
+        assert!(json.contains("\"courseId\":\"c-early\""));
+        assert!(json.contains("\"startHm\":\"08:00\""));
+        assert!(json.contains("\"endHm\":\"09:40\""));
+    }
+
+    /// ongoing/next 边界（契约 §15.2）：恰在开始时刻 = 进行中；恰在结束时刻 =
+    /// 已结束（end > now 不含等号）；结束时刻下一门的「未结束」判定成立。
+    #[test]
+    fn today_courses_ongoing_boundary_at_start_and_end() {
+        let tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("c-a", "早课", 1, 1, 2, vec![1])], // 08:00-09:40
+        );
+        // 恰在开始时刻：进行中
+        let v = today_courses(&tt, at(7, 8, 0));
+        assert!(v.courses[0].ongoing);
+        assert_eq!(v.next.as_ref().unwrap().course_id, "c-a");
+        // 恰在结束时刻：已结束、无未结束课程
+        let v = today_courses(&tt, at(7, 9, 40));
+        assert!(!v.courses[0].ongoing);
+        assert_eq!(v.next, None, "end == now 不算未结束");
+    }
+
+    /// override 语义（契约 §15.2）：调课到今天 → 新时段进列表且成为 next
+    /// （蓝图验收「调课后 next = 新时段」）；停课（new_day None 整周）→ 不进
+    /// 列表（停课优先于调课，§8.4 同语义）；补课今天 → 独立进列表。
+    #[test]
+    fn today_courses_respects_overrides() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![
+                course("a", "信息安全", 1, 1, 2, vec![1]), // 周一 08:00-09:40
+                course("b", "密码学", 3, 3, 4, vec![1]),   // 周三 10:10-11:50
+            ],
+        );
+        // 信息安全调到周四大节 2（不在周一）→ 周一列表只剩密码学的调课新位
+        push_override(&mut tt, CourseOverride {
+            id: "ov-a".into(),
+            course_id: "a".into(),
+            weeks: vec![1],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(4),
+            new_start_section: Some(3),
+            new_end_section: Some(4),
+            new_position: Some("D4-305".into()),
+            source_notice_id: "n-a".into(),
+            auto_applied: false,
+        });
+        // 密码学调到周一 5-6 节（13:45-15:25）→ 新时段进周一列表
+        push_override(&mut tt, CourseOverride {
+            id: "ov-b".into(),
+            course_id: "b".into(),
+            weeks: vec![1],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(1),
+            new_start_section: Some(5),
+            new_end_section: Some(6),
+            new_position: None,
+            source_notice_id: "n-b".into(),
+            auto_applied: false,
+        });
+
+        let v = today_courses(&tt, at(7, 9, 0));
+        assert_eq!(v.courses.len(), 1, "原周一课已调走，只剩密码学新位");
+        let c = &v.courses[0];
+        assert_eq!((c.name.as_str(), c.start_hm.as_str(), c.end_hm.as_str()), ("密码学", "13:45", "15:25"));
+        assert_eq!(v.next.as_ref().unwrap().name, "密码学", "调课后 next = 新时段");
+
+        // 停课：密码学整周停 → 周一列表空（停课优先于调课）
+        push_override(&mut tt, CourseOverride {
+            id: "ov-c".into(),
+            course_id: "b".into(),
+            weeks: vec![1],
+            change_type: OverrideKind::Cancelled,
+            new_day: None,
+            new_start_section: None,
+            new_end_section: None,
+            new_position: None,
+            source_notice_id: "n-c".into(),
+            auto_applied: false,
+        });
+        let v = today_courses(&tt, at(7, 9, 0));
+        assert!(v.courses.is_empty(), "停课实例不进列表");
+        assert_eq!(v.next, None);
+
+        // 补课：周一 5-6 节 extra → 独立进列表
+        push_override(&mut tt, CourseOverride {
+            id: "ov-d".into(),
+            course_id: "a".into(),
+            weeks: vec![1],
+            change_type: OverrideKind::Extra,
+            new_day: Some(1),
+            new_start_section: Some(5),
+            new_end_section: Some(6),
+            new_position: None,
+            source_notice_id: "n-d".into(),
+            auto_applied: false,
+        });
+        let v = today_courses(&tt, at(7, 14, 0));
+        assert_eq!(v.courses.len(), 1);
+        assert_eq!(v.courses[0].name, "信息安全");
+        assert!(v.courses[0].ongoing, "14:00 落在 13:45-15:25 内");
+    }
+
+    /// custom 课（节次 None）取 custom_*_time（契约 §15.2 与 build_ics 同口径）；
+    /// 未到开始时刻也在 next 内（end > now 即未结束）。
+    #[test]
+    fn today_courses_custom_course_uses_custom_times() {
+        let mut c = course("c-custom", "科研例会", 1, 1, 2, vec![1]);
+        c.is_custom_time = true;
+        c.start_section = None;
+        c.end_section = None;
+        c.custom_start_time = Some("18:00".into());
+        c.custom_end_time = Some("19:30".into());
+        let tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![c]);
+
+        let v = today_courses(&tt, at(7, 17, 0));
+        assert_eq!(v.courses[0].start_hm, "18:00");
+        assert_eq!(v.courses[0].end_hm, "19:30");
+        assert!(!v.courses[0].ongoing);
+        assert_eq!(v.next.as_ref().unwrap().course_id, "c-custom", "18:00 未到但未结束");
+
+        let v = today_courses(&tt, at(7, 18, 30));
+        assert!(v.courses[0].ongoing);
+    }
+
+    /// 非 normal 三态（契约 §15.2）：skipped（skipped_dates 命中今天）、
+    /// vacation（越界）、no_semester（无开学日）→ courses 空、next None；
+    /// skipped/vacation 下 has_local 仍为 true（本地有课有开学日）。
+    #[test]
+    fn today_courses_three_non_normal_states() {
+        let base = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("a", "信息安全", 1, 1, 2, vec![1])],
+        );
+
+        // skipped：skipped_dates 命中今天
+        let mut tt = base.clone();
+        tt.config.skipped_dates = vec![NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()];
+        let v = today_courses(&tt, at(7, 8, 30));
+        assert_eq!(v.state, "skipped");
+        assert_eq!(v.current_week, Some(1));
+        assert!(v.has_local);
+        assert!(v.courses.is_empty());
+        assert_eq!(v.next, None);
+
+        // vacation：今天越出学期（第 30 周外）
+        let v = today_courses(&base, at(1, 8, 30));
+        assert_eq!(v.state, "vacation");
+        assert_eq!(v.current_week, None);
+        assert!(v.has_local);
+        assert!(v.courses.is_empty());
+        assert_eq!(v.next, None);
+
+        // no_semester：无开学日（此时 has_local 必为 false）
+        let tt = timetable_with(None, vec![course("a", "信息安全", 1, 1, 2, vec![1])]);
+        let v = today_courses(&tt, at(7, 8, 30));
+        assert_eq!(v.state, "no_semester");
+        assert!(!v.has_local);
+        assert!(v.courses.is_empty());
+        assert_eq!(v.next, None);
+    }
+
+    /// has_local 口径（契约 §15.2）：课程数 > 0 且已设开学日，两者都满足才 true。
+    #[test]
+    fn today_courses_has_local_requires_courses_and_start_date() {
+        // 有开学日、无课程
+        let tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+        assert!(!today_courses(&tt, at(7, 8, 30)).has_local);
+        // 有课程、无开学日
+        let tt = timetable_with(None, vec![course("a", "信息安全", 1, 1, 2, vec![1])]);
+        assert!(!today_courses(&tt, at(7, 8, 30)).has_local);
+        // 两者都有
+        let tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("a", "信息安全", 1, 1, 2, vec![1])],
+        );
+        assert!(today_courses(&tt, at(7, 8, 30)).has_local);
+    }
+
+    /// 节次超出大节表 → 无时刻可比，该实例不进列表（与 build_ics 跳过同语义）；
+    /// 停开（disabled）课程不进列表。
+    #[test]
+    fn today_courses_skips_out_of_table_sections_and_disabled() {
+        let tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![
+                course("x", "晚自习", 1, 11, 12, vec![1]), // 大节 6 不存在
+                course("y", "停开课", 1, 1, 2, vec![1]),
+            ],
+        );
+        let mut tt = tt;
+        tt.courses[1].disabled = true;
+        let v = today_courses(&tt, at(7, 8, 30));
+        assert!(v.courses.is_empty());
+        assert_eq!(v.next, None);
     }
 }

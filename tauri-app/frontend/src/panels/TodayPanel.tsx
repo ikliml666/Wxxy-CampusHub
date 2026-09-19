@@ -10,7 +10,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { PanelDomain } from "@/components/PanelHeader";
-import type { CourseBrief, PanelId, PortalOverview } from "@/shared/types";
+import type { CourseBrief, PanelId, PortalOverview, TodayCourse, TodayCoursesView } from "@/shared/types";
 import { invokeCommand } from "@/shared/tauriApi";
 import { useAuthStore } from "@/stores/authStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -94,6 +94,38 @@ function nextCourseLabel(c: CourseBrief): string {
   return parts.join(" · ");
 }
 
+/** 本地「下一节课」横幅文案（契约 §15.2）：「HH:MM-HH:MM 课名 @教室」，空段自动省略。 */
+function todayCourseLabel(c: TodayCourse): string {
+  return [`${c.startHm}-${c.endHm}`, c.name, c.room ? `@${c.room}` : ""]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * 列表行的展示态（契约 §15.2）：ongoing 由后端下发；「已结束」不由前端读时钟
+ * 判断，而是由列表与 next 的相对位置推导——next 是升序序列中第一门未结束的课，
+ * 位于它之前的行都已结束，next 为 null 则全部已结束。
+ */
+function localRowState(
+  c: TodayCourse,
+  list: TodayCourse[],
+  next: TodayCourse | null,
+): "ongoing" | "ended" | "upcoming" {
+  if (c.ongoing) return "ongoing";
+  if (!next) return "ended";
+  const nextIdx = list.findIndex(
+    (x) => x.courseId === next.courseId && x.startHm === next.startHm && x.name === next.name,
+  );
+  if (nextIdx === -1) return "ended";
+  return list.indexOf(c) < nextIdx ? "ended" : "upcoming";
+}
+
+/** 今日课程取数四态（与门户总览互不阻塞，风险 R9：各自 alive 标志）。 */
+type LocalCoursesState =
+  | { phase: "loading" }
+  | { phase: "ready"; data: TodayCoursesView }
+  | { phase: "error"; message: string };
+
 export function TodayPanel() {
   const status = useAuthStore((s) => s.status);
   const displayName = useAuthStore((s) => s.displayName);
@@ -102,6 +134,7 @@ export function TodayPanel() {
   const setActivePanel = useUiStore((s) => s.setActivePanel);
   const [guideDismissed, setGuideDismissed] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ phase: "loading" });
+  const [localCourses, setLocalCourses] = useState<LocalCoursesState>({ phase: "loading" });
   const [reloadTick, setReloadTick] = useState(0);
 
   const authed = status === "authed";
@@ -127,9 +160,35 @@ export function TodayPanel() {
     };
   }, [authed, reloadTick]);
 
+  // 本地今日课程（批 9，契约 §15.2）：与门户总览并行发起、各自 alive 标志、
+  // 互不阻塞；失败回落门户 nextCourse 路径（useLocal 为 false 即现状）
+  useEffect(() => {
+    if (!authed) {
+      setLocalCourses({
+        phase: "ready",
+        data: { date: "", currentWeek: null, state: "normal", hasLocal: false, courses: [], next: null },
+      });
+      return;
+    }
+    let alive = true;
+    setLocalCourses({ phase: "loading" });
+    invokeCommand<TodayCoursesView>("get_today_courses").then((r) => {
+      if (!alive) return;
+      if (r.success && r.data) setLocalCourses({ phase: "ready", data: r.data });
+      else setLocalCourses({ phase: "error", message: r.message ?? "本地课表获取失败" });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [authed, reloadTick]);
+
   const loading = overview.phase === "loading";
   const wallet = overview.phase === "ready" ? overview.data.wallet : null;
   const nextCourse = overview.phase === "ready" ? overview.data.nextCourse : null;
+  // 本地优先（契约 §15.2）：has_local 才消费本地结果；no_semester 时 has_local
+  // 必为 false，自然走门户现状
+  const local = localCourses.phase === "ready" ? localCourses.data : null;
+  const useLocal = local != null && local.hasLocal;
 
   return (
     <section className="mx-auto mt-8 max-w-3xl px-4">
@@ -218,8 +277,81 @@ export function TodayPanel() {
         </Surface>
       )}
 
-      {/* 下一节课横幅：无课 / 取数失败时整行隐藏 */}
-      {nextCourse && (
+      {/* 今日课程（批 9，契约 §15.2）：has_local 时本地优先——skipped → 今日放假、
+          vacation → 假期中、normal → 下一节课横幅 + 今日课程列表（ongoing 高亮、
+          已结束置灰；不做时间轴刻度）；next 为 null 如实显示今日无课/已结束 */}
+      {useLocal && local && local.state === "skipped" && (
+        <Surface accent="sched" className="mt-4 px-4 py-3">
+          <p className="text-body text-text">今日放假</p>
+        </Surface>
+      )}
+      {useLocal && local && local.state === "vacation" && (
+        <Surface accent="sched" className="mt-4 px-4 py-3">
+          <p className="text-body text-text">假期中</p>
+        </Surface>
+      )}
+      {useLocal && local && local.state === "normal" && (
+        <>
+          {local.next && (
+            <Surface accent="sched" className="mt-4 flex items-center gap-2 px-4 py-3">
+              <span className="shrink-0 text-body font-medium text-text">下一节课</span>
+              <span className="truncate text-body text-text-2">
+                {todayCourseLabel(local.next)}
+              </span>
+            </Surface>
+          )}
+          <Surface className="mt-4 px-4 py-4">
+            <p className="text-body font-medium text-text">今日课程</p>
+            {local.courses.length === 0 ? (
+              <p className="mt-3 text-body text-text-2">今日无课</p>
+            ) : (
+              <ul className="mt-2 divide-y divide-line">
+                {local.courses.map((c) => {
+                  const row = localRowState(c, local.courses, local.next);
+                  return (
+                    <li
+                      key={`${c.courseId}-${c.startHm}-${c.name}`}
+                      className={cn(
+                        "flex items-baseline gap-3 py-2.5 text-body",
+                        row === "ended" && "opacity-50",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "tabular-num shrink-0",
+                          row === "ongoing" ? "font-medium text-text" : "text-text-2",
+                        )}
+                      >
+                        {c.startHm}-{c.endHm}
+                      </span>
+                      <span
+                        className={cn(
+                          "min-w-0 truncate",
+                          row === "ongoing" ? "font-medium text-text" : "text-text-2",
+                        )}
+                      >
+                        {c.name}
+                      </span>
+                      {row === "ongoing" && (
+                        <span className="shrink-0 text-caption text-brand">进行中</span>
+                      )}
+                      {c.room && (
+                        <span className="ml-auto shrink-0 truncate text-caption text-text-2">
+                          @{c.room}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </Surface>
+        </>
+      )}
+
+      {/* 下一节课横幅（门户兜底）：has_local 时本地横幅已接管，门户 nextCourse
+          不再展示（契约 §15.2 本地优先/教务兜底）；无课 / 取数失败时整行隐藏 */}
+      {nextCourse && !useLocal && (
         <Surface accent="sched" className="mt-4 flex items-center gap-2 px-4 py-3">
           <span className="shrink-0 text-body font-medium text-text">下一节课</span>
           <span className="truncate text-body text-text-2">
