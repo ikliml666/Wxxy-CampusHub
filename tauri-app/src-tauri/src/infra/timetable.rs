@@ -25,7 +25,8 @@ pub fn empty_timetable() -> Timetable {
     Timetable {
         config: CourseTableConfig {
             course_table_id: DEFAULT_TABLE_ID.to_string(),
-            show_weekends: false,
+            // 契约 §17：默认显示周末（与 serde default true 同口径，新用户首屏即 7 列）
+            show_weekends: true,
             semester_start_date: None,
             semester_total_weeks: 20,
             first_day_of_week: 1,

@@ -325,11 +325,14 @@ export interface TimeSlot {
 /** 顶栏标题态（2026-09-19 批 7 契约 §13.1）：后端按 weeks.rs 对齐式周次口径判定。 */
 export type WeekState = "unset" | "before" | "vacation" | "normal";
 
-/** get_timetable → data（批次 4 修订契约 §2.3）。 */
+/** get_timetable → data（批次 4 修订契约 §2.3 + 修复轮 §17）。 */
 export interface TimetableView {
   timetable: Timetable;
-  /** 生效作息（自定义优先、回落内置校本大节表），时间标签唯一事实源；行数不固定，按 slots.len() 渲染 */
+  /** 生效作息（自定义优先、回落内置校本大节表）；作息编辑器的唯一事实源（大节口径） */
   slots: TimeSlot[];
+  /** 内置 11 小节作息表（修复轮契约 §17）：恒定下发、不随 config.slots 变化；
+   *  时间列与小节网格坐标用 */
+  sectionSlots: TimeSlot[];
   /** 当前教学周；null = 未设置开学日或今天不在学期内 */
   currentWeek: number | null;
   /** 顶栏标题态（批 7 §13.1）：细分 currentWeek 为 null 的原因 */
@@ -390,8 +393,11 @@ export interface ManualCourseInput {
 /** 解析置信度。high = 要素齐全且课程名唯一精确匹配（自动应用）；low = 待确认。 */
 export type NoticeConfidence = "high" | "low";
 
-/** save_semester_config 入参（2026-09-19 批 1 修订 §7.1）。
- *  Rust 侧容器级 serde default：前端可省略 currentWeekHint。 */
+/** save_semester_config 入参（2026-09-19 批 1 修订 §7.1 + 修复轮 §17）。
+ *  Rust 侧容器级 serde default：前端可省略 currentWeekHint。
+ *  §17 起：开学日/总周数随教务导入自动维护——前端保存设置时原样回传当前值、
+ *  不再传 currentWeekHint；后端契约保持兼容（showWeekends/firstDayOfWeek/
+ *  showNonCurrentWeek 仍经此命令落库）。 */
 export interface SemesterConfigInput {
   /** "YYYY-MM-DD" | null（null = 清空开学日即假期态）；被 currentWeekHint 反推覆盖 */
   semesterStartDate: string | null;

@@ -35,7 +35,7 @@
 use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use crate::infra::{state, timetable};
-use campus_portal::block_time_slots;
+use campus_portal::{block_time_slots, section_time_slots};
 use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
     current_week, diff_courses, expand_occurrences, parse_kb_response, parse_notice_text,
@@ -60,6 +60,12 @@ const ERR_NO_SESSION: &str = "请先登录";
 pub struct TimetableView {
     pub timetable: Timetable,
     pub slots: Vec<TimeSlot>,
+    /// 内置 11 小节作息表（契约 §17）：**恒定下发**（不随 config.slots/slot_rules
+    /// 变化），前端时间列与小节网格坐标用它。取舍：`config.slots` 是「大节」
+    /// 口径的自定义作息，与小节表不兼容——非空时 sectionSlots 仍为内置小节表
+    /// （时间列照常显示），但 ICS/今日页时刻查询在 config.slots 非空时沿用大节
+    /// `(s+1)/2` 路径（见 [`section_course_times`]）。
+    pub section_slots: Vec<TimeSlot>,
     pub current_week: Option<u32>,
     /// 顶栏标题态（契约 §13.1）："unset" | "before" | "vacation" | "normal"
     pub week_state: String,
@@ -92,6 +98,40 @@ fn effective_slots_at(
     }
 }
 
+/// 节次课时刻取值（契约 §17 修订，[`build_ics`] 与 [`today_courses`] 共用）：
+/// 生效作息为**内置校本大节表**（即无自定义/无日期规则命中，默认校本场景）时
+/// 直接按小节号查内置小节表 [`campus_portal::section_time_slots`]（start_section
+/// 起、end_section 止，跨节时长 = 首节始到末节止）；生效作息为大节口径
+///（`config.slots` 非空或日期规则命中）→ 沿用大节 `(s+1)/2` 折算路径。
+/// 任一端查不到 → None（无时刻可展开，调用方跳过该实例）。
+///
+/// 注：分叉判据取「生效作息是否等于内置大节表」而非仅看 `config.slots`——
+/// 日期规则（契约 §9）也是大节口径，命中时同样不能混小节表。
+fn section_course_times(
+    effective: &[TimeSlot],
+    s: u8,
+    e: u8,
+) -> Option<(String, String)> {
+    if effective == block_time_slots().as_slice() {
+        let sec = section_time_slots();
+        let (Some(ss), Some(se)) = (
+            sec.iter().find(|t| u32::from(t.number) == u32::from(s)),
+            sec.iter().find(|t| u32::from(t.number) == u32::from(e)),
+        ) else {
+            return None;
+        };
+        return Some((ss.start_time.clone(), se.end_time.clone()));
+    }
+    let (bs, be) = ((u32::from(s) + 1) / 2, (u32::from(e) + 1) / 2);
+    let (Some(bs_slot), Some(be_slot)) = (
+        effective.iter().find(|t| u32::from(t.number) == bs),
+        effective.iter().find(|t| u32::from(t.number) == be),
+    ) else {
+        return None;
+    };
+    Some((bs_slot.start_time.clone(), be_slot.end_time.clone()))
+}
+
 /// 顶栏标题态（契约 §13.1，风险 R7 口径）：无开学日 → `unset`；
 /// `week_index_at_date < 1` → `before`；`> total_weeks` → `vacation`；否则
 /// `normal`。**复用 weeks.rs 既有对齐式算法**（周首日对齐，禁止自造直除），
@@ -120,6 +160,7 @@ fn week_state_of(
 fn build_timetable_view(tt: Timetable, today: chrono::NaiveDate) -> TimetableView {
     TimetableView {
         slots: effective_slots_at(&tt.config, today),
+        section_slots: section_time_slots(),
         current_week: current_week(today, &tt.config),
         week_state: week_state_of(&tt.config, today),
         today: today.format("%Y-%m-%d").to_string(),
@@ -244,14 +285,9 @@ pub async fn import_timetable(
     let diff = diff_courses(&old.courses, &incoming);
 
     let mut tt = old;
-    // 用学期信息初始化/更新配置（解析失败保留旧值，不因个别字段坏数据丢课表）
-    tt.config.semester_start_date = semester_start_from_info(&sem.start_date)
-        .or(tt.config.semester_start_date);
-    if let Ok(w) = sem.week_count.trim().parse::<u32>() {
-        if w > 0 {
-            tt.config.semester_total_weeks = w;
-        }
-    }
+    // 用学期信息初始化/更新配置（契约 §17：同步口径收敛在纯函数，失败静默
+    // 保留旧值，不因个别字段坏数据丢课表）
+    apply_semester_info_to_config(&mut tt.config, &sem);
     tt.courses = diff.courses;
     tt.updated_at = chrono::Local::now().to_rfc3339();
 
@@ -276,6 +312,24 @@ fn semester_start_from_info(start_date: &str) -> Option<NaiveDate> {
     let m: u32 = start_date.get(4..6)?.parse().ok()?;
     let d: u32 = start_date.get(6..8)?.parse().ok()?;
     NaiveDate::from_ymd_opt(y, m, d)
+}
+
+/// 门户学期信息 → 课表配置同步（契约 §17，纯函数便于单测）：门户自带开学时间
+/// 与周数，导入时自动写入——`start_date` 可解析为 `NaiveDate`（YYYYMMDD）才覆盖
+/// 开学日；`week_count` 解析 u32 且落在 1..=30（与设置界面同范围）才覆盖总周数。
+/// 任一字段坏数据静默保留旧值（不阻塞导入）。
+fn apply_semester_info_to_config(
+    cfg: &mut campus_schedule::model::CourseTableConfig,
+    sem: &campus_portal::SemesterInfo,
+) {
+    if let Some(d) = semester_start_from_info(&sem.start_date) {
+        cfg.semester_start_date = Some(d);
+    }
+    if let Ok(w) = sem.week_count.trim().parse::<u32>() {
+        if (1..=30).contains(&w) {
+            cfg.semester_total_weeks = w;
+        }
+    }
 }
 
 /// load → 修改 → save 的公共骨架（单文件整体读写；写失败向上返回中文错误，
@@ -511,20 +565,17 @@ fn build_ics_with_reminder(tt: &Timetable, remind_minutes: Option<u8>) -> Result
                 if tt.config.skipped_dates.contains(&date) {
                     continue;
                 }
-                // 时刻取值（契约 §8.5）：节次课查**该日**生效作息（大节 = (s+1)/2
-                // 不变，起/止大节任一查不到 → 无时刻可展开，跳过该实例）；
+                // 时刻取值（契约 §8.5 + §17 修订）：节次课经 [`section_course_times`]
+                // 分叉（内置大节表场景按小节号查小节表，大节口径自定义/规则走
+                // (s+1)/2 折算），任一端查不到 → 无时刻可展开，跳过该实例；
                 // custom 课直接取 custom_start_time/custom_end_time（缺失 → 跳过）。
                 let (start_hm, end_hm) = match (occ.start_section, occ.end_section) {
                     (Some(s), Some(e)) => {
                         let slots = effective_slots_at(&tt.config, date);
-                        let (bs, be) = ((u32::from(s) + 1) / 2, (u32::from(e) + 1) / 2);
-                        let (Some(s_slot), Some(e_slot)) = (
-                            slots.iter().find(|t| u32::from(t.number) == bs),
-                            slots.iter().find(|t| u32::from(t.number) == be),
-                        ) else {
-                            continue;
-                        };
-                        (s_slot.start_time.clone(), e_slot.end_time.clone())
+                        match section_course_times(&slots, s, e) {
+                            Some(t) => t,
+                            None => continue,
+                        }
                     }
                     _ => {
                         let (Some(cs), Some(ce)) =
@@ -1105,9 +1156,9 @@ pub struct TodayCourse {
 ///   其余 `normal`。非 normal 态 courses 恒空、next 恒 None。
 /// - normal 态展开：每门未 disabled 课程经 [`campus_schedule::expand_occurrences`]
 ///   取本周实体，**只消费 Solid**、过滤 `occ.day == 今天星期`；时刻取值与
-///   [`build_ics`] 同口径（契约 §8.5）：节次课查 `effective_slots_at(config,
-///   today)`（大节 = `(s+1)/2`），custom 课（节次 None）取 `custom_*_time`；
-///   任一查不到 → 该实例不进列表。
+///   [`build_ics`] 同口径（契约 §8.5 + §17）：节次课经 [`section_course_times`]
+///   分叉（内置大节表场景按小节查小节表，否则大节 `(s+1)/2` 折算），custom 课
+///  （节次 None）取 `custom_*_time`；任一查不到 → 该实例不进列表。
 /// - 以分钟粒度比较：「未结束」= `end > now`；ongoing = `start <= now < end`。
 fn today_courses(tt: &Timetable, now: chrono::NaiveDateTime) -> TodayCoursesView {
     use chrono::Timelike;
@@ -1141,14 +1192,10 @@ fn today_courses(tt: &Timetable, now: chrono::NaiveDateTime) -> TodayCoursesView
                 }
                 let (start_hm, end_hm) = match (occ.start_section, occ.end_section) {
                     (Some(s), Some(e)) => {
-                        let (bs, be) = ((u32::from(s) + 1) / 2, (u32::from(e) + 1) / 2);
-                        let (Some(ss), Some(se)) = (
-                            slots.iter().find(|t| u32::from(t.number) == bs),
-                            slots.iter().find(|t| u32::from(t.number) == be),
-                        ) else {
-                            continue;
-                        };
-                        (ss.start_time.clone(), se.end_time.clone())
+                        match section_course_times(&slots, s, e) {
+                            Some(t) => t,
+                            None => continue,
+                        }
                     }
                     _ => {
                         let (Some(cs), Some(ce)) =
@@ -1816,7 +1863,7 @@ mod tests {
         assert_eq!(view.slots.len(), 5);
         assert_eq!(view.slots[0].number, 1);
         assert_eq!(view.slots[0].start_time, "08:00");
-        assert_eq!(view.slots[4].end_time, "20:10");
+        assert_eq!(view.slots[4].end_time, "21:20");
         assert_eq!(view.timetable.courses.len(), 2);
 
         // camelCase 序列化键（前端镜像契约）
@@ -1999,6 +2046,89 @@ mod tests {
         let view = build_timetable_view(tt, NaiveDate::from_ymd_opt(2026, 9, 17).unwrap());
         assert_eq!(view.slots.len(), 4);
         assert_eq!(view.slots[0].start_time, "08:30");
+    }
+
+    /// 契约 §17：sectionSlots 恒定下发内置 11 小节表（不受 config.slots 影响），
+    /// 序列化键 camelCase `sectionSlots`。
+    #[test]
+    fn timetable_view_section_slots_constant() {
+        let mut tt = fixture();
+        tt.config.slots = Some(vec![slot(1, "08:30", "10:00")]);
+        let view = build_timetable_view(tt, NaiveDate::from_ymd_opt(2026, 9, 17).unwrap());
+        assert_eq!(view.section_slots.len(), 11);
+        assert_eq!(view.section_slots[0].number, 1);
+        assert_eq!(view.section_slots[0].start_time, "08:00");
+        assert_eq!(view.section_slots[10].end_time, "21:20");
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"sectionSlots\":["));
+    }
+
+    /// 契约 §17 时刻分叉：生效作息 = 内置大节表（默认校本场景）→ 小节号直查
+    /// 小节表（跨节 = 首节始到末节止）；自定义大节作息 / 日期规则命中（大节
+    /// 口径）→ 大节 (s+1)/2 路径，查不到该大节 → None。
+    #[test]
+    fn section_course_times_branches_on_effective_slots() {
+        let builtin = block_time_slots();
+        assert_eq!(
+            section_course_times(&builtin, 7, 8),
+            Some(("15:55".into(), "17:35".into())),
+            "默认场景按小节号直查（与大节 4 校准值同锚）"
+        );
+        // 大节口径自定义作息：3-4 节 → 大节 2
+        let custom = vec![slot(1, "09:00", "10:40"), slot(2, "11:00", "12:40")];
+        assert_eq!(
+            section_course_times(&custom, 3, 4),
+            Some(("11:00".into(), "12:40".into()))
+        );
+        // 大节路径下查不到该大节 → None
+        let winter = vec![slot(1, "09:00", "10:40")];
+        assert_eq!(section_course_times(&winter, 3, 4), None);
+    }
+
+    /// 契约 §17 导入同步（纯函数两路）：门户学期信息成功 → 开学日/总周数写入；
+    /// 坏数据（日期不可解析 / 周数越界）→ 静默保留旧值。
+    #[test]
+    fn semester_info_syncs_config_success_and_bad_data() {
+        let mut cfg = timetable_with(None, vec![]).config;
+        apply_semester_info_to_config(
+            &mut cfg,
+            &campus_portal::SemesterInfo {
+                grade: "2026".into(),
+                semester: "1".into(),
+                current_week: "2".into(),
+                week_count: "19".into(),
+                start_date: "20260907".into(),
+                end_date: "20270117".into(),
+                current_week_day: "星期五".into(),
+            },
+        );
+        assert_eq!(
+            cfg.semester_start_date,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap())
+        );
+        assert_eq!(cfg.semester_total_weeks, 19);
+
+        // 坏数据：保留旧值（不阻塞导入）
+        let mut cfg = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]).config;
+        cfg.semester_total_weeks = 20;
+        apply_semester_info_to_config(
+            &mut cfg,
+            &campus_portal::SemesterInfo {
+                grade: "2026".into(),
+                semester: "1".into(),
+                current_week: "2".into(),
+                week_count: "99".into(),
+                start_date: "bad".into(),
+                end_date: String::new(),
+                current_week_day: String::new(),
+            },
+        );
+        assert_eq!(
+            cfg.semester_start_date,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            "日期不可解析 → 保留旧开学日"
+        );
+        assert_eq!(cfg.semester_total_weeks, 20, "周数越界 → 保留旧值");
     }
 
     // ---------------- 批 1：学期设置、显示约束联动与 ICS 周首日对齐（契约 §7） ----------------
@@ -2315,7 +2445,7 @@ mod tests {
         assert!(ics.contains("UID:default-a-w5d1s1-o"), "补课 UID 加后缀不撞原位");
     }
 
-    /// ④⑤ 调课结束节次缺省 = 起始大节高（start=5 → 大节 3，13:45-15:25）；
+    /// ④⑤ 调课结束节次缺省 = 起始小节（start=5 → 内置小节表小节 5，13:45-14:30）；
     ///    firstDay=7 时调课新位的日期按周首日旋转落列（第 1 周周四 = 周日周首
     ///    2026-09-06 + 4 列 = 2026-09-10）。
     #[test]
@@ -2333,7 +2463,7 @@ mod tests {
             change_type: OverrideKind::Rescheduled,
             new_day: Some(4),
             new_start_section: Some(5),
-            new_end_section: None, // 单节补调：结束 = 起始 → 大节 3
+            new_end_section: None, // 单节补调：结束 = 起始 → 小节 5
             new_position: None,
             source_notice_id: "notice-move".into(),
             auto_applied: false,
@@ -2342,7 +2472,7 @@ mod tests {
         assert_eq!(vevent_count(&ics), 1);
         assert!(ics.contains("UID:default-a-w1d4s5-o"));
         assert!(ics.contains("DTSTART:20260910T134500"), "firstDay=7 旋转后周四 = 09-10");
-        assert!(ics.contains("DTEND:20260910T152500"), "结束缺省 = 起始大节高（大节 3）");
+        assert!(ics.contains("DTEND:20260910T143000"), "结束缺省 = 起始小节（内置小节表小节 5）");
     }
 
     /// ⑦ custom 课被 resched → 新位走大节表取时刻（P3-c 口径），UID 带 scustom 之外
@@ -2350,7 +2480,8 @@ mod tests {
     ///    course.weeks 空数组 + extra → 补课事件照常生成。
     #[test]
     fn ics_custom_resched_skipped_new_date_and_empty_weeks() {
-        // custom + resched：新位 day 2 节次 7-8 → 大节 4 15:35-17:15
+        // custom + resched：新位 day 2 节次 7-8 → 内置小节表路径：小节 7 15:55 起
+        // （config.slots 为空 → 不再走大节 (s+1)/2 折算，契约 §17）
         let mut c = course("default-c", "科研例会", 3, 1, 2, vec![1]);
         c.is_custom_time = true;
         c.start_section = None;
@@ -2373,7 +2504,7 @@ mod tests {
         let ics = build_ics(&tt).unwrap();
         assert_eq!(vevent_count(&ics), 1);
         assert!(ics.contains("UID:default-c-w1d2s7-o"));
-        assert!(ics.contains("DTSTART:20260908T153500"), "resched 后走大节表而非 custom 时刻");
+        assert!(ics.contains("DTSTART:20260908T155500"), "resched 后走内置小节表而非 custom 时刻");
         assert!(!ics.contains("T180000"), "原 custom 时段不生成");
 
         // skipped_dates 恰为调课新日期（2026-10-08 = 第 5 周周四）→ VEVENT 剔除
@@ -2417,7 +2548,7 @@ mod tests {
         let ics = build_ics(&tt3).unwrap();
         assert_eq!(vevent_count(&ics), 1);
         assert!(ics.contains("UID:default-d-w2d5s9-o"));
-        assert!(ics.contains("DTSTART:20260918T183000"), "第 2 周周五 = 09-18，大节 5 18:30 起");
+        assert!(ics.contains("DTSTART:20260918T184500"), "第 2 周周五 = 09-18，内置小节表小节 9 18:45 起");
     }
 
     /// 跳过日期 → 命中日期的 VEVENT 剔除（该实例），其他日期不受影响。

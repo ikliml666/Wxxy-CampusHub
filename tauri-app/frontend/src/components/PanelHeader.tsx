@@ -31,8 +31,9 @@ export function PanelHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="mt-8 mb-5 flex items-center justify-between gap-4">
-      <div className="flex min-w-0 items-center gap-3">
+    // flex-wrap：actions 过多时换行而不是把 min-w-0 标题区挤到 1 字宽（竖排根因修复）
+    <header className="mt-8 mb-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <div className="flex shrink-0 items-center gap-3">
         <span
           aria-hidden
           className="size-2 shrink-0 rounded-full"

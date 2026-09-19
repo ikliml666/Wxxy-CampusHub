@@ -159,25 +159,56 @@ pub fn parse_week_schedule(body: &str) -> Result<WeekSchedule, PortalError> {
 
 /// 校本「大节」作息表（100 分钟/大节；矩阵 10 列 = 5 大节 × 2 小节）。
 ///
-/// 时间锚定 2026-09-18 主智能体日程服务实测（`findScheduleBetweenTime` 的
-/// `Default-class` 事件真实上课时间）：大节2 10:10-11:50、大节3 13:45-15:25 为
-/// 实测值；其余档位为推算，M2.5 校本化作息时校准。**不改动
-/// `campus-schedule::default_time_slots()`**（上游默认值，被金标测试钉住）。
+/// 时间锚定：大节2 10:10-11:50、大节3 13:45-15:25 为 2026-09-18 日程服务实测
+///（`findScheduleBetweenTime` 的 `Default-class` 事件真实上课时间）；大节1 由
+/// 大节2 起点反推（30 分钟大课间）；大节4/5 为 **2026-09-19 用户截图校准**
+///（15:55-17:35、18:45-21:20）。**不改动 `campus-schedule::default_time_slots()`**
+///（上游默认值，被金标测试钉住）。
 ///
 /// `pub`：M2.5 起课表 ICS 导出（tauri 层）与今日页「下一节课」共用同一份
 /// 校本大节表——单点事实来源，调用方不得复制常量。
 pub fn block_time_slots() -> Vec<TimeSlot> {
     const RAW: [(u8, &str, &str); 5] = [
-        // ponytail: 未实测——由大节2 10:10 开始反推（30 分钟大课间）；M2.5 校准
+        // 由大节2 10:10 起反推（30 分钟大课间）；2026-09-19 随小节表校准确认
         (1, "08:00", "09:40"),
         // 2026-09-18 日程服务实测（信息隐藏与取证技术 10:10→11:50）
         (2, "10:10", "11:50"),
         // 2026-09-18 日程服务实测（信息安全等 13:45→15:25）
         (3, "13:45", "15:25"),
-        // ponytail: 未实测——由大节3 结束 15:25 + 10 分钟课间推出；M2.5 校准
-        (4, "15:35", "17:15"),
-        // ponytail: 未实测——晚上档位占位；M2.5 校准
-        (5, "18:30", "20:10"),
+        // 2026-09-19 用户截图校准
+        (4, "15:55", "17:35"),
+        // 2026-09-19 用户截图校准
+        (5, "18:45", "21:20"),
+    ];
+    RAW.into_iter()
+        .map(|(number, start_time, end_time)| TimeSlot {
+            number,
+            start_time: start_time.into(),
+            end_time: end_time.into(),
+            alias: None,
+        })
+        .collect()
+}
+
+/// 校本「小节」作息表（11 小节，45 分钟/节；2026-09-19 用户截图校准，上游参考
+/// 截图同为 11 节口径）。
+///
+/// `pub`：前端课表时间列（tauri 层 `TimetableView.sectionSlots` 恒定下发）与
+/// 默认校本场景下 ICS/今日页的节次课精确时刻查询共用——单点事实来源，调用方
+/// 不得复制常量。与大节表 [`block_time_slots`] 的分叉规则见 tauri 层契约 §17。
+pub fn section_time_slots() -> Vec<TimeSlot> {
+    const RAW: [(u8, &str, &str); 11] = [
+        (1, "08:00", "08:45"),
+        (2, "08:55", "09:40"),
+        (3, "10:10", "10:55"),
+        (4, "11:05", "11:50"),
+        (5, "13:45", "14:30"),
+        (6, "14:40", "15:25"),
+        (7, "15:55", "16:40"),
+        (8, "16:50", "17:35"),
+        (9, "18:45", "19:30"),
+        (10, "19:40", "20:25"),
+        (11, "20:35", "21:20"),
     ];
     RAW.into_iter()
         .map(|(number, start_time, end_time)| TimeSlot {
@@ -204,7 +235,7 @@ pub fn elapsed_slot_count(now_hm: &str, slots: &[TimeSlot]) -> usize {
 ///
 /// 列号 → 大节号：10 列 = 5 大节 × 2 小节，`(0,1)→大节1 … (8,9)→大节5`，
 /// 即 `col / 2 + 1`；课程起始时间取该大节开始时刻（真机缺陷教训：按小节号
-/// 查默认 13 节表会把大节4 的课标成 14:50，正确为 15:35）。
+/// 查默认 13 节表会把大节4 的课标成 14:50，正确为 15:55）。
 fn course_from_cell(cell: &str, col: usize, slots: &[TimeSlot]) -> Option<CourseBrief> {
     let cell = cell.trim();
     if cell.is_empty() {
@@ -973,6 +1004,24 @@ mod tests {
         block_time_slots()
     }
 
+    /// 内置 11 小节表（契约 §17，2026-09-19 用户截图校准）：条数、号连续
+    /// 1..=11、关键档位时刻（上午止/午休后/与大节 4、5 校准值同锚/全天止）。
+    #[test]
+    fn section_time_slots_covers_eleven_sections() {
+        let s = section_time_slots();
+        assert_eq!(s.len(), 11);
+        for (i, slot) in s.iter().enumerate() {
+            assert_eq!(slot.number as usize, i + 1, "小节号应连续 1..=11");
+        }
+        assert_eq!(s[0].start_time, "08:00");
+        assert_eq!(s[0].end_time, "08:45");
+        assert_eq!(s[3].end_time, "11:50", "上午止（小节 4）");
+        assert_eq!(s[4].start_time, "13:45", "午休后（小节 5）");
+        assert_eq!(s[6].start_time, "15:55", "与大节 4 校准值同锚");
+        assert_eq!(s[8].start_time, "18:45", "与大节 5 校准值同锚");
+        assert_eq!(s[10].end_time, "21:20", "全天止（小节 11）");
+    }
+
     #[test]
     fn elapsed_block_count_by_time() {
         let s = slots();
@@ -983,7 +1032,7 @@ mod tests {
         assert_eq!(elapsed_slot_count("10:00", &s), 1);
         // 大节3（13:45-15:25）进行中 → 3
         assert_eq!(elapsed_slot_count("14:00", &s), 3);
-        // 大节4（15:35-17:15）进行中 → 4
+        // 大节4（15:55-17:35）进行中 → 4
         assert_eq!(elapsed_slot_count("16:00", &s), 4);
         // 深夜 → 全部 5 大节
         assert_eq!(elapsed_slot_count("22:00", &s), 5);
@@ -1001,7 +1050,7 @@ mod tests {
     }
 
     /// 主智能体验收缺陷回归：周五列 7,8（1-based；0-based 6,7 = 大节4）有课
-    /// 「信息安全」，当前时间在上午 → 起点必须是大节4 的 15:35（此前按小节号
+    /// 「信息安全」，当前时间在上午 → 起点必须是大节4 的 15:55（此前按小节号
     /// 查默认 13 节表误报 14:50）。
     #[test]
     fn next_course_maps_column_pair_to_block_start() {
@@ -1013,7 +1062,7 @@ mod tests {
         assert_eq!(c.name, "信息安全");
         assert_eq!(c.room, "C5科教中心313");
         assert_eq!(c.slot, 4);
-        assert_eq!(c.start_time.as_deref(), Some("15:35"));
+        assert_eq!(c.start_time.as_deref(), Some("15:55"));
         // 边界：大节4 进行中（elapsed=4）→ 本周无更多课 → None
         assert!(next_course(&grid, 5, 4, &slots()).is_none());
         // 边界：全部大节已过（elapsed=5）→ None
@@ -1025,10 +1074,10 @@ mod tests {
         let grid = fixture_grid();
         let s = slots();
         // 周五列 1,2（大节1）与 7,8（大节4）有课：大节1 进行中（elapsed=1）
-        // → 当天从 col2 起 → 下一节是大节4 15:35
+        // → 当天从 col2 起 → 下一节是大节4 15:55
         let c = next_course(&grid, 5, 1, &s).unwrap();
         assert_eq!(c.slot, 4);
-        assert_eq!(c.start_time.as_deref(), Some("15:35"));
+        assert_eq!(c.start_time.as_deref(), Some("15:55"));
         // 周四大节4 进行中（elapsed=4）→ 周四无更多课 → 周五大节1
         let c = next_course(&grid, 4, 4, &s).unwrap();
         assert_eq!(c.slot, 1);

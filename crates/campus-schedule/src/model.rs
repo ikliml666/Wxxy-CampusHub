@@ -72,8 +72,9 @@ pub struct Course {
 #[serde(rename_all = "camelCase")]
 pub struct CourseTableConfig {
     pub course_table_id: String,
-    /// 是否显示周末列
-    #[serde(default)]
+    /// 是否显示周末列（契约 §17 修订，2026-09-19 真机反馈：默认**显示**周六
+    /// 周日；旧文件显式 false 不受影响，仅缺字段时兜底为 true）
+    #[serde(default = "default_show_weekends")]
     pub show_weekends: bool,
     /// 学期开始日期 "yyyy-MM-dd"（周次计算的锚点）
     pub semester_start_date: Option<NaiveDate>,
@@ -126,6 +127,9 @@ fn default_total_weeks() -> u32 {
 }
 fn default_first_day() -> u8 {
     1
+}
+fn default_show_weekends() -> bool {
+    true
 }
 
 /// 节次时间段（对齐 TimeSlot）。
@@ -248,6 +252,8 @@ mod tests {
         assert!(tt.config.slot_rules.is_empty());
         // show_non_current_week serde 缺省（契约 §13.2）：旧文件无该键 → false（现状隐藏）
         assert!(!tt.config.show_non_current_week);
+        // show_weekends serde 缺省（契约 §17 修订）：旧文件无该键 → true（默认显示周末）
+        assert!(tt.config.show_weekends);
 
         let full = Timetable {
             config: CourseTableConfig {
