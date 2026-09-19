@@ -310,6 +310,27 @@ function layoutColumn(col: PlacedBlock[]): Map<string, { lane: number; lanes: nu
   return out;
 }
 
+// ---------------- 网格拖拽改课（契约 §10，批 4：纯前端几何 + 落库分叉） ----------------
+
+/** 点击/拖拽阈值：曼哈顿距离超过该值才算拖拽（契约 §10.1）。 */
+const DRAG_THRESHOLD = 4;
+
+/** 一次拖拽会话。col/startBlock = 落点；-1 = 无效落点（跳过日期列/网格外）。 */
+interface DragState {
+  block: PlacedBlock;
+  /** 发起拖拽的 pointerId（move/up/cancel 校验，防多指覆盖会话） */
+  pointerId: number;
+  /** pointerdown 起点（client 坐标） */
+  startX: number;
+  startY: number;
+  /** 移动超过阈值后进入拖拽（此前 pointerup 视为纯点击） */
+  active: boolean;
+  /** 落点显示列下标（0-based，经 displayDayOf 反映射回星期） */
+  col: number;
+  /** 落点起始大节（1-based，末位对齐 clamp） */
+  startBlock: number;
+}
+
 // ---------------- 手动添加 / 编辑表单 ----------------
 
 const DAY_OPTIONS = DAY_NAMES.slice(1);
@@ -1237,6 +1258,193 @@ export function TimetablePanel() {
     );
   };
 
+  // ---------------- 网格拖拽改课（契约 §10，批 4） ----------------
+
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  /** 进入过拖拽后吃掉后续 click（pointer capture 后 click 仍触发，契约 §10.1 最常见坑） */
+  const suppressClickRef = useRef(false);
+  /** 天列容器（显示列下标 → DOM），pointerdown 时缓存 rect 快照用于命中测试 */
+  const dayColRefs = useRef(new Map<number, HTMLElement>());
+  const dragRectsRef = useRef<{ left: number; top: number; width: number }[]>([]);
+
+  const updateDrag = useCallback((d: DragState | null) => {
+    dragRef.current = d;
+    setDrag(d);
+  }, []);
+
+  /** 可拖块：实体块且非 extra 补课；ghost（已停/已调出）不可拖（契约 §10.3）。 */
+  const isDraggable = (b: PlacedBlock) => b.ghost === null && b.override?.changeType !== "extra";
+
+  /** 落点命中测试（契约 §10.2 纯前端几何，不走 grid.rs 互转）：显示列 = 天列 rect
+   *  命中（网格外 clamp 到首/末列）；目标大节 = clamp(floor((y-网格顶)/ROW_H)+1,
+   *  1, slots.length-跨度)（末位对齐，整块不超作息行数）。跳过日期列无效。 */
+  const hitTest = (
+    x: number,
+    y: number,
+    block: PlacedBlock,
+  ): { col: number; startBlock: number } | null => {
+    const rects = dragRectsRef.current;
+    if (rects.length === 0) return null;
+    let col = rects.findIndex((r) => x < r.left + r.width);
+    if (col === -1) col = rects.length - 1; // 越过右缘 → 末列
+    if (isSkippedCol(col)) return null;
+    const span = block.endBlock - block.startBlock;
+    const raw = Math.floor((y - rects[col].top) / ROW_H) + 1;
+    const startBlock = Math.min(Math.max(1, slots.length - span), Math.max(1, raw));
+    return { col, startBlock };
+  };
+
+  const onBlockPointerDown = (b: PlacedBlock, e: React.PointerEvent<HTMLButtonElement>) => {
+    suppressClickRef.current = false; // 新会话起手清残留，限制 suppress 寿命
+    if (busyKey === "drag") return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    // 拖拽期间的命中测试快照——拖拽中滚动/resize 会用旧快照，已知取舍，
+    // pointermove 按需重算 rect 是升级路径（ponytail: 单用户桌面，滚动拖拽极罕见）
+    dragRectsRef.current = Array.from({ length: displayDays }, (_, i) => {
+      const rect = dayColRefs.current.get(i)?.getBoundingClientRect();
+      return rect
+        ? { left: rect.left, top: rect.top, width: rect.width }
+        : { left: Number.MAX_SAFE_INTEGER, top: 0, width: 0 };
+    });
+    updateDrag({
+      block: b,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+      col: -1,
+      startBlock: -1,
+    });
+  };
+
+  const onBlockPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = dragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return; // 非会话发起指（多指）忽略
+    const dist = Math.abs(e.clientX - d.startX) + Math.abs(e.clientY - d.startY);
+    if (!d.active) {
+      if (dist <= DRAG_THRESHOLD) return;
+      suppressClickRef.current = true; // 进入拖拽：吃掉 pointerup 后的 click
+    }
+    const hit = hitTest(e.clientX, e.clientY, d.block);
+    updateDrag({ ...d, active: true, col: hit?.col ?? -1, startBlock: hit?.startBlock ?? -1 });
+  };
+
+  const onBlockPointerUp = async (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = dragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    updateDrag(null);
+    if (!d.active) return; // 纯点击：click 正常触发详情浮层
+    suppressClickRef.current = true;
+    if (d.col < 0 || d.startBlock < 0) return; // 无效落点（跳过日列/网格外）：回弹不落库
+    await commitDrag(d);
+  };
+
+  const onBlockPointerCancel = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = dragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    updateDrag(null);
+    if (d.active) suppressClickRef.current = true;
+  };
+
+  /** 意外丢失 pointer capture（元素移除/浏览器接管等）时复位，防 drag 常驻 active。
+   *  正常 pointerup 先于本事件复位 dragRef，此处判空自然跳过、不干扰落库。 */
+  const onBlockLostCapture = () => {
+    if (dragRef.current) updateDrag(null);
+  };
+
+  /** 拖拽落库分叉（契约 §10.4）：多周/单周导入 → 单周 Rescheduled override
+   *  （sourceNoticeId = "drag:<courseId>:<week>"，upsert 幂等键 = noticeId+courseId，
+   *  同课同周反复拖拽覆盖为最后位置）；单周手动 → update_course 直改（先 revoke
+   *  本周残留的 drag: 链路 override，否则渲染层仍按 override 移位、与直改冲突）。
+   *  位置未变短路不产生记录。跨度按课程原始小节差保持，教室按显示值保持。 */
+  const commitDrag = async (d: DragState) => {
+    if (d.col < 0 || d.startBlock < 0) return; // 兜底守卫：无效落点不落库（day=0 会炸渲染）
+    const b = d.block;
+    const course = b.course;
+    if (course.startSection == null || course.endSection == null) return; // custom 课无小节（不渲染块，理论不可达）
+    const day = displayDayOf(d.col);
+    const newStartSection = d.startBlock * 2 - 1; // 大节 → 小节口径（契约 §10.4）
+    // 跨度按课程原始小节差保持（冻结公式，契约 §10.4）：如 3-4 节拖到第 3 大节 → 5-6
+    const newEndSection = newStartSection + (course.endSection - course.startSection);
+    if (day === b.day && d.startBlock === b.startBlock) return; // 位置未变短路
+    setBusyKey("drag");
+    setNoticeMsg(null);
+    try {
+      if (course.weeks.length === 1 && course.source === "manual") {
+        // 不变量：只清理拖拽链路自身（drag: 前缀）的残留 override，不按通知
+        // noticeId 整批删——避免 M5 公告流一文多候选时误删其他候选的调整
+        const stale = (tt?.overrides ?? []).filter(
+          (o) =>
+            o.courseId === course.id &&
+            o.weeks.includes(week) &&
+            o.changeType === "rescheduled" &&
+            o.sourceNoticeId.startsWith("drag:"),
+        );
+        for (const o of stale) {
+          await invokeCommand("revoke_notice", { noticeId: o.sourceNoticeId });
+        }
+        const r = await invokeCommand<Course>("update_course", {
+          course: {
+            ...course,
+            day,
+            startSection: newStartSection,
+            endSection: newEndSection,
+            position: b.room, // 保持当前显示教室（原教室或通知已改的新教室）
+          },
+        });
+        if (!r.success) setNoticeMsg({ ok: false, text: r.message ?? "拖拽保存失败" });
+      } else {
+        const candidate: NoticeCandidate = {
+          noticeId: `drag:${course.id}:${week}`,
+          courseId: course.id,
+          courseName: course.name,
+          changeType: "rescheduled",
+          weeks: [week],
+          newDay: day,
+          newStartSection,
+          newEndSection,
+          newPosition: b.room,
+          confidence: "low",
+          reason: "拖拽调整",
+          excerpt: "",
+        };
+        const r = await invokeCommand<CourseOverride>("apply_override", { candidate });
+        if (!r.success) setNoticeMsg({ ok: false, text: r.message ?? "拖拽保存失败" });
+      }
+      setReloadTick((t) => t + 1);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  // 拖拽中 Esc 取消（契约 §10.1）：复位状态机，suppress 吃掉随后 pointerup 的 click
+  useEffect(() => {
+    if (!drag?.active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        updateDrag(null);
+        suppressClickRef.current = true;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drag?.active, updateDrag]);
+
+  // 状态机复位面：window 失焦 / 展示周或视图相位变化（网格可能卸载）时复位 drag，
+  // 防止拖拽会话跨越视图变更后 drag 常驻 active
+  useEffect(() => {
+    const onBlur = () => {
+      if (dragRef.current) updateDrag(null);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [updateDrag]);
+  useEffect(() => {
+    if (dragRef.current) updateDrag(null);
+  }, [week, view.phase, updateDrag]);
+
   // ---------------- 动作 ----------------
 
   const doImport = async () => {
@@ -1611,7 +1819,10 @@ export function TimetablePanel() {
           {/* 周视图网格 */}
           <Surface className="overflow-x-auto">
             <div
-              className="grid min-w-[640px]"
+              className={cn(
+                "grid min-w-[640px]",
+                drag?.active && (drag.col < 0 ? "cursor-not-allowed select-none" : "cursor-grabbing select-none"),
+              )}
               style={{ gridTemplateColumns: `56px repeat(${displayDays}, minmax(0, 1fr))` }}
             >
               {/* 表头行：列头从 firstDay 起旋转（firstDay=7 → 周日起） */}
@@ -1677,10 +1888,16 @@ export function TimetablePanel() {
                 return (
                   <div
                     key={day}
+                    ref={(el) => {
+                      // 天列 DOM：拖拽命中测试用（显示列下标 → rect 快照）
+                      if (el) dayColRefs.current.set(i, el);
+                      else dayColRefs.current.delete(i);
+                    }}
                     className={cn(
                       "relative border-line",
                       i > 0 && "border-l",
                       i === todayCol && "bg-sched/5",
+                      drag?.active && drag.col === i && "bg-sched/15", // 落点列高亮（契约 §10.3）
                     )}
                     style={{ height: ROW_H * slots.length }}
                   >
@@ -1716,6 +1933,18 @@ export function TimetablePanel() {
                         style={{ top: (s.number - 1) * ROW_H, height: ROW_H }}
                       />
                     ))}
+                        {/* 拖拽落点预览：按原跨度画虚线 ghost div（契约 §10.3） */}
+                        {drag?.active && drag.col === i && drag.startBlock >= 1 && (
+                          <div
+                            aria-hidden
+                            className="pointer-events-none absolute left-0 w-full rounded-inner border-2 border-dashed border-sched bg-sched/10"
+                            style={{
+                              top: (drag.startBlock - 1) * ROW_H + 2,
+                              height:
+                                (drag.block.endBlock - drag.block.startBlock + 1) * ROW_H - 4,
+                            }}
+                          />
+                        )}
                       </>
                     )}
                     {col.map((b) => {
@@ -1723,6 +1952,9 @@ export function TimetablePanel() {
                       const color = courseColor(b.course);
                       const top = (b.startBlock - 1) * ROW_H + 2;
                       const height = (b.endBlock - b.startBlock + 1) * ROW_H - 4;
+                      const draggable = isDraggable(b);
+                      const dragging = drag?.active === true && drag.block.key === b.key;
+                      const dragInvalid = dragging && drag.col < 0; // 无效落点 = 不可放置态
                       return (
                         <button
                           key={b.key}
@@ -1732,11 +1964,27 @@ export function TimetablePanel() {
                             if (el) blockRefs.current.set(b.key, el);
                             else blockRefs.current.delete(b.key);
                           }}
-                          aria-label={`${b.course.name}，${DAY_NAMES[b.day]}第${b.startBlock}至${b.endBlock}大节${b.ghost ? `（${b.ghost === "cancelled" ? "已停" : "已调出"}）` : ""}`}
-                          onClick={() => openBlockDetail(b)}
+                          aria-label={`${b.course.name}，${DAY_NAMES[b.day]}第${b.startBlock}至${b.endBlock}大节${b.ghost ? `（${b.ghost === "cancelled" ? "已停" : "已调出"}）` : ""}${draggable ? "，可拖拽调整位置" : ""}`}
+                          onClick={() => {
+                            // 拖拽结束/取消后的 click 必须吃掉（pointer capture 后 click
+                            // 仍触发，契约 §10.1）；未进入拖拽的纯点击照常开详情
+                            if (suppressClickRef.current) {
+                              suppressClickRef.current = false;
+                              return;
+                            }
+                            openBlockDetail(b);
+                          }}
+                          onPointerDown={draggable ? (e) => onBlockPointerDown(b, e) : undefined}
+                          onPointerMove={draggable ? onBlockPointerMove : undefined}
+                          onPointerUp={draggable ? (e) => void onBlockPointerUp(e) : undefined}
+                          onPointerCancel={draggable ? onBlockPointerCancel : undefined}
+                          onLostPointerCapture={draggable ? onBlockLostCapture : undefined}
                           className={cn(
                             "absolute overflow-hidden rounded-inner px-1.5 py-1 text-left transition-shadow duration-[var(--dur-fast)] ease-out-soft hover:shadow-card focus-visible:shadow-card",
                             b.ghost ? "border border-dashed" : "border",
+                            draggable && "cursor-grab touch-none", // touch-none：拖拽不被触屏滚动吞掉
+                            dragging && "opacity-40",
+                            dragInvalid && "cursor-not-allowed ring-2 ring-alert", // 不可放置反馈（契约 §10.3 复核采纳）
                           )}
                           style={{
                             top,
@@ -1858,6 +2106,9 @@ export function TimetablePanel() {
                                 <span className={cn("font-medium", o.autoApplied ? "text-sched" : "text-todo")}>
                                   {KIND_LABEL[o.changeType]}
                                 </span>{" "}
+                                {o.sourceNoticeId.startsWith("drag:") && (
+                                  <span className="rounded bg-line px-1 text-caption text-text-2">拖拽</span>
+                                )}{" "}
                                 {overrideSummary(o)}
                                 {o.autoApplied && <span className="ml-1 opacity-70">（自动）</span>}
                               </span>
@@ -2039,6 +2290,9 @@ export function TimetablePanel() {
                             <span className={cn("font-medium", o.autoApplied ? "text-sched" : "text-todo")}>
                               {KIND_LABEL[o.changeType]}
                             </span>{" "}
+                            {o.sourceNoticeId.startsWith("drag:") && (
+                              <span className="rounded bg-line px-1 text-caption text-text-2">拖拽</span>
+                            )}{" "}
                             {course?.name ?? "（课程已删除）"} · {overrideSummary(o)}
                             {o.autoApplied && <span className="ml-1 opacity-70">（自动）</span>}
                           </span>
