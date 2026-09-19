@@ -1,9 +1,29 @@
-//! 电费命令面（M3 批 3）：片区目录 / 级联查询 / 常用房间（本地存）/ 去官网充值（系统浏览器）。
+//! 电费命令面（M3 批 3 + M3.1 批 C）：片区目录 / 级联查询 / 常用房间（本地存）/ 去官网充值（系统浏览器）
+//! / **充值六条**（建单 → 支付方式 → 账户与安全键盘 → 提交 → 状态 → 取消）。
 //!
 //! # 取数口径
 //!
 //! 目录与级联全部来自 `campus_synjones::charge`（协议事实见该模块头注，含两条 live 实测关键结论：
-//! 「末级是输入级，服务端不下发下拉」「`showData` 键名恒为 `信息`，值是各片区格式不同的自由文本」）。
+//! 「末级是输入级，服务端不下发下拉」「`showData` 键名恒为 `信息`，值是各片区格式不同的自由文本」）；
+//! 充值协议全部来自 `campus_synjones::recharge`（模块头注含 live 实测的 paystep/错误文案/取消订单等事实）。
+//!
+//! # 充值红线（M3.1 计划 §2 的 Global Constraints，逐条落在这里）
+//!
+//! 1. **密码**：`recharge_query_account` 把服务端下发的安全键盘（`pad.keys`，**只用于渲染**）交给前端；
+//!    提交走 `recharge_submit` 的 `password_seq`（**用户点击的键位下标序列**）。本模块**绝不**把 `keys`
+//!    还原成密码、**绝不**落盘/打日志/回填输入框，两个字段都只在一次调用内存在（不写任何 storage）。
+//! 2. **金额语义不碰**：`tranamt` 原样透传（crate 只校验「非空且为正数」），下限/上限只由前端提示。
+//! 3. **副作用不重试**：`recharge_create` / `recharge_submit` / `recharge_cancel` 各只发一次
+//!    （crate 层仅在服务端明确拒绝 401 时静默重进一次），结果一律以 `recharge_status` 兜底判定。
+//! 4. **轮询上限**在前端（2s × 15 次）；本模块只提供单次查询。
+//! 5. **跳转分支不实现**：响应命中 `webUrl`/`paysubmit`/`paymentcashierStr`/`qrCodeUrl` 时 crate 直接报错，
+//!    本模块只把文案转给用户。
+//! 6. **清理**：失败/放弃时前端调 `recharge_cancel`（crate 实测该端点**必须 JSON body**）。
+//!    ⚠️ 实测学校侧没有可用的「遗留未支付订单列表」接口（`/charge/order/personal_data?status=0` 恒
+//!    `code=500`，见 `tests/recharge_live.rs::recharge_diag_live`），故无法在进入流程前预检遗留单。
+//! 7. **`third_party` 由后端合成**：`recharge_create` 收「房间路径」而不是上下文串——crate 内部按路径
+//!    重放一次 `getThirdData` 取末级 `map.data`（含户号 PII）拼串后随建单发出，PII 全程不出后端，
+//!    前端也无从伪造房间上下文（见 `recharge::third_party_for_room`）。
 //!
 //! # token 单活 → 沿用批 2 的全局唯一客户端
 //!
@@ -30,6 +50,7 @@ use super::synjones::{err_text, synjones_session};
 use crate::infra::state::{self, AppState};
 use campus_auth::cas::CasClient;
 use campus_synjones::charge::{self, ElectricityQuery, FeeItem, RoomStep};
+use campus_synjones::recharge::{self, PayMethod, PasswordPad, RechargeOrder};
 use campus_synjones::{CampusSynjonesError, BERSERKER_BASE};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -280,6 +301,210 @@ pub async fn open_recharge_in_browser(
     )
 }
 
+// ---------------- 充值六条（M3.1 批 C） ----------------
+
+/// 充值命令面取会话（与 `query_electricity` 同一把锁/同一个客户端）。
+macro_rules! with_synjones {
+    ($state:expr, |$client:ident| $body:expr) => {{
+        let Some(guard) = synjones_session(&$state).await else {
+            return Ok(CommandResult::err(ERR_NO_SESSION));
+        };
+        let Some(sess) = guard.as_ref() else {
+            return Ok(CommandResult::err(ERR_NO_SESSION));
+        };
+        let $client = &sess.client;
+        $body
+    }};
+}
+
+/// `recharge_create` → data。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RechargeCreated {
+    pub order_id: String,
+}
+
+/// `recharge_pay_methods` / `recharge_status` → data。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RechargePayMethods {
+    pub order: RechargeOrder,
+    pub methods: Vec<PayMethod>,
+}
+
+/// `recharge_query_account` → data。`pad` 只有**需密码**且服务端下发键盘时才有值（见 [`PasswordPad`] 红线）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RechargeAccounts {
+    pub accounts: Vec<String>,
+    pub ccctypes: Vec<String>,
+    pub pad: Option<PasswordPad>,
+}
+
+/// **建单**（电费 `paystep=0`，金额 1 元起；副作用请求只发一次）。
+///
+/// `path` = 当前房间的完整级联路径（校区 → 楼栋 → 房间，与 `query_electricity` 的入参同构）——**必填语义**。
+/// `third_party`（房间上下文串）**由后端按该路径合成**——前端拿不到也不需要（见模块头注红线 7）。
+///
+/// ⚠️ `path` 声明成 `Option` **只为兼容尚未升级的旧前端**：批 D 已提交的调用没传 `path`
+/// （它在等后端给上下文串）。不声明 `Option` 时 Tauri 会在反序列化阶段就报 `invalid args`（IPC 层错误，
+/// 界面只能显示通用失败），声明后我们能把「请更新客户端」这句可读文案送到用户面前。
+///
+/// 失败文案：服务端原文一并透出（如 `dayTotalMoney-日消费最大金额判断异常了-null`），便于排查。
+#[tauri::command]
+pub async fn recharge_create(
+    state: State<'_, AppState>,
+    feeitem_id: String,
+    tranamt: String,
+    path: Option<Vec<RoomStep>>,
+) -> Result<CommandResult<RechargeCreated>, String> {
+    let Some(path) = path.filter(|p| !p.is_empty()) else {
+        return Ok(CommandResult::err(
+            "缺少房间信息，请返回上一步重新选择房间后再试（客户端需更新）",
+        ));
+    };
+    with_synjones!(state, |client| {
+        Ok(match recharge::create_order(client, &feeitem_id, &tranamt, &path).await {
+            Ok(order_id) => CommandResult::ok(RechargeCreated { order_id }),
+            Err(e) => CommandResult::err(&elec_err(&e)),
+        })
+    })
+}
+
+/// **支付方式**（`getpayinfo`）：返回订单状态 + 账户类支付方式（crate 已过滤到 `ACCOUNT`/`ACCOUNTTSM`）。
+#[tauri::command]
+pub async fn recharge_pay_methods(
+    state: State<'_, AppState>,
+    order_id: String,
+) -> Result<CommandResult<RechargePayMethods>, String> {
+    with_synjones!(state, |client| {
+        Ok(
+            match recharge::fetch_pay_methods(client, &order_id).await {
+                Ok((order, methods)) => {
+                    CommandResult::ok(RechargePayMethods { order, methods })
+                }
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **查账户 / 安全键盘**（`paystep=2`，两步协议，见 `recharge::query_account`）：
+///
+/// - 不带 `accountno` → 回**账号列表**（渲染「选择账号」）；
+/// - 带已选 `accountno` → 回该账号的**账户类型**与**安全键盘**（需密码的渠道才有 `pad`）。
+///
+/// `pad.keys` **只允许**交给渲染层画键盘；提交只回传下标序列（见 `recharge_submit`）。
+#[tauri::command]
+pub async fn recharge_query_account(
+    state: State<'_, AppState>,
+    order_id: String,
+    code: String,
+    payid: String,
+    accountno: Option<String>,
+) -> Result<CommandResult<RechargeAccounts>, String> {
+    with_synjones!(state, |client| {
+        let pay = PayMethod {
+            code,
+            payid,
+            name: String::new(),
+            // 提交/查询只用到 code 与 payid；nopassword 由 `recharge_pay_methods` 的结果决定
+            nopassword: false,
+            remark: None,
+        };
+        Ok(
+            match recharge::query_account(client, &order_id, &pay, accountno.as_deref()).await {
+                Ok((accounts, ccctypes, pad)) => {
+                    CommandResult::ok(RechargeAccounts {
+                        accounts,
+                        ccctypes,
+                        pad,
+                    })
+                }
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **提交支付**（`paystep=2`，**唯一会扣款的命令**）。
+///
+/// `password_seq` = 用户点击的**键位下标序列**（6 位数字字符串，如 `"013579"`）配 `uuid`；免密时都不传。
+/// 红线：本模块只转发这串下标，**绝不**用 `keys` 还原真实字符，也不把它写进任何日志/存储。
+// 8 个扁平入参是 Tauri 命令的既有形态（前端 `invoke("recharge_submit", { orderId, code, … })` 按名传参）；
+// 改成结构体会直接破坏已提交的前端契约，故只压制计数告警。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn recharge_submit(
+    state: State<'_, AppState>,
+    order_id: String,
+    code: String,
+    payid: String,
+    accountno: String,
+    ccctype: String,
+    password_seq: Option<String>,
+    uuid: Option<String>,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        let pay = PayMethod {
+            code,
+            payid,
+            name: String::new(),
+            // 提交路径不消费 `nopassword`（是否免密由前端按 `recharge_pay_methods` 的结果决定）
+            nopassword: false,
+            remark: None,
+        };
+        Ok(
+            match recharge::submit_pay(
+                client,
+                &order_id,
+                &pay,
+                &accountno,
+                &ccctype,
+                password_seq.as_deref(),
+                uuid.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => CommandResult::empty(),
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **结果查询**（`getpayinfo` 单次；轮询与上限由前端把关：`order.status` 0=待支付、1=已完成）。
+#[tauri::command]
+pub async fn recharge_status(
+    state: State<'_, AppState>,
+    order_id: String,
+) -> Result<CommandResult<RechargePayMethods>, String> {
+    with_synjones!(state, |client| {
+        Ok(
+            match recharge::fetch_order_status(client, &order_id).await {
+                Ok((order, methods)) => {
+                    CommandResult::ok(RechargePayMethods { order, methods })
+                }
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **取消/清理未支付订单**（失败/放弃/超时后调用；crate 实测该端点必须 JSON body）。
+#[tauri::command]
+pub async fn recharge_cancel(
+    state: State<'_, AppState>,
+    order_id: String,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        Ok(match recharge::cancel_order(client, &order_id).await {
+            Ok(()) => CommandResult::empty(),
+            Err(e) => CommandResult::err(&elec_err(&e)),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +643,67 @@ mod tests {
             elec_err(&CampusSynjonesError::NotLogin),
             "登录已过期，请重新登录"
         );
+        // 服务端原文必须透出（排查用：实测建单失败会给这类文案）
+        let raw = elec_err(&CampusSynjonesError::Api {
+            code: 500,
+            msg: "dayTotalMoney-日消费最大金额判断异常了-null".to_string(),
+        });
+        assert!(raw.contains("dayTotalMoney"), "实际 {raw}");
+    }
+
+    /// 充值命令的 IPC 契约：全 camelCase（前端 `types.ts` 按这些键名取值，改键名即破坏前端）。
+    #[test]
+    fn recharge_dtos_are_camel_case() {
+        let order = RechargeOrder {
+            order_id: "1".to_string(),
+            status: 0,
+            pay_exp_date: Some("2026-09-19 17:30:00".to_string()),
+            tranamt: Some(1.0),
+        };
+        let pay = PayMethod {
+            code: "ACCOUNTTSM".to_string(),
+            payid: "64".to_string(),
+            name: "电子账户".to_string(),
+            nopassword: false,
+            remark: None,
+        };
+        let json = serde_json::to_value(RechargePayMethods {
+            order,
+            methods: vec![pay.clone()],
+        })
+        .unwrap();
+        assert!(json["order"].get("orderId").is_some(), "实际 {json}");
+        assert!(json["order"].get("payExpDate").is_some());
+        assert_eq!(json["methods"][0]["payid"], "64");
+        assert_eq!(json["methods"][0]["nopassword"], false);
+        assert!(json["methods"][0].get("remark").is_some(), "None 也要在场（前端判 null）");
+
+        let created = serde_json::to_value(RechargeCreated {
+            order_id: "1".to_string(),
+        })
+        .unwrap();
+        assert!(created.get("orderId").is_some(), "实际 {created}");
+
+        let accounts = serde_json::to_value(RechargeAccounts {
+            accounts: vec!["A1".to_string()],
+            ccctypes: vec!["000".to_string()],
+            pad: Some(PasswordPad {
+                uuid: "u".to_string(),
+                keys: vec!["1".to_string(), "2".to_string()],
+            }),
+        })
+        .unwrap();
+        assert_eq!(accounts["accounts"][0], "A1");
+        assert_eq!(accounts["ccctypes"][0], "000");
+        assert_eq!(accounts["pad"]["uuid"], "u");
+        assert_eq!(accounts["pad"]["keys"][1], "2");
+        // 无键盘时字段仍在场且为 null（前端据此判断「免密」）
+        let no_pad = serde_json::to_value(RechargeAccounts {
+            accounts: vec![],
+            ccctypes: vec![],
+            pad: None,
+        })
+        .unwrap();
+        assert!(no_pad["pad"].is_null());
     }
 }
