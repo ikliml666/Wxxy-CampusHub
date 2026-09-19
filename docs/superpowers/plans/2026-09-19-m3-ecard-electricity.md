@@ -18,6 +18,8 @@
 - 行文与注释中文；命令/报错原文照抄。
 - **凭据红线**：token／账号／密码只在内存，**绝不落盘、绝不进日志、绝不进文档/派单 prompt、绝不返回给前端**。内嵌 webview 的 token 由 Rust 端直接写进 `initialization_script`，不经过前端 JS API。live 样本只写仓库外 recon 目录（`%TEMP%/campushub-m3-recon`）。
 - 一切慧新E校请求**双份携带** `synAccessSource=app`（GET 走 query、POST 走 body，且都加同名头）。
+- **单 token 缓存**：token 是「单活」的（§1.3），全应用共用一个 `SynjonesClient` 实例，**禁止并发多次 SSO**；SSO 失败/401 后的重进必须串行。
+- **票据不回显**：TGT 过期换票失败时服务端正文含票据，**任何日志/错误文案/样本都不得包含该正文**（只记类别与长度）。
 - 网络超时 10s；错误归一为 crate 的错误枚举，不把 reqwest 错误冒到前端。
 - 新增依赖需在交付说明里写理由；优先 std/现有依赖。
 - 每批完成后由主智能体验收 + 合并（`bash ~/.zcode/scripts/git-merge-push.sh <worktree 目录>`），分身不合并、不 push、不碰其他会话的分支。
@@ -46,11 +48,29 @@
 3. **4030 = HTTP 401 + `body.code==4030`**（不是 403）。
 4. **三套信封不可共用解析器**：berserker `{code,success,data,msg}`、charge `{code,message}`（401 时 message 可能为空串）、search `{code,data,msg}`。
 
-### 1.3 SSO 桥（CAS → 慧新E校）
+### 1.3 SSO 桥（CAS → 慧新E校）——批 1 已 live 打通并固化
 
-`GET /berserker-auth/cas/redirect/lyCas?targetUrl=<目标>` → 302 到 CAS，其 `service` = URL 编码后的 **`{BASE}/berserker-auth/cas/login/lyCas?targetUrl=<二次编码>`** → **换 ST 要对准后者**（与 `jwglxt` 同构）。
+浏览器入口 `GET /berserker-auth/cas/redirect/lyCas?targetUrl=<目标>` → 302 到 CAS；但**换 ST 要对准** `{BASE}/berserker-auth/cas/login/lyCas?targetUrl=<编码>`（与 `jwglxt` 同构）。
 
-子 SPA 的 token 交接：落点 URL 的 `?synjones-auth=<raw token>`（无 `bearer ` 前缀），子 SPA 读 query 写入 sessionStorage。**落点是否真带 token 待批 1 live 探针确认**。
+**实测桥为 2 跳，token 走落点 URL query、无 `Set-Cookie` 参与**：
+
+```
+GET  {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…   → 302 {BASE}/campus-card-pc/?synjones-auth=<raw token>
+GET  {BASE}/campus-card-pc/                                              → 200（子 SPA 壳）
+```
+
+**`targetUrl` 是硬性前提（四组对照，批 1 实测）**：
+
+| targetUrl | 落点 | 是否带 token |
+|---|---|---|
+| `/campus-card-pc/`（**产品默认**，`sso.rs:55`） | `/campus-card-pc/?synjones-auth=…` | ✅ 验证 200 |
+| `/charge-pc/pays/450` | `/charge-pc/pays/450?synjones-auth=…` | ✅ 验证 200 |
+| `/plat/shouyeUser` | `/plat/?name=…&ticket=…` | ❌ **不带 token** |
+| 无 targetUrl | `/plat/?name=index&ticket=…` | ❌ **不带 token** |
+
+⚠️ **token 是「单活」的**：同一账号同一时刻只有**最新一次 SSO 签发**的 token 有效，早签发的在后续 SSO 之后调业务接口即 401。故产品必须**单 token 缓存**（`SynjonesClient` 已是此形态），**不得并发多次 SSO**。
+
+⚠️ **CAS TGT 会隔夜过期**：过期 TGT 换票返回 `HTTP 500`（正文含票据，**禁止回显/落盘**）→ 需回落「已存账号 + 验证码自动识别」重登路径。
 
 兜底（**不接入产品**，仅探针对照）：`POST /berserker-auth/oauth/token`，`Authorization: Basic bW9iaWxlX3NlcnZpY2VfcGxhdGZvcm06bW9iaWxlX3NlcnZpY2VfcGxhdGZvcm1fc2VjcmV0`，表单 `{username,password,grant_type:"password",scope:"all",loginFrom:"pc",logintype:"username"}` → `{access_token,token_type,flag}`。
 
@@ -67,9 +87,13 @@
 | 流水计数 | GET | `/berserker-search/statistics/turnover/count` | — | 待实测 |
 | 交易类型字典 | GET | `/berserker-search/search/turnoverType` | — | 待实测 |
 
-**卡对象字段**：`db_balance` + `unsettle_amount`（**单位分**）→ 余额 `(db+unsettle)/100` 元；`elec_accamt`（分）→ 电控账户金额（慧新E校侧电费余额）；`acc_status`（0=正常）、`lostflag`（1=挂失）、`account`、`cardname`；`accinfo[]{name,type,balance}`（分）；`ecardConfig.type` 决定展示卡账户还是电子账户。
+**卡对象字段（批 1 实测修订）**：`db_balance` + `unsettle_amount`（**单位分**）→ **卡账户**余额 `(db+unsettle)/100` 元；**`elec_accamt`（分）是一卡通「电子账户」余额（`elec`=electronic），不是电费余额**——实测三处数值完全一致：`elec_accamt = accinfo[0].balance = 流水记录里的 cardBalance`（本机样本 8151 分 = 81.51 元，而卡账户两项皆为 0）。**电费余额不在本接口，只能走 `/charge/*` 级联**（见 §1.5）。其余：`acc_status`（0=正常）、`lostflag`（1=挂失）、`account`、`cardtype`（如 `800#正式卡`）、`accinfo[]{name,type,balance}`（分）。
 
-**流水字段**：`jndatetimeStr`、`resume`、`tranamt`（**分**，`typeFrom=="1"` 为收入 `+`，否则支出 `-`）、`typeFrom`、`payName`、`icon`、`labelName`、`orderId`。
+**流水字段（批 1 实测修订）**：`jndatetimeStr`、`resume`、`tranamt`（**分**，方向由 `typeFrom` 决定：`"1"` 为收入 `+`，否则支出 `-`）、`typeFrom`、**`cardBalance`（该笔交易后的余额快照，分）**、`locationName`、`payName`、`consumeTypeName`、`icon`、`orderId`。
+
+**流水 `type` 参数 = 收支方向（批 1 实测）**：`type=1` → 收入（样本 total=36）、`type=2` → 支出（样本 total=1006）、`type=3` → 0 条。UI 若要"全部流水"，需分别取或用其它取值实测。
+
+**`getSchoolAccountinfo` 无参会返回 `code=400「业务异常」`**，需参数（字段与参数仍待实测）。
 
 ### 1.5 电费接口
 
@@ -99,9 +123,9 @@
 
 | # | 未知 | 确认方法 |
 |---|---|---|
-| 1 | lyCas 桥落点的 token 传递方式 | 批 1 live 探针（手动跟随 302，打印每跳 URL 与 Set-Cookie 名，token 打码） |
+| 1 | ~~lyCas 桥落点的 token 传递方式~~ | ✅ **批 1 已解决**：落点 URL query `synjones-auth=<raw token>`、2 跳、无 Set-Cookie；且默认 targetUrl 改 `/campus-card-pc/`（`/plat/shouyeUser` 不带 token） |
 | 2 | `map.showData` 的键名（剩余金额/单价） | 批 3 live 测试跑到末级，把键名固化进断言 |
-| 3 | 流水 `type=2` 语义、账单详情接口、`sum/user` 参数 | 批 2 live 测试对比 `type=1/2` |
+| 3 | ~~流水 `type` 语义~~ / 账单详情接口 / `sum/user` 参数 | ✅ `type` 语义已实测（1=收入、2=支出、3=空，见 §1.4）；`sum/user` 参数与账单详情接口仍待批 2 实测 |
 | 4 | 官方充值页在「无 CAS 会话但有 sessionStorage token」下能否工作，以及 `localStorage.configs.base` 的确切形态 | 批 3.3 实测（决定初始化脚本内容） |
 
 ---
@@ -129,7 +153,7 @@ get_wallet_cards() -> WalletCards {
   ecard:   { value_yuan: f64, source: "realtime" | "portal", updated_at: String },
   mail:    { unread: u32 },      // 仍取门户
   library: { borrowed: u32 },    // 仍取门户
-  elec:    { value_yuan: Option<f64>, source: "realtime" | "none" },  // 电控账户金额
+  elec:    { value_yuan: Option<f64>, source: "realtime" | "none" },  // 电费余额：走 /charge/* 级联（**不来自 queryCurrentCard**，见 §1.4 修订）；未绑房间时为 None
 }
 ```
 
