@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-09-19 · 自动解析轮：公告一键自动发现+解析（auto_parse_notices）+ 旧通知按学期过滤
+
+- **模块**：`commands/timetable.rs`（新命令 `auto_parse_notices`，NoticeAutoParse 聚合结构）、`lib.rs`（注册）、`TimetablePanel.tsx`（一键按钮+状态徽标列表）、`shared/types.ts`（NoticeAutoParse）、契约 §21
+- **改动**：原「检查→列表→逐条解析」两步流程收拢为一键：扫描命中 → **旧通知过滤**（发布日期早于本学期开学日丢弃，无开学日回落当年元旦）→ 逐条自动拉正文解析（置换型/单课型统一走 parse_notice_with_semester）→ 全部候选合并进确认流逐条采纳（不自动 apply 红线不变）；列表项改「N 条候选/未能解析/无调整」状态徽标
+- **验证**：tsc 零错、vite build 成功、cargo test --workspace 18 组全绿
 ## 2026-09-19 · 同步覆盖修复轮：diff 匹配键加时段（修课程块压缩）+ 公告「全校日期置换」解析（修解析错位）
 
 - **模块**：`campus-schedule/src/diff.rs`（match_key 五元组 + 消费式一对一配对）、`campus-schedule/src/notice.rs`（新增 `parse_notice_with_semester` 置换识别分支）、`commands/timetable.rs`（两处解析调用点接学期锚点）、契约 §20

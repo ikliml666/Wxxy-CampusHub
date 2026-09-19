@@ -61,6 +61,7 @@ pub fn run() {
             commands::timetable::quick_delete,
             commands::timetable::get_today_courses,
             commands::timetable::list_schedule_notices,
+            commands::timetable::auto_parse_notices,
             commands::timetable::parse_notice_from_url,
             commands::synjones::get_ecard,
             commands::synjones::get_ecard_transactions,
