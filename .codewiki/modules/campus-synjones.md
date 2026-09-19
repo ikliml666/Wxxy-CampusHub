@@ -7,6 +7,8 @@ source_files:
   - crates/campus-synjones/src/client.rs
   - crates/campus-synjones/src/ecard.rs
   - crates/campus-synjones/src/charge.rs
+  - crates/campus-synjones/src/recharge.rs
+  - tauri-app/frontend/src/components/RechargeFlow.tsx
   - crates/campus-synjones/tests/synjones_live.rs
   - tauri-app/src-tauri/src/commands/synjones.rs
   - tauri-app/src-tauri/src/commands/electricity.rs
@@ -62,20 +64,35 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 - **结果字段是单键自由文本**：`map.showData` 的键名**恒为 `信息`**，值是各片区**格式互不相同**的自由文本（有的含「剩余金额 + 单价」，有的含「余额 + 剩余电量」，有的只有「剩余电费」）；`map.money` / `map.iectranamt` 实测**都不存在**。所以 `ElectricityView.fields` 做**通用字典渲染**、前端按逗号折行、负数标红——**绝不做文本解构**（三片区格式各异，解构会随文案漂移静默失效）。
 - `map.data`（末级对象）含户号等 PII：**不透出、不入日志**。
 
-## 四、两个必须记住的坑
+## 四、必须记住的坑
 
 **坑一：token 单活 ⇒ 必须单实例缓存。** `commands/synjones.rs` 用**进程级 `static` + `tokio::sync::MutexGuard`** 把请求串行化，并把会话账号/TGT 变化作为重建条件；`commands/electricity.rs` 复用同一实例（为此把 `synjones_session` 等改成 `pub(crate)`，而**不是**另起第二套客户端——另起一套会互相顶掉 token）。
 
-**坑二：官方 `charge-pc` 页硬编码 `pc` 来源 ⇒ 内嵌充值页会弹「服务大厅未授权」。** 我们注入的 `agentType=app` 只能影响**读该键**的请求；官方页部分请求写死 `synAccessSource=pc`，撞上 4030 策略（真机点验确认：弹「提示 服务大厅未授权(1) 确定」）。处置：`RECHARGE_4030_HOOK` 常量（`electricity.rs:318-449`）由 `init_script` **排在整个注入脚本的第一段**——`initialization_script` 先于官方页脚本执行，故 hook 先于官方 axios 拦截器生效，覆盖**三种携带位置**：① URL query（`XHR.open` / `fetch` 的字符串形态）；② 请求头（`setRequestHeader` / `fetch` 的 `init.headers` 三种形态 / `Request` 实例就地改写——URL 需改写时用 `new Request(url, opt)` 重建，`duplex:'half'`，失败退回原对象绝不阻断请求）；③ 请求体（urlencoded 串 / `URLSearchParams` / `FormData`）。纪律：**只改不增**（官方没带该参数的请求保持原样，不给它加参数）、**只改这一个键**（authorization 等不动）、**幂等**（单次安装标记）、全程 try/catch（hook 异常不得破坏 token/configs 注入而致白屏）。来源值经占位符 `__SYN_ACCESS_SOURCE__` 在 Rust 侧替换为 crate 常量，避免 JS 里重复硬编码。**这是绕开学校服务端授权缺陷的临时措施**，学校修复 PC 授权后整段可移除；单测 `init_script_puts_4030_hook_first_and_covers_three_carriers`（`electricity.rs:769-797`）钉住「排最前 + 三处覆盖 + 不做缺失追加」。同目的的参考实现是用户自写的油猴脚本 `fix-4030.user.js`。
+**坑二：内嵌官方缴费页那条路已废弃**（2026-09-19 用户裁决改变方向）。曾经的方案是用 `WebviewWindowBuilder` 打开官方 `charge-pc` 页面并注入 token/`localStorage.configs`，为此还写了绕开学校 4030 授权缺陷的 `synAccessSource` 改写 hook。**该方案连同 hook 已整体移除**（原因：官方 PC 页面自己硬编码 `pc` 来源会弹「服务大厅未授权」，且更根本地——PC 下单链路 `target="_self"` 整页跳走、客户端拿不到扣款结果）。现改为**客户端直调官方 App 版接口**，见下节。仅保留 `open_recharge_in_browser` 作为「去官网充值」兜底。
 
-## 五、内嵌充值窗口（`commands/electricity.rs`）
+## 五、充值：客户端直调官方 App 口径（2026-09-19 用户裁决，替换原内嵌页面方案）
 
-`open_recharge_page` 用 `tauri::WebviewWindowBuilder` 打开 `{BASE}/charge-pc/pays/{feeitemid}?synjones-auth=<token>`，注入（token 只在 Rust 内存里拼进脚本，**不经过前端 JS API**）：
+**为什么不用 PC 链路**：官方 `/charge/order/thirdOrder` 需 SHA256 签名（`APP_ID=56321` + 公开 `SECRET_KEY`）且 `target="_self"` **整页跳走**——客户端拿不到扣款结果。**App 版（`/charge-app`）是纯 JSON**：下单回 `orderid`、可轮询 `order.status`、可 `deleteOrder`。实现落在 `crates/campus-synjones/src/recharge.rs`（常量见 `:67-71`），命令 `recharge_*` 见 `commands/electricity.rs:355` 起，前端流程在 `components/RechargeFlow.tsx`。
 
-- `sessionStorage.access_token`（裸 token，无 `bearer ` 前缀）/ `token_type` / `agentType='app'`
-- `localStorage.configs`（键 `title`/`version`/`base`）——**缺失会让官方页 `JSON.parse(null)` 白屏**，必须预注入
-- 上述 `synAccessSource` 改写 hook
+**支付状态机（照此实现）**
+① 建单 `POST /blade-pay/pay`（form：`feeitemid, tranamt, flag="choose", source="app", paystep:0[, third_party]`）→ `data.orderid`；
+② `GET /charge/pay/getpayinfo?orderid=` → **顶层 `{order, payList}`**——`payList` 的来源是这里而**不是** `paystep`（最易误判处）；
+③ 需密码时 `POST /blade-pay/pay`（`paystep:2` + `paytype/paytypeid`，**分两步**：不带 `accountno` 只回账号列表，带上才回 `ccctype` + `passwordMap`）；
+④ 提交（`paystep:2` + `accountno/ccctype`；免密时无 password，需密码时带 `password`+`uuid`）；
+⑤ 轮询 `getpayinfo` 的 `order.status`（0 待支付 / 1 已完成）；⑥ 清理 `POST /charge/order/deleteOrder`。
 
-**安全边界（已真机验证）**：官方页所在窗口不被任何 capability 覆盖 ⇒ 其 JS 虽然能拿到 `__TAURI_INTERNALS__`（Tauri 内部对象，无法隐藏），但**调用会被 ACL 拒绝**（实测 `list_feeitems not allowed. Plugin not found`），因此**不需要**为它改 `capabilities/default.json`。Rust 端 `WebviewWindowBuilder::build()` 也不受前端 ACL 约束——`core:webview:allow-create-webview-window` 只管控前端 JS 发起的建窗命令。
+**免密判据**：`payList[i].nopassword === 1`。实测 450 片区唯一渠道是 `ACCOUNTTSM`（电子账户）且 `nopassword=false` ⇒ **该片区一律需要密码**（免密分支保留给其它片区）。
+
+**安全红线（实现必须遵守）**：服务端下发的 `passwordMap[uuid]` 是「10 个字符的**显示**序列」，而提交的 `password` 是**用户点击的键位下标序列**（位置编码）⇒ **客户端不需要接触真实密码**；但客户端持有解码表，**只转发、绝不还原、绝不落盘/打日志/回填输入框**（把显示字符当密码提交 = 明文泄露用户密码）。
+
+**四个学校侧的坑（均实测）**
+1. `passwordMap[uuid]` 是 **10 字符字符串**（不是数组），官方前端逐字符渲染——解析必须兼容两种形态（首轮「拿不到键盘」的根因，`recharge.rs` 的 `parse_password_pad`）。
+2. `POST /charge/order/deleteOrder` **只有 JSON body 才回 200**，form/query/GET 恒 500（crate 内自带 `json_post`，`recharge.rs:606`）。
+3. 建单早期有「日消费上限」校验，值取自片区配置 `daymaxmoney`（448/449/450 均为 500）；费用项 id 不存在时该值取到 null → 服务端 NPE 报 `dayTotalMoney-日消费最大金额判断异常了-null`（**不是缺参数**）。
+4. `third_party`（电费专用上下文串）= `JSON.stringify(末级 map.data)` + `myCustomInfo="<末级名>：<各级名 空格>"`；**不缀 `-ids-金额`**（那只在官方「选中应收项」形态出现，单房间充值无该分支）。因 `map.data` 含户号等 PII，**合成一律在后端**（`third_party_for_room`，`recharge.rs:359`），不下发前端。
+
+**一个做不到的防线（如实记录）**：计划里「进充值前检查遗留未支付订单」**无法实现**——`GET /charge/order/personal_data?status=0` 任何形态恒 500（官方 App 同一调用亦然），学校侧没有可用的待支付订单列表接口。
+
+**未验证项**：`submit_pay` 的成功路径只能由**用户真机试充**验证（红线：开发/点验阶段绝不提交支付）；多应收项场景的 `-ids-金额` 后缀未实现（单房间流程用不到）。
 
 相关：[[modules/campus-auth|CAS 登录协议]]、[[modules/campus-portal|门户协议核心]]、[[learnings/portal-session-expiry-200-envelope|门户失效是 200 信封]]、[[learnings/tauri-webview-ui-verification|Tauri 真机 UI 验收方法]]。
