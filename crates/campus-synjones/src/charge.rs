@@ -177,6 +177,15 @@ pub struct ElectricityView {
     pub fields: Vec<Field>,
     /// 金额（元；服务端 `money` / `iectranamt` 二者取有值者）。⚠️ 实测 448/449/450 **都不下发**这两个字段（恒 None）。
     pub money: Option<f64>,
+    /// **结构化余额（元）**——前端结果卡的主数字与曲线都用它，**不要在前端解析 `fields` 文本**。
+    ///
+    /// 取值 = [`balance_from_text`] 对 `fields` 各值做「关键词 + 分隔符 + 数字」的**严格提取**
+    /// （2026-09-19 live 实测三片区形态：`剩余金额：-545.70，单价：0.5400` / `当前余额517.05元,当前剩余电量957.50度`
+    /// / `房间当前剩余电费625.35`）。语义：**`None` = 未提取到**（UI 显示「无数据」），
+    /// **绝不用 `0` 代替**——`0` 是合法余额，「没提取到」与「余额为零」在曲线图上完全不同。
+    ///
+    /// 提取实现只有 `charge` 一处（[`balance_from_text`]）；把它复制到前端会随校方文案漂移而静默失效。
+    pub balance_yuan: Option<f64>,
     /// 提示文案（`tipinfo`；存在时 `fields` 为空，如房间号不存在）。
     pub tip: Option<String>,
 }
@@ -304,7 +313,9 @@ fn choices_of(opts: &[Value], def: &LevelDef) -> Vec<Choice> {
 
 /// 末级响应 → [`ElectricityQuery`]（`showData` 通用字典 + 金额 + 提示；**不透出 `map.data` 的户号**）。
 fn final_query(map: &Value, defs: &[LevelDef]) -> ElectricityQuery {
-    let fields = map["showData"]
+    // 显式 `Vec<Field>`：`fields` 现在被下面的提取用到，类型推断会先试 `&[Field]` 而落到 unsized 分支
+    //（与 `turnover::parse_bills` 的 `records` 同款坑）
+    let fields: Vec<Field> = map["showData"]
         .as_object()
         .map(|o| {
             o.iter()
@@ -316,6 +327,9 @@ fn final_query(map: &Value, defs: &[LevelDef]) -> ElectricityQuery {
         })
         .unwrap_or_default();
     let money = yuan_of(map.get("money")).or_else(|| yuan_of(map.get("iectranamt")));
+    // 结构化余额：提取只在这里做一次（`balance_from_fields` 逐字段独立扫描），
+    // 前端与桌面端自采快照都消费这个值，**不在消费侧重解析文本**（见 ElectricityView::balance_yuan）。
+    let balance_yuan = balance_from_fields(&fields).0;
     let tip = {
         let s = text_of(map.get("tipinfo"));
         if s.is_empty() {
@@ -328,7 +342,12 @@ fn final_query(map: &Value, defs: &[LevelDef]) -> ElectricityQuery {
         levels: defs.iter().map(LevelInfo::from).collect(),
         options: Vec::new(),
         is_final: true,
-        view: Some(ElectricityView { fields, money, tip }),
+        view: Some(ElectricityView {
+            fields,
+            money,
+            balance_yuan,
+            tip,
+        }),
     }
 }
 
@@ -408,18 +427,24 @@ fn parse_leading_number(s: &str) -> Option<f64> {
     s[..i].parse::<f64>().ok()
 }
 
-/// 从末级视图字段（`map.showData` 字典）提取余额数值 + **原始文本**（原文用于并存留证据）。
+/// 末级视图字段的**原文拼接**（`map.showData` 各字段值；实测恒单键「信息」，拼接仅为通用性）。
 ///
-/// 逐字段**独立**扫描（不跨字段拼接——拼接可能造出「A 字段尾是关键词、B 字段首是数字」的假命中）；
-/// `raw` 只是各字段值的拼接（实测恒单键「信息」，拼接仅为通用性）。
-pub fn balance_from_fields(fields: &[Field]) -> (Option<f64>, String) {
-    let balance = fields.iter().find_map(|f| balance_from_text(&f.value));
-    let raw = fields
+/// 用途：落盘留证据（自采快照的 `raw`）、UI 副标题。**不解析**——解析只在 [`balance_from_text`]。
+pub fn raw_text_of(fields: &[Field]) -> String {
+    fields
         .iter()
         .map(|f| f.value.as_str())
         .collect::<Vec<_>>()
-        .join(", ");
-    (balance, raw)
+        .join(", ")
+}
+
+/// 从末级视图字段（`map.showData` 字典）提取余额数值 + **原始文本**（原文用于并存留证据）。
+///
+/// 逐字段**独立**扫描（不跨字段拼接——拼接可能造出「A 字段尾是关键词、B 字段首是数字」的假命中）；
+/// `raw` 由 [`raw_text_of`] 给出。
+pub fn balance_from_fields(fields: &[Field]) -> (Option<f64>, String) {
+    let balance = fields.iter().find_map(|f| balance_from_text(&f.value));
+    (balance, raw_text_of(fields))
 }
 
 // ---------------- 取数 ----------------
@@ -684,9 +709,62 @@ mod tests {
         assert_eq!(view.fields[0].value, "房间号：101,剩余金额：-545.70，单价：0.5400");
         assert_eq!(view.money, None, "实测 448/449/450 都不下发 money/iectranamt");
         assert_eq!(view.tip, None);
+        assert_eq!(
+            view.balance_yuan,
+            Some(-545.70),
+            "末级 view 必须带结构化余额（前端不许自己解析文本）"
+        );
         // PII 纪律：户号不进任何对外字段
         let text = serde_json::to_string(&view).unwrap();
         assert!(!text.contains("20230001"), "map.data 的户号不得透出：{text}");
+    }
+
+    /// **结构化余额契约（M4 批 2 补口）**：`final_query` 构造 view 时确实调用了提取——
+    /// 三条 live 原文逐一体现在 `balance_yuan` 上，提不到时是 `None`（**绝不退化成 0**）。
+    ///
+    /// 这是前端「余额主数字 / 曲线数值」的唯一来源：在视图构造路径上钉住，
+    /// 前端与桌面端自采快照都消费该字段，不做第二处文本解析。
+    #[test]
+    fn final_query_fills_structured_balance_from_live_texts() {
+        // 三条 live 原文（450 / 448 / 449），金额单位元
+        for (text, expected) in [
+            ("房间号：101,剩余金额：-545.70，单价：0.5400", Some(-545.70)),
+            (
+                "当前余额517.05元,当前剩余电量957.50度",
+                Some(517.05),
+            ),
+            ("房间当前剩余电费625.35", Some(625.35)),
+        ] {
+            let map = json!({"showData": {"信息": text}});
+            let view = final_query(&map, &[]).view.expect("末级应有 view");
+            assert_eq!(view.balance_yuan, expected, "原文 {text:?}");
+            assert_eq!(
+                view.balance_yuan,
+                balance_from_text(text),
+                "view 字段与提取函数必须同源（{text:?}）"
+            );
+        }
+
+        // 只有单价（无余额关键词）→ None，不是 0
+        let no_balance = json!({"showData": {"信息": "房间号：101,单价：0.5400"}});
+        assert_eq!(
+            final_query(&no_balance, &[]).view.unwrap().balance_yuan,
+            None
+        );
+        // 只有电量（kWh 不是钱）→ None
+        let kwh_only = json!({"showData": {"信息": "当前剩余电量957.50度"}});
+        assert_eq!(final_query(&kwh_only, &[]).view.unwrap().balance_yuan, None);
+        // 房间号非法：只有 tipinfo、showData 为空 → None
+        let tip = json!({"tipinfo": "缴费系统返回数据错误child==NULL！"});
+        assert_eq!(final_query(&tip, &[]).view.unwrap().balance_yuan, None);
+
+        // 跨端契约：字段名 camelCase（前端 `types.ts` 的 `balanceYuan` 按此取值）
+        let v = final_query(&json!({"showData": {"信息": "当前余额517.05元"}}), &[])
+            .view
+            .unwrap();
+        let json_text = serde_json::to_string(&v).unwrap();
+        assert!(json_text.contains("\"balanceYuan\":517.05"), "实际 {json_text}");
+        assert!(json_text.contains("\"money\":null"), "money 仍在场（恒 null）：{json_text}");
     }
 
     /// 末级提示：房间号非法时 `tipinfo` 有值、`showData` 为空（实测 `缴费系统返回数据错误child==NULL！`）。

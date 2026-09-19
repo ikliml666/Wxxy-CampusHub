@@ -84,7 +84,7 @@ tags:
 | `crates/campus-auth/` | CAS 协议：textbook RSA、登录客户端、RecordingJar、验证码识别 | [[modules/campus-auth|CAS 协议核心]] |
 | `crates/campus-schedule/` | 课表模型、周次/网格算法、正方教务解析 | [[modules/campus-schedule|课表核心]] |
 | `crates/campus-portal/` | 门户业务协议：学期/钱包/周课表/资讯（含官网正文抓取与清洗）/待办/应用（图标带会话代拉 data URL、可达性元数据表）/日程（bs-schedule 独立信封 + 会议并入）调用与解析、校本大节表 | [[modules/campus-portal|门户业务协议核心]] |
-| `crates/campus-synjones/` | 慧新E校协议：lyCas 桥换 token（单实例缓存）、一卡通卡信息与流水（`berserker-app` + `berserker-search`）、电费三级级联与**余额严格提取**（`charge` 系）、缴费历史只读取数（`turnover.rs`：账单/月度/累计/订单/片区配置）、`synAccessSource=app` 双份携带 | [[modules/campus-synjones|慧新E校协议核心]] |
+| `crates/campus-synjones/` | 慧新E校协议：lyCas 桥换 token（单实例缓存）、一卡通卡信息与流水（`berserker-app` + `berserker-search`）、电费三级级联与**结构化余额**（`charge` 系；末级 `ElectricityView{ fields, money, balanceYuan, tip }`——`balanceYuan` 是后端提取好的余额数值，**前端读它、不解析自由文本**，`None` = 无数据且绝不用 0 代替）、缴费历史只读取数（`turnover.rs`：账单/月度/累计/订单/片区配置）、`synAccessSource=app` 双份携带 | [[modules/campus-synjones|慧新E校协议核心]] |
 | `tauri-app/src-tauri/` | 命令面、AppState、DPAPI 存储 | [[modules/campus-hub-tauri|接线层]] |
 | `tauri-app/frontend/src/` | 外壳组件、账号系统与头像、Dock 导航、8 面板、域色 token | [[modules/frontend-shell|前端外壳]] |
 

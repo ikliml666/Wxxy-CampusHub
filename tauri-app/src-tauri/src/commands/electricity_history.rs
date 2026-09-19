@@ -196,15 +196,16 @@ pub struct SnapshotOutcome {
 
 /// 从级联结果构造一条快照（**纯函数**：时间由调用方给 ⇒ 单测能钉住 `id`/`date` 的推导）。
 ///
-/// 余额走 `charge::balance_from_fields`（关键词+分隔符+数字的**相邻形态**，提不到返回 `None`），
-/// `raw` 存学校侧那句原文留证据。**绝不做位置解构**（三片区文案格式互不相同，解构会随文案漂移静默失效）。
+/// 余额**直接取 crate 已提取好的结构化字段** `view.balance_yuan`（`charge::final_query` 在构造视图时
+/// 已按「关键词+分隔符+数字」的相邻形态提取过），本模块**不重算**——提取实现只有 `charge` 一处，
+/// 消费侧（本模块与前端）读同一个值，杜绝两处解析随校方文案漂移。
+/// `raw` 存学校侧那句原文留证据；**绝不做位置解构**（三片区文案格式互不相同）。
 fn build_entry(
     room: &SavedRoom,
     view: &ElectricityView,
     source: &str,
     now: chrono::DateTime<chrono::Local>,
 ) -> HistoryEntry {
-    let (balance, raw) = charge::balance_from_fields(&view.fields);
     let date = now.format("%Y-%m-%d").to_string();
     let room_key = store::room_key_of(&room.feeitem_id, &room.path);
     HistoryEntry {
@@ -216,8 +217,8 @@ fn build_entry(
         feeitem_name: room.feeitem_name.clone(),
         collected_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         date,
-        balance,
-        raw,
+        balance: view.balance_yuan,
+        raw: charge::raw_text_of(&view.fields),
         source: source.to_string(),
     }
 }
@@ -358,19 +359,34 @@ mod tests {
             .with_timezone(&chrono::Local)
     }
 
-    /// `build_entry` 用**实测原文**（450 片区那句自由文本）构造快照：余额、原文、id、date 全钉住。
-    #[test]
-    fn build_entry_extracts_balance_from_live_text() {
-        // 实测样本：KEY 是「信息」，值含负余额与单价（另一个数字不许被误取）
-        let view = ElectricityView {
+    /// 单字段视图（实测 `showData` 恒单键「信息」）：`balance` 由 crate 在构造视图时填好，本层只透传。
+    fn view_of(text: &str, balance: Option<f64>) -> ElectricityView {
+        ElectricityView {
             fields: vec![Field {
                 label: "信息".to_string(),
-                value: "房间号：101,剩余金额：-545.70，单价：0.5400".to_string(),
+                value: text.to_string(),
             }],
             money: None,
+            balance_yuan: balance,
             tip: None,
-        };
-        let e = build_entry(&room(), &view, store::SOURCE_MANUAL, at("2026-09-19T17:20:31+08:00"));
+        }
+    }
+
+    /// `build_entry` **透传** crate 已提取的结构化余额（`view.balance_yuan`），并原样留 `raw`；
+    /// `id`/`date`/`room_name` 全钉住。
+    ///
+    /// 提取本身（三条 live 原文 → 数值 / 提不到 → None）由 `crate` 侧
+    /// `charge::tests::final_query_fills_structured_balance_from_live_texts` 在**视图构造路径**上覆盖，
+    /// 本层不再重算——提取实现只有 `charge` 一处，前端与本模块消费同一个值。
+    #[test]
+    fn build_entry_passes_through_structured_balance() {
+        // 450 片区实测原文（含负余额与单价两个数字）
+        let e = build_entry(
+            &room(),
+            &view_of("房间号：101,剩余金额：-545.70，单价：0.5400", Some(-545.70)),
+            store::SOURCE_MANUAL,
+            at("2026-09-19T17:20:31+08:00"),
+        );
         assert_eq!(e.balance, Some(-545.70));
         assert_eq!(e.raw, "房间号：101,剩余金额：-545.70，单价：0.5400");
         assert_eq!(e.date, "2026-09-19");
@@ -381,21 +397,28 @@ mod tests {
         assert_eq!(e.source, "manual");
     }
 
-    /// 提不到余额（只有电量/单价）→ `balance: None` **但记录仍然成立**（原文留证据，UI 显示无数据）。
+    /// 未提取到（`balance_yuan: None`，如只有电量/单价）→ `balance: None` **但记录仍然成立**
+    /// （原文留证据，UI 显示无数据）；`None` 绝不落成 0。
     #[test]
     fn build_entry_keeps_none_balance_with_raw_text() {
-        let view = ElectricityView {
-            fields: vec![Field {
-                label: "信息".to_string(),
-                value: "当前剩余电量957.50度".to_string(),
-            }],
-            money: None,
-            tip: None,
-        };
-        let e = build_entry(&room(), &view, store::SOURCE_AUTO, at("2026-09-19T08:00:00+08:00"));
+        let e = build_entry(
+            &room(),
+            &view_of("当前剩余电量957.50度", None),
+            store::SOURCE_AUTO,
+            at("2026-09-19T08:00:00+08:00"),
+        );
         assert_eq!(e.balance, None, "电量是 kWh，绝不当余额");
         assert_eq!(e.raw, "当前剩余电量957.50度");
         assert_eq!(e.id, store::make_id(&e.room_key, &e.date), "id 与余额无关");
+
+        // 0.00 是合法余额（与「提不到」必须区分开）
+        let zero = build_entry(
+            &room(),
+            &view_of("当前余额0.00元", Some(0.0)),
+            store::SOURCE_MANUAL,
+            at("2026-09-19T09:00:00+08:00"),
+        );
+        assert_eq!(zero.balance, Some(0.0));
     }
 
     /// 末级视图可用性：无 view / 有 `tipinfo`（房间号无效）→ 拒绝采集并给可读中文原因；空 tip 视为可用。
@@ -417,26 +440,29 @@ mod tests {
             view: Some(ElectricityView {
                 fields: Vec::new(),
                 money: None,
+                balance_yuan: None,
                 tip: Some("缴费系统返回数据错误child==NULL！".to_string()),
             }),
         };
         let e = usable_view(&tip).unwrap_err();
         assert!(e.contains("child==NULL"), "服务端原文要透出便于排查：{e}");
 
-        let blank_tip = ElectricityQuery {
+        // 空 tip 是常态（实测 showData 有值时 tipinfo 为空串）
+        let mut blank_tip = ElectricityQuery {
             levels: Vec::new(),
             options: Vec::new(),
             is_final: true,
-            view: Some(ElectricityView {
-                fields: vec![Field {
-                    label: "信息".to_string(),
-                    value: "当前余额517.05元,当前剩余电量957.50度".to_string(),
-                }],
-                money: None,
-                tip: Some("   ".to_string()),
-            }),
+            view: Some(view_of("当前余额517.05元,当前剩余电量957.50度", Some(517.05))),
         };
+        if let Some(v) = blank_tip.view.as_mut() {
+            v.tip = Some("   ".to_string());
+        }
         assert!(usable_view(&blank_tip).is_ok(), "空 tip 是常态，不是错误");
+        assert_eq!(
+            blank_tip.view.as_ref().unwrap().balance_yuan,
+            Some(517.05),
+            "可用视图带着结构化余额（前端主数字来源）"
+        );
     }
 
     /// 绑定房间的查找：只认 `bound == true`，多个（理论上不该有）取第一个，无绑定 → None。

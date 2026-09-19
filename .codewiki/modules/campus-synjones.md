@@ -66,9 +66,10 @@ GET {BASE}/berserker-auth/cas/login/lyCas?targetUrl=<enc>&ticket=ST-…  → 302
 - **片区口径 = `status == 1 && impl_interface` 非空**：`/charge/feeitem` 返回 8 条、其中 `status==1` 有 6 条，但另 3 条是补卡/充值/扫码类（无 `impl_interface`），电费口径过滤后**恰好 3 条**（梅园/李园/桃园）。同名停用项（如 428）必须靠 `status` 排除。
 - **级联**：首次 `{feeitemid, type:"select", level:0}`，逐级带上已选值、`level` 递增；层级由服务端 `map.total[]` 给出（`campus → building → room`）。
 - **末级是「输入级」不是下拉**：三片区 `flag[4]=='3'`（`last_level_is_input`），`level` 到最后一级时 `map.data` 返回**空**，房间号由用户输入（官方语义「先选择再输入」）。房间号格式要求严格：`101` 命中，`1-101` / `101室` 之类会得到 `tipinfo`「缴费系统返回数据错误child==NULL！」。
-- **结果字段是单键自由文本**：`map.showData` 的键名**恒为 `信息`**，值是各片区**格式互不相同**的自由文本（有的含「剩余金额 + 单价」，有的含「余额 + 剩余电量」，有的只有「剩余电费」）；`map.money` / `map.iectranamt` 实测**都不存在**。所以 `ElectricityView.fields` 做**通用字典渲染**、前端按逗号折行、负数标红——**绝不做文本解构**（三片区格式各异，解构会随文案漂移静默失效）。
+- **结果字段是单键自由文本**：`map.showData` 的键名**恒为 `信息`**，值是各片区**格式互不相同**的自由文本（有的含「剩余金额 + 单价」，有的含「余额 + 剩余电量」，有的只有「剩余电费」）；`map.money` / `map.iectranamt` 实测**都不存在**（恒 `null`）。所以 `ElectricityView.fields` 做**通用字典渲染**、前端按逗号折行、负数标红——**绝不做文本解构**（三片区格式各异，解构会随文案漂移静默失效）。
+- **结构化余额 `ElectricityView.balance_yuan`（元，2026-09-19 批 2 补的契约口）**：末级视图除 `fields` 外**必须**带一个后端提取好的数值——`final_query` 构造视图时对 `fields` 调一次 `balance_from_fields`，结果放进该字段（serde ⇒ 前端 `balanceYuan`）。**前端结果卡主数字与趋势/统计一律读它，不许自己解析 `fields` 文本**（解析实现只有 `charge` 一处，复制到前端会随校方文案漂移）。语义：`None` = 未提取到（UI 显示「无数据」），**绝不用 0 代替**（`0.00` 是合法余额）。桌面端自采快照（`commands/electricity_history.rs::build_entry`）同样**直接透传**该字段、不重算。
 - `map.data`（末级对象）含户号等 PII：**不透出、不入日志**。
-- **余额提取（M4 批 1，`charge::balance_from_text` / `balance_from_fields`）**：既然不做文本解构，余额就从那句自由文本里按**严格形态**（`关键词 + 分隔符 + 数字`，只认相邻、不跨字段拼接、不做位置解构）提取，提不到返回 `None`（UI 显示「无数据」，**绝不臆造 0**）。关键词表刻意**排除**「剩余电量/电量」——`448` 的原文「当前余额517.05元,**当前剩余电量957.50度**」里两者同句，把 kWh 当钱是错报；千分位（`1,234.56`）歧义时也宁可 `None`。单测用三片区 live 原文钉住。
+- **余额提取（M4，`charge::balance_from_text` / `balance_from_fields`，结果进 `ElectricityView.balance_yuan`）**：既然不做文本解构，余额就从那句自由文本里按**严格形态**（`关键词 + 分隔符 + 数字`，只认相邻、不跨字段拼接、不做位置解构）提取，提不到返回 `None`（UI 显示「无数据」，**绝不臆造 0**）。关键词表刻意**排除**「剩余电量/电量」——`448` 的原文「当前余额517.05元,**当前剩余电量957.50度**」里两者同句，把 kWh 当钱是错报；千分位（`1,234.56`）歧义时也宁可 `None`。单测用三片区 live 原文钉住，并有一条**在视图构造路径上**（`final_query`）断言三条原文的取数与 camelCase 键名。
 
 ### 缴费历史与订单（`turnover.rs`，M4 批 1；端点 2026-09-19 live 实测）
 

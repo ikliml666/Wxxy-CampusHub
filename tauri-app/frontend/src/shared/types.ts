@@ -568,6 +568,16 @@ export interface ElectricityField {
 export interface ElectricityView {
   fields: ElectricityField[];
   money: number | null;
+  /**
+   * **结构化余额（元）**——结果卡主数字与趋势/统计一律用它，**前端绝不自己解析 `fields` 文本**
+   * （解析实现只有后端 `campus_synjones::charge::balance_from_text` 一处，复制到前端会随校方文案漂移）。
+   *
+   * - 数值来自后端「关键词 + 分隔符 + 数字」的**相邻形态**提取（三片区原文都覆盖）；
+   * - `null`/缺省 = **未提取到**（无「剩余金额/余额/剩余电费」关键词，或关键词后不是数字）⇒
+   *   显示「无数据」，**绝不当 0**（`0.00` 是合法余额，与「没提取到」语义完全不同）；
+   * - 刻意**不认「剩余电量」**：448 原文同一句里有 `当前剩余电量957.50度`（kWh），当钱显示就是错报。
+   */
+  balanceYuan?: number | null;
   tip: string | null;
 }
 
