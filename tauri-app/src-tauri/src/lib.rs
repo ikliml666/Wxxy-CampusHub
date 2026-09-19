@@ -55,6 +55,8 @@ pub fn run() {
             commands::timetable::save_semester_config,
             commands::timetable::save_skipped_dates,
             commands::timetable::save_slot_rules,
+            commands::timetable::export_timetable_json,
+            commands::timetable::import_timetable_json,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -309,6 +309,14 @@ export interface ImportResult {
   changes: string[];
 }
 
+/** import_timetable_json → data（契约 §12.2；与 diff 语义的 ImportResult 是两个结构）。 */
+export interface JsonImportResult {
+  /** 导入课程数 */
+  courses: number;
+  /** 导入调课/停课/补课记录数 */
+  overrides: number;
+}
+
 /** add_course_manual 入参（冻结契约 §2.3 + 批 5 §11.1）。
  *  ⚠️ Rust 侧新增字段 serde default：旧调用方可省略 isCustomTime/customStartTime/customEndTime。 */
 export interface ManualCourseInput {

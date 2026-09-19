@@ -419,6 +419,18 @@ fn ics_escape(s: &str) -> String {
 /// 行长说明：SUMMARY/LOCATION/DESCRIPTION 均为短文本（课名/教室/教师，实测远
 /// 低于 75 字节），不做 RFC 5545 §3.1 行折叠；超长自定义文本由客户端容忍。
 fn build_ics(tt: &Timetable) -> Result<String, String> {
+    build_ics_with_reminder(tt, None)
+}
+
+/// VALARM 版本（契约 §12.3）：`remind_minutes` 有值（0..=60，越界报错）时每个
+/// VEVENT 在 `END:VEVENT` 前追加 DISPLAY 提醒块；None 时与旧版逐字节一致
+/// （golden 保）。既有测试经 [`build_ics`] 包装走 None 路径。
+fn build_ics_with_reminder(tt: &Timetable, remind_minutes: Option<u8>) -> Result<String, String> {
+    if let Some(m) = remind_minutes {
+        if m > 60 {
+            return Err("课前提醒分钟数必须在 0 到 60 之间".to_string());
+        }
+    }
     let Some(start_date) = tt.config.semester_start_date else {
         return Err("尚未导入课表（缺少学期开学日期），请先完成一次导入".to_string());
     };
@@ -540,7 +552,7 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
                     })
                     .map(|oid| format!("-o{}", oid.chars().take(8).collect::<String>()))
                     .unwrap_or_default();
-                lines.extend([
+                let mut block = vec![
                     "BEGIN:VEVENT".into(),
                     format!(
                         "UID:{}-w{}d{}s{}{}@campushub",
@@ -556,8 +568,19 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
                     format!("SUMMARY:{}", ics_escape(&course.name)),
                     format!("LOCATION:{}", ics_escape(&occ.position)),
                     format!("DESCRIPTION:{}", ics_escape(&desc_parts.join("，"))),
-                    "END:VEVENT".into(),
-                ]);
+                ];
+                // VALARM（契约 §12.3）：课前提醒，插在 END:VEVENT 前
+                if let Some(mins) = remind_minutes {
+                    block.extend([
+                        "BEGIN:VALARM".into(),
+                        "ACTION:DISPLAY".into(),
+                        format!("TRIGGER:-PT{mins}M"),
+                        "DESCRIPTION:课前提醒".into(),
+                        "END:VALARM".into(),
+                    ]);
+                }
+                block.push("END:VEVENT".into());
+                lines.extend(block);
             }
         }
     }
@@ -575,12 +598,16 @@ fn write_ics_to(dir: &Path, text: &str) -> Result<PathBuf, String> {
 }
 
 /// 导出 ICS：生成文本后写入用户下载目录并返回写入的完整路径（WebView2 不处理
-/// 前端 Blob 下载，交付必须由后端落盘）。
+/// 前端 Blob 下载，交付必须由后端落盘）。`remind_minutes`（契约 §12.3，可省略）
+/// 有值时每个 VEVENT 追加 VALARM 课前提醒。
 #[tauri::command]
-pub async fn export_ics() -> Result<CommandResult<String>, String> {
+pub async fn export_ics(
+    // Option 参数可省略/null：tauri CommandItem 的 deserialize_option 对缺失键返回 None
+    remind_minutes: Option<u8>,
+) -> Result<CommandResult<String>, String> {
     let dir = state::data_dir()?;
     let tt = timetable::load_timetable(&dir);
-    let text = match build_ics(&tt) {
+    let text = match build_ics_with_reminder(&tt, remind_minutes) {
         Ok(t) => t,
         Err(e) => return Ok(CommandResult::err(&e)),
     };
@@ -591,6 +618,192 @@ pub async fn export_ics() -> Result<CommandResult<String>, String> {
     };
     match write_ics_to(&dl_dir, &text) {
         Ok(path) => Ok(CommandResult::ok(path.display().to_string())),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+// ---------------- 单表 JSON 导入导出（2026-09-19 批 6，契约 §12） ----------------
+
+/// export_timetable_json 的文件内容（契约 §12.1）：formatVersion + 三全量段
+/// （overrides 与 config 全量缺一不可，丢了恢复不完整）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimetableExport {
+    pub format_version: u32,
+    pub courses: Vec<Course>,
+    pub overrides: Vec<CourseOverride>,
+    pub config: campus_schedule::model::CourseTableConfig,
+}
+
+/// 单表 JSON 导出（契约 §12.1）：写下载目录「课表.json」（已存在覆盖）返回完整
+/// 路径，交付模式同 [`export_ics`]。
+#[tauri::command]
+pub async fn export_timetable_json() -> Result<CommandResult<String>, String> {
+    let dir = state::data_dir()?;
+    let tt = timetable::load_timetable(&dir);
+    let export = TimetableExport {
+        format_version: 1,
+        courses: tt.courses,
+        overrides: tt.overrides,
+        config: tt.config,
+    };
+    let text = match serde_json::to_string_pretty(&export) {
+        Ok(t) => t,
+        Err(e) => return Ok(CommandResult::err(&format!("课表序列化失败：{e}"))),
+    };
+    let Some(dl_dir) = dirs::download_dir() else {
+        return Ok(CommandResult::err(
+            "无法定位系统下载目录（当前平台不受支持或目录不可用）",
+        ));
+    };
+    let path = dl_dir.join("课表.json");
+    match std::fs::write(&path, text) {
+        Ok(()) => Ok(CommandResult::ok(path.display().to_string())),
+        Err(e) => Ok(CommandResult::err(&format!("写入 {} 失败：{e}", path.display()))),
+    }
+}
+
+/// import_timetable_json 的出参（契约 §12.2）：与 diff 语义的 [`ImportResult`]
+/// 是两个结构，不得混用。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonImportResult {
+    pub courses: u32,
+    pub overrides: u32,
+}
+
+/// 导入 config（契约 §12.2「非空才覆盖」）：字段级 Option——JSON 缺省/null 的
+/// 字段保留旧值，有值才覆盖。`courseTableId` 不在导入面内（恒保留当前表）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TimetableImportConfig {
+    pub semester_start_date: Option<NaiveDate>,
+    pub semester_total_weeks: Option<u32>,
+    pub first_day_of_week: Option<u8>,
+    pub show_weekends: Option<bool>,
+    pub slots: Option<Vec<TimeSlot>>,
+    pub skipped_dates: Option<Vec<NaiveDate>>,
+    pub slot_rules: Option<Vec<SlotRule>>,
+}
+
+/// import_timetable_json 的解析载荷（契约 §12.2）。容器级 default：缺省字段
+/// 容忍（formatVersion 缺省 0 会被校验层拒绝，缺字段不静默通过）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TimetableImportPayload {
+    pub format_version: u32,
+    #[serde(default)]
+    pub courses: Vec<Course>,
+    #[serde(default)]
+    pub overrides: Vec<CourseOverride>,
+    #[serde(default)]
+    pub config: TimetableImportConfig,
+}
+
+/// 导入课程校验（契约 §12.2，非法中文报错）：day 1..=7；节次课
+/// `1 <= start <= end`；custom 课起止必填、HH:MM 合法、end > start（§11.1 口径）。
+fn validate_import_courses(courses: &[Course]) -> Result<(), String> {
+    for (i, c) in courses.iter().enumerate() {
+        let label = |what: &str| format!("第 {} 门课程（{}）的{what}", i + 1, c.name);
+        if !(1..=7).contains(&c.day) {
+            return Err(label("星期无效（1=周一 … 7=周日）"));
+        }
+        if c.is_custom_time {
+            let (Some(s), Some(e)) = (&c.custom_start_time, &c.custom_end_time) else {
+                return Err(label("自定义时间缺少起止"));
+            };
+            let (Some(ps), Some(pe)) = (parse_hm(s), parse_hm(e)) else {
+                return Err(label("自定义时间格式必须是 HH:MM"));
+            };
+            if pe <= ps {
+                return Err(label("自定义结束时间必须晚于开始时间"));
+            }
+        } else {
+            match (c.start_section, c.end_section) {
+                (Some(s), Some(e)) if s >= 1 && e >= s => {}
+                _ => return Err(label("节次范围无效")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 导入 config 校验（契约 §12.2）：`slots`/`slotRules` 有值走既有校验；
+/// 缺省/null 不校验也不覆盖。
+fn validate_import_config(imp: &TimetableImportConfig) -> Result<(), String> {
+    if let Some(slots) = &imp.slots {
+        validate_time_slots(slots)?;
+    }
+    if let Some(rules) = &imp.slot_rules {
+        validate_slot_rules(rules)?;
+    }
+    Ok(())
+}
+
+/// 导入 config 合并（契约 §12.2「非空才覆盖」）：字段级 Option 有值才覆盖，
+/// 缺省/null 保留旧值；`courseTableId` 恒保留当前表；合并后套显示约束联动
+/// （§7.2，防导入文件自带 firstDay=7 + showWeekends=false 的矛盾组合）。
+fn merge_import_config(
+    old: &campus_schedule::model::CourseTableConfig,
+    imp: &TimetableImportConfig,
+) -> campus_schedule::model::CourseTableConfig {
+    let mut cfg = old.clone();
+    cfg.semester_start_date = imp.semester_start_date.or(cfg.semester_start_date);
+    cfg.semester_total_weeks = imp.semester_total_weeks.unwrap_or(cfg.semester_total_weeks);
+    cfg.first_day_of_week = imp.first_day_of_week.unwrap_or(cfg.first_day_of_week);
+    cfg.show_weekends = imp.show_weekends.unwrap_or(cfg.show_weekends);
+    cfg.slots = imp.slots.clone().or(cfg.slots);
+    cfg.skipped_dates = imp.skipped_dates.clone().unwrap_or(cfg.skipped_dates);
+    cfg.slot_rules = imp.slot_rules.clone().unwrap_or(cfg.slot_rules);
+    apply_display_constraints(&mut cfg);
+    cfg
+}
+
+/// 导入落库纯函数（契约 §12.2，便于单测）：校验 → 在内存中构造完整新 Timetable
+/// （courses/overrides 整体替换、config 合并）→ 由调用方一次 save 落盘
+/// （风险 R6：禁止先清后写两次落盘）。
+fn apply_timetable_import(
+    old: &Timetable,
+    payload: &TimetableImportPayload,
+) -> Result<Timetable, String> {
+    if payload.format_version != 1 {
+        return Err(format!(
+            "不识别的课表文件格式版本（{}），仅支持 1",
+            payload.format_version
+        ));
+    }
+    validate_import_courses(&payload.courses)?;
+    validate_import_config(&payload.config)?;
+    Ok(Timetable {
+        config: merge_import_config(&old.config, &payload.config),
+        courses: payload.courses.clone(),
+        overrides: payload.overrides.clone(),
+        updated_at: chrono::Local::now().to_rfc3339(),
+    })
+}
+
+/// 单表 JSON 导入（契约 §12.2）：整体替换当前表课程与调整（courseId 保留原值，
+/// 同 id 直接覆盖——换设备迁移场景 id 冲突无意义），config「非空才覆盖」；
+/// 全程一次 `save_timetable` 落盘。
+#[tauri::command]
+pub async fn import_timetable_json(
+    json: String,
+) -> Result<CommandResult<JsonImportResult>, String> {
+    let payload: TimetableImportPayload = match serde_json::from_str(&json) {
+        Ok(p) => p,
+        Err(e) => return Ok(CommandResult::err(&format!("课表文件不是合法 JSON：{e}"))),
+    };
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        let new_tt = apply_timetable_import(tt, &payload)?;
+        let result = JsonImportResult {
+            courses: new_tt.courses.len() as u32,
+            overrides: new_tt.overrides.len() as u32,
+        };
+        *tt = new_tt;
+        Ok(result)
+    }) {
+        Ok(r) => Ok(CommandResult::ok(r)),
         Err(e) => Ok(CommandResult::err(&e)),
     }
 }
@@ -2072,5 +2285,171 @@ mod tests {
         assert!(ics.contains("DTSTART:20261130T090000"));
         assert!(ics.contains("DTEND:20261130T104000"));
         assert!(!ics.contains("DTSTART:20261130T080000"), "换季后不得再用内置时刻");
+    }
+
+    // ---------------- 批 6：JSON 导入导出 + ICS VALARM（契约 §12） ----------------
+
+    /// VALARM（契约 §12.3）：remind=15 时每个 VEVENT 都带 TRIGGER:-PT15M 的提醒块
+    /// （块位于 END:VEVENT 前）；缺省（None）输出无 VALARM，与旧版逐字节一致。
+    #[test]
+    fn ics_valarm_appended_per_event_and_absent_by_default() {
+        let tt = fixture();
+        let with_alarm = build_ics_with_reminder(&tt, Some(15)).unwrap();
+        assert_eq!(vevent_count(&with_alarm), 3);
+        assert_eq!(with_alarm.matches("TRIGGER:-PT15M").count(), 3, "每个 VEVENT 一个 VALARM");
+        assert_eq!(with_alarm.matches("BEGIN:VALARM").count(), 3);
+        assert_eq!(with_alarm.matches("ACTION:DISPLAY").count(), 3);
+        assert!(with_alarm.contains("DESCRIPTION:课前提醒"));
+        // 块在 END:VEVENT 之前（每个 VEVENT 内：BEGIN:VALARM 先于 END:VEVENT 出现）
+        let first_event_end = with_alarm.find("END:VEVENT").unwrap();
+        assert!(
+            with_alarm.find("BEGIN:VALARM").unwrap() < first_event_end,
+            "VALARM 必须在 END:VEVENT 之前"
+        );
+
+        let plain = build_ics(&tt).unwrap();
+        assert!(!plain.contains("VALARM"), "缺省导出与旧版逐字节一致（无 VALARM）");
+    }
+
+    /// VALARM 越界（>60）中文报错；0 与 60 为合法边界。
+    #[test]
+    fn ics_valarm_rejects_out_of_range_minutes() {
+        let tt = fixture();
+        let err = build_ics_with_reminder(&tt, Some(61)).unwrap_err();
+        assert!(err.contains("0 到 60"), "越界报错：{err}");
+        assert!(build_ics_with_reminder(&tt, Some(0)).is_ok(), "0 为合法边界");
+        assert!(build_ics_with_reminder(&tt, Some(60)).is_ok(), "60 为合法边界");
+    }
+
+    /// 导出 → 导入 roundtrip（蓝图批 6 验收）：课程（含 custom 课）/ overrides /
+    /// config 全量（slots、skippedDates、slotRules）经导出 JSON 完整恢复；
+    /// 旧库的课程/调整被整体替换。
+    #[test]
+    fn timetable_json_roundtrip_restores_courses_overrides_and_config() {
+        let mut tt = fixture();
+        // config 全量三件：自定义作息 + 跳过日 + 日期规则
+        tt.config.slots = Some(vec![slot(1, "08:30", "10:00"), slot(2, "10:20", "11:50")]);
+        tt.config.skipped_dates = vec![d("2026-10-01")];
+        tt.config.slot_rules = vec![slot_rule("2026-12-01", "2027-02-28", vec![slot(1, "09:00", "10:40")])];
+        // custom 课
+        let mut custom = course("default-c", "科研例会", 3, 1, 2, vec![2]);
+        custom.is_custom_time = true;
+        custom.start_section = None;
+        custom.end_section = None;
+        custom.custom_start_time = Some("18:00".into());
+        custom.custom_end_time = Some("19:30".into());
+        tt.courses.push(custom);
+        push_override(&mut tt, cancelled("default-a", 5, None));
+
+        let export = TimetableExport {
+            format_version: 1,
+            courses: tt.courses.clone(),
+            overrides: tt.overrides.clone(),
+            config: tt.config.clone(),
+        };
+        let json = serde_json::to_string_pretty(&export).unwrap();
+        let payload: TimetableImportPayload = serde_json::from_str(&json).unwrap();
+
+        // 旧库带一门无关课程 → 导入后应被整体替换掉
+        let old = timetable_with(None, vec![course("old-x", "旧课", 2, 1, 2, vec![1])]);
+        let imported = apply_timetable_import(&old, &payload).unwrap();
+        assert_eq!(imported.courses, tt.courses, "课程全量恢复（含 custom 课）");
+        assert_eq!(imported.overrides, tt.overrides, "overrides 全量恢复");
+        assert_eq!(imported.config.slots, tt.config.slots);
+        assert_eq!(imported.config.skipped_dates, tt.config.skipped_dates);
+        assert_eq!(imported.config.slot_rules, tt.config.slot_rules);
+        assert_eq!(imported.config.semester_start_date, tt.config.semester_start_date);
+        assert_eq!(imported.config.course_table_id, "default", "courseTableId 保留当前表值");
+    }
+
+    /// 坏输入逐项拒绝且不落库（apply_timetable_import 纯函数返回 Err，
+    /// mutate 骨架在 Err 时不 save——落库保证由该骨架统一承担）。
+    #[test]
+    fn timetable_import_rejects_bad_payloads() {
+        let old = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+
+        // 非 JSON 文本
+        let parsed: Result<TimetableImportPayload, _> = serde_json::from_str("not json");
+        assert!(parsed.is_err(), "非法 JSON 在解析层被拒");
+
+        // formatVersion 不识别（缺省 0 与显式 2 都拒绝）
+        let payload = TimetableImportPayload::default();
+        assert!(apply_timetable_import(&old, &payload)
+            .unwrap_err()
+            .contains("不识别的课表文件格式版本"));
+        let mut payload = TimetableImportPayload { format_version: 2, ..Default::default() };
+        assert!(apply_timetable_import(&old, &payload).is_err());
+
+        // 节次课非法：start=0、end < start
+        payload.format_version = 1;
+        payload.courses = vec![course("a", "坏节次", 1, 0, 2, vec![1])];
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("节次"));
+        payload.courses = vec![course("a", "坏节次", 1, 3, 2, vec![1])];
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("节次"));
+        // 星期越界
+        payload.courses = vec![course("a", "坏星期", 8, 1, 2, vec![1])];
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("星期"));
+        // custom 课：缺起止 / 坏格式 / 倒序
+        let mut custom = course("a", "科研例会", 3, 1, 2, vec![1]);
+        custom.is_custom_time = true;
+        custom.start_section = None;
+        custom.end_section = None;
+        let missing = custom.clone();
+        payload.courses = vec![missing];
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("缺少起止"));
+        custom.custom_start_time = Some("18:0".into());
+        custom.custom_end_time = Some("19:30".into());
+        payload.courses = vec![custom.clone()];
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("HH:MM"));
+        custom.custom_start_time = Some("19:30".into());
+        custom.custom_end_time = Some("18:00".into());
+        payload.courses = vec![custom];
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("晚于"));
+
+        // config 内 slots 非法（复用 validate_time_slots 口径）
+        payload.courses = vec![];
+        payload.config.slots = Some(vec![slot(1, "10:00", "09:00")]);
+        assert!(apply_timetable_import(&old, &payload).unwrap_err().contains("晚于"));
+        // config 内 slot_rules 非法（start > end）
+        payload.config.slots = None;
+        payload.config.slot_rules = Some(vec![slot_rule("2027-02-28", "2026-12-01", vec![slot(1, "09:00", "10:40")])]);
+        assert!(apply_timetable_import(&old, &payload)
+            .unwrap_err()
+            .contains("开始日期必须不晚于结束日期"));
+    }
+
+    /// config「非空才覆盖」（契约 §12.2）：JSON 缺省字段不抹旧值（旧
+    /// slots/skippedDates/开学日保留）；有值字段覆盖；firstDay=7 联动强制显示周末。
+    #[test]
+    fn timetable_import_config_overwrites_only_when_present() {
+        let mut old = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+        old.config.slots = Some(vec![slot(1, "08:30", "10:00")]);
+        old.config.skipped_dates = vec![d("2026-10-01")];
+        old.config.semester_total_weeks = 18;
+
+        // 空配置导入：所有缺省字段保留旧值
+        let payload = TimetableImportPayload { format_version: 1, ..Default::default() };
+        let merged = apply_timetable_import(&old, &payload).unwrap().config;
+        assert_eq!(merged.slots, old.config.slots, "缺省 slots 不抹旧值");
+        assert_eq!(merged.skipped_dates, old.config.skipped_dates, "缺省 skippedDates 不抹旧值");
+        assert_eq!(merged.semester_start_date, old.config.semester_start_date);
+        assert_eq!(merged.semester_total_weeks, 18);
+
+        // 有值字段覆盖：总周数 / slots；firstDay=7 触发联动强制显示周末
+        let mut cfg = TimetableImportConfig::default();
+        cfg.semester_total_weeks = Some(22);
+        cfg.slots = Some(vec![slot(1, "09:00", "10:40")]);
+        cfg.first_day_of_week = Some(7);
+        cfg.show_weekends = Some(false);
+        let payload = TimetableImportPayload { format_version: 1, config: cfg, ..Default::default() };
+        let merged = apply_timetable_import(&old, &payload).unwrap().config;
+        assert_eq!(merged.semester_total_weeks, 22, "有值字段覆盖旧值");
+        assert_eq!(
+            merged.slots.as_deref(),
+            Some(&[slot(1, "09:00", "10:40")][..]),
+            "有值 slots 覆盖旧值"
+        );
+        assert_eq!(merged.skipped_dates, old.config.skipped_dates, "未提供的字段仍保留");
+        assert!(merged.show_weekends, "firstDay=7 联动强制显示周末（§7.2）");
     }
 }

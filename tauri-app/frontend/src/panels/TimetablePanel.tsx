@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Upload,
 } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader } from "@/components/PanelHeader";
@@ -24,6 +25,7 @@ import type {
   Course,
   CourseOverride,
   ImportResult,
+  JsonImportResult,
   NoticeCandidate,
   OverrideKind,
   SemesterConfigInput,
@@ -1324,6 +1326,9 @@ export function TimetablePanel() {
 
   const [icsBusy, setIcsBusy] = useState(false);
   const [icsMsg, setIcsMsg] = useState<string | null>(null);
+  /** ICS 课前提醒（契约 §12.3）：null = 不加 VALARM */
+  const [remindMinutes, setRemindMinutes] = useState<number | null>(null);
+  const importJsonRef = useRef<HTMLInputElement>(null);
 
   const [noticeText, setNoticeText] = useState("");
   const [parsing, setParsing] = useState(false);
@@ -1662,12 +1667,39 @@ export function TimetablePanel() {
     setIcsMsg(null);
     // WebView2 不处理下载（DownloadStarting 未接管），前端 Blob/a[download] 不可用，
     // 交付由后端 export_ics 直接写入下载目录，这里只展示结果。
-    const r = await invokeCommand<string>("export_ics");
+    const r = await invokeCommand<string>("export_ics", { remindMinutes });
     setIcsBusy(false);
     if (r.success && typeof r.data === "string") {
       setIcsMsg(`已导出到 ${r.data}`);
     } else {
       setIcsMsg(r.message ?? "导出失败");
+    }
+  };
+
+  // ---------------- JSON 导入导出（契约 §12：后端写下载目录 / 前端读文件传文本） ----------------
+
+  const exportTimetableJson = async () => {
+    setIcsBusy(true);
+    setIcsMsg(null);
+    const r = await invokeCommand<string>("export_timetable_json");
+    setIcsBusy(false);
+    setIcsMsg(
+      r.success && typeof r.data === "string" ? `已导出到 ${r.data}` : r.message ?? "导出失败",
+    );
+  };
+
+  const importTimetableJson = async (file: File) => {
+    if (!window.confirm("导入将覆盖当前课表的课程与调整记录，确认继续？")) return;
+    setIcsBusy(true);
+    setIcsMsg(null);
+    const json = await file.text();
+    const r = await invokeCommand<JsonImportResult>("import_timetable_json", { json });
+    setIcsBusy(false);
+    if (r.success && r.data) {
+      setIcsMsg(`导入完成：课程 ${r.data.courses} 门 · 调整记录 ${r.data.overrides} 条`);
+      setReloadTick((t) => t + 1);
+    } else {
+      setIcsMsg(r.message ?? "导入失败");
     }
   };
 
@@ -1901,10 +1933,46 @@ export function TimetablePanel() {
         <RefreshCw aria-hidden="true" className={cn("size-3.5", importing && "animate-spin")} />
         {importing ? "同步中…" : "导入 / 同步"}
       </Button>
+      {/* ICS 课前提醒（契约 §12.3）：无/15/30/60，随「导出 ICS」按钮传参 */}
+      <select
+        aria-label="课前提醒"
+        value={remindMinutes ?? 0}
+        onChange={(e) => setRemindMinutes(Number(e.target.value) || null)}
+        className="h-8 rounded-control border border-line bg-surface px-2 text-caption text-text"
+      >
+        <option value={0}>无提醒</option>
+        <option value={15}>提前 15 分钟</option>
+        <option value={30}>提前 30 分钟</option>
+        <option value={60}>提前 60 分钟</option>
+      </select>
       <Button variant="outline" size="sm" disabled={icsBusy} onClick={exportIcs}>
         <Download aria-hidden="true" className="size-3.5" />
         导出 ICS
       </Button>
+      <Button variant="outline" size="sm" disabled={icsBusy} onClick={exportTimetableJson}>
+        <Download aria-hidden="true" className="size-3.5" />
+        导出 JSON
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={icsBusy}
+        onClick={() => importJsonRef.current?.click()}
+      >
+        <Upload aria-hidden="true" className="size-3.5" />
+        导入 JSON
+      </Button>
+      <input
+        ref={importJsonRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          e.target.value = ""; // 允许重复选择同一文件
+          if (f) await importTimetableJson(f);
+        }}
+      />
       <Button variant="outline" size="sm" onClick={() => { setSlotsErr(null); setSlotsOpen(true); }}>
         <Clock aria-hidden="true" className="size-3.5" />
         作息
