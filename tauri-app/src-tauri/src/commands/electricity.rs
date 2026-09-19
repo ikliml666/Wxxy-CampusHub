@@ -284,6 +284,170 @@ fn window_label(feeitem_id: &str, room: Option<&SavedRoom>) -> String {
     }
 }
 
+/// 内嵌充值页的 4030 处置脚本：**在官方页面脚本之前**接管 fetch/XHR，把 `synAccessSource` 的
+/// `pc` 值改写为 [`SYN_ACCESS_SOURCE`]（`app`）。
+///
+/// # 为什么需要它（2026-09-19 实测确证）
+///
+/// 学校慧新E校服务端按请求参数 `synAccessSource` 做**来源授权**：`pc` 来源被拒、`app` 来源放行，
+/// 拒绝形态是 HTTP 401 + `body.code == 4030`。官方 `charge-pc` 页自己部分请求**硬编码**
+/// `synAccessSource=pc`（不读我们注入的 `agentType`），于是内嵌窗弹出「提示 服务大厅未授权(1)」，
+/// 充值流程被挡。宿主侧无法约束官方页的请求体，只能在页面侧把这些请求的来源参数改写掉。
+///
+/// # 覆盖范围（三种携带位置，且**只**改这一个参数）
+///
+/// 1. URL query —— `fetch(url)` / `XHR.open(method, url)`
+/// 2. 请求头 —— `fetch` 的 `init.headers`（`Headers` / 键值对数组 / 普通对象）、`Request` 实例的
+///    `headers`、`XHR.setRequestHeader`（键名大小写不敏感）
+/// 3. 请求体 —— `XHR.send(body)` / `fetch` 的 `init.body`，覆盖 urlencoded 字符串、
+///    `URLSearchParams`、`FormData`
+///
+/// 思路直接借鉴用户自写的油猴脚本 `xll-apk-analysis/fix-4030.user.js`（同目的：hook fetch/XHR
+/// 改写来源参数），此处补齐请求头与请求体两条路径，并**内联为常量**（不引用外部文件、不新增依赖）。
+///
+/// # 纪律
+///
+/// - 幂等：`window.__campushub4030Hook` 只装一次；改写只匹配 `synAccessSource=pc`，重复执行结果不变。
+/// - 绝不碰其它内容（token 头等），也**不新增**该参数——官方没带的请求保持原样。
+/// - 全程 `try/catch`：hook 的任何异常都不许影响后续 token/configs 注入与官方页面本身。
+///
+/// **这是为绕开学校服务端 PC 来源授权缺陷（4030）而做的参数改写，属已知的临时措施；
+/// 学校若修复 PC 授权即可整段移除（连同 [`init_script`] 里对本常量的拼接）。**
+///
+/// `__SYN_ACCESS_SOURCE__` 占位符由 [`init_script`] 替换为 [`SYN_ACCESS_SOURCE`]。
+const RECHARGE_4030_HOOK: &str = r#"(function () {
+  'use strict';
+  try {
+    if (window.__campushub4030Hook) return;
+    window.__campushub4030Hook = true;
+    var SOURCE = '__SYN_ACCESS_SOURCE__';
+    var isSourceKey = function (name) {
+      return typeof name === 'string' && name.toLowerCase() === 'synaccesssource';
+    };
+    var isPc = function (value) { return typeof value === 'string' && /^pc$/i.test(value); };
+
+    /* 位置一：URL query（fetch(url) / XHR.open(method, url)）。只改 synAccessSource 的值。 */
+    var fixUrl = function (url) {
+      try {
+        if (typeof url !== 'string' || url.indexOf('synAccessSource') === -1) return url;
+        return url.replace(/(^|[?&])synAccessSource=pc(?![0-9A-Za-z_])/gi, '$1synAccessSource=' + SOURCE);
+      } catch (e) { return url; }
+    };
+
+    /* 位置二：请求头。键名大小写不敏感，值只有 pc 才改。 */
+    var fixHeaders = function (headers) {
+      try {
+        if (!headers) return headers;
+        if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+          if (!isPc(headers.get('synAccessSource'))) return headers;
+          try {
+            headers.set('synAccessSource', SOURCE);
+            return headers;
+          } catch (e) {
+            var cloned = new Headers(headers);
+            cloned.set('synAccessSource', SOURCE);
+            return cloned;
+          }
+        }
+        if (Array.isArray(headers)) {
+          return headers.map(function (pair) {
+            if (pair && isSourceKey(pair[0]) && isPc(pair[1])) return [pair[0], SOURCE];
+            return pair;
+          });
+        }
+        if (typeof headers === 'object') {
+          var out = {};
+          var hit = false;
+          Object.keys(headers).forEach(function (key) {
+            if (isSourceKey(key) && isPc(headers[key])) { out[key] = SOURCE; hit = true; }
+            else { out[key] = headers[key]; }
+          });
+          return hit ? out : headers;
+        }
+      } catch (e) {}
+      return headers;
+    };
+
+    /* 位置三：请求体。覆盖 urlencoded 字符串 / URLSearchParams / FormData。 */
+    var fixBody = function (body) {
+      try {
+        if (typeof body === 'string') {
+          if (body.indexOf('synAccessSource') === -1) return body;
+          return body.replace(/(^|&)synAccessSource=pc(?![0-9A-Za-z_])/gi, '$1synAccessSource=' + SOURCE);
+        }
+        if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+          if (isPc(body.get('synAccessSource'))) body.set('synAccessSource', SOURCE);
+          return body;
+        }
+        if (typeof FormData !== 'undefined' && body instanceof FormData) {
+          if (isPc(body.get('synAccessSource'))) body.set('synAccessSource', SOURCE);
+          return body;
+        }
+      } catch (e) {}
+      return body;
+    };
+
+    /* Request 实例：URL 须改写时重建（body 走 duplex 半双工透传）；失败退回原对象，绝不阻断请求。 */
+    var rebuildRequest = function (req, url) {
+      try {
+        var opt = { method: req.method, headers: new Headers(req.headers) };
+        ['mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy',
+          'integrity', 'keepalive', 'signal'].forEach(function (key) {
+          try { if (req[key] != null) opt[key] = req[key]; } catch (e) {}
+        });
+        if (req.body) { opt.body = req.body; opt.duplex = 'half'; }
+        return new Request(url, opt);
+      } catch (e) { return null; }
+    };
+
+    /* 官方页 axios 走 XHR —— 主路径。 */
+    var xhrOpen = XMLHttpRequest.prototype.open;
+    var xhrSend = XMLHttpRequest.prototype.send;
+    var xhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.open = function () {
+      try { arguments[1] = fixUrl(arguments[1]); } catch (e) {}
+      return xhrOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function (body) {
+      try { body = fixBody(body); } catch (e) {}
+      return xhrSend.call(this, body);
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+      try { if (isSourceKey(name) && isPc(value)) value = SOURCE; } catch (e) {}
+      return xhrSetHeader.call(this, name, value);
+    };
+
+    if (typeof window.fetch === 'function') {
+      var nativeFetch = window.fetch;
+      window.fetch = function (input, init) {
+        try {
+          if (typeof input === 'string') {
+            input = fixUrl(input);
+          } else if (typeof Request !== 'undefined' && input instanceof Request) {
+            try { fixHeaders(input.headers); } catch (e) {}
+            var fixed = fixUrl(input.url);
+            if (fixed !== input.url) {
+              var rebuilt = rebuildRequest(input, fixed);
+              if (rebuilt) input = rebuilt;
+            }
+          } else if (input) {
+            input = fixUrl(String(input));
+          }
+          if (init) {
+            var headers = fixHeaders(init.headers);
+            var body = fixBody(init.body);
+            if (headers !== init.headers || body !== init.body) {
+              init = Object.assign({}, init, { headers: headers, body: body });
+            }
+          }
+        } catch (e) {}
+        return nativeFetch.call(this, input, init);
+      };
+    }
+  } catch (e) { /* hook 失败不影响后续 token/configs 注入与官方页面 */ }
+})();
+"#;
+
 /// 官方充值页所需的注入内容（2026-09-19 逆向官方 bundle + 实测确定）：
 ///
 /// 1. `localStorage.configs` —— 官方 bundle 在**模块顶层** `JSON.parse(localStorage.getItem("configs"))`
@@ -303,11 +467,17 @@ fn window_label(feeitem_id: &str, room: Option<&SavedRoom>) -> String {
 /// **不预注入**：缺失时官方会自己同步 XHR `/berserker-app/frontInfo?type=pc&synAccessSource=pc`
 /// （2026-09-19 实测匿名 200）补齐；预注入反而可能与其主题结构不符或被覆盖。
 ///
-/// 脚本在**每次导航**都会执行，故整体幂等（样式只在缺失时插一次）。
+/// 5. **4030 处置 hook**（见 [`RECHARGE_4030_HOOK`]）——必须排在脚本最前：`initialization_script`
+///    保证先于官方页面脚本执行，hook 装上后才轮得到官方页发请求；属**已知临时措施**
+///    （学校修复 PC 来源授权即可移除）。
+///
+/// 脚本在**每次导航**都会执行，故整体幂等（样式只在缺失时插一次、hook 只装一次、改写只匹配 `pc`）。
 fn init_script(token: &str) -> String {
     let token_js = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".to_string());
+    // hook 先于 token/configs 注入落位；占位符换成 crate 常量，避免在 JS 里重复硬编码来源值。
+    let hook = RECHARGE_4030_HOOK.replace("__SYN_ACCESS_SOURCE__", SYN_ACCESS_SOURCE);
     format!(
-        r#"(function () {{
+        r#"{hook}(function () {{
   try {{
     sessionStorage.setItem('access_token', {token_js});
     sessionStorage.setItem('token_type', 'bearer');
@@ -592,6 +762,40 @@ mod tests {
             risky.contains(r#"sessionStorage.setItem('access_token', "a\"b\\c")"#),
             "{risky}"
         );
+    }
+
+    /// 4030 处置 hook：排在脚本最前（官方页面脚本之前）、覆盖三种携带位置、占位符已替换、
+    /// 不引用外部文件；注入本体（token/configs）与品牌样式不受影响。
+    #[test]
+    fn init_script_puts_4030_hook_first_and_covers_three_carriers() {
+        let s = init_script("T0KEN");
+        let hook_at = s.find("__campushub4030Hook").expect("缺 hook 幂等标记");
+        let inject_at = s
+            .find("sessionStorage.setItem('access_token'")
+            .expect("缺 token 注入");
+        assert!(hook_at < inject_at, "hook 必须最先执行（初始化脚本首段）");
+
+        // 位置一/二/三：URL query、请求头、请求体
+        for mark in [
+            "XMLHttpRequest.prototype.open =",
+            "XMLHttpRequest.prototype.setRequestHeader =",
+            "XMLHttpRequest.prototype.send =",
+            "window.fetch =",
+            "init.headers",
+            "init.body",
+            "URLSearchParams",
+            "FormData",
+        ] {
+            assert!(s.contains(mark), "hook 缺覆盖点 {mark}");
+        }
+        // 只改 synAccessSource 这一个值：正则与替换片段都在，且顺序为 hook → 注入 → 样式
+        assert!(s.contains("synAccessSource=' + SOURCE"), "{s}");
+        assert!(s.contains(r"synAccessSource=pc(?![0-9A-Za-z_])"));
+        assert!(!s.contains("__SYN_ACCESS_SOURCE__"), "占位符必须已替换");
+        assert!(s.contains("var SOURCE = 'app';"), "来源值应取 crate 常量");
+        assert!(!s.contains("fix-4030.user.js"), "不得引用外部脚本文件");
+        // 只新增该参数是不允许的：脚本不含「无条件补写 app」的追加逻辑
+        assert!(!s.contains("includes('?') ? '&' : '?'"), "不得为缺失参数的请求补写来源");
     }
 
     /// 充值 URL 与窗口 label：URL 带官方落点参数、id 去空白；label 只含 ASCII 字母数字并截断。
