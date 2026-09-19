@@ -414,6 +414,7 @@ dependencies = [
  "campus-auth",
  "campus-portal",
  "campus-schedule",
+ "campus-synjones",
  "chrono",
  "dirs",
  "log",

@@ -10,7 +10,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { PanelDomain } from "@/components/PanelHeader";
-import type { CourseBrief, PanelId, PortalOverview, TodayCourse, TodayCoursesView } from "@/shared/types";
+import type {
+  CourseBrief,
+  PanelId,
+  PortalOverview,
+  TodayCourse,
+  TodayCoursesView,
+  WalletCards,
+} from "@/shared/types";
 import { invokeCommand } from "@/shared/tauriApi";
 import { useAuthStore } from "@/stores/authStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -39,37 +46,54 @@ type OverviewState =
   | { phase: "ready"; data: PortalOverview }
   | { phase: "error"; message: string };
 
-// 钱包三卡：非对称 12 栏（5/4/3），窄窗口自然堆叠；数值来自 get_portal_overview，
+// 钱包三卡：非对称 12 栏（5/4/3），窄窗口自然堆叠；数值与脚注由 walletCell 计算，
 // 单项取失败显示 "—"（不伪造数字）
 const WALLET_CARDS: {
+  key: "ecard" | "mail" | "library";
   label: string;
-  note: string;
   span: string;
   accent: PanelDomain;
-  pick: (w: PortalOverview["wallet"]) => string | null;
 }[] = [
-  {
-    label: "一卡通",
-    note: "实时余额",
-    span: "sm:col-span-5",
-    accent: "wallet",
-    pick: (w) => (w?.cardBalance != null ? w.cardBalance.toFixed(2) : null),
-  },
-  {
-    label: "邮箱",
-    note: "未读邮件",
-    span: "sm:col-span-4",
-    accent: "wallet",
-    pick: (w) => (w?.mailUnread != null ? String(w.mailUnread) : null),
-  },
-  {
-    label: "图书借阅",
-    note: "在借图书",
-    span: "sm:col-span-3",
-    accent: "info",
-    pick: (w) => (w?.bookBorrowed != null ? String(w.bookBorrowed) : null),
-  },
+  { key: "ecard", label: "一卡通", span: "sm:col-span-5", accent: "wallet" },
+  { key: "mail", label: "邮箱", span: "sm:col-span-4", accent: "wallet" },
+  { key: "library", label: "图书借阅", span: "sm:col-span-3", accent: "info" },
 ];
+
+/**
+ * 单格取值与脚注（M3 §2.4）：一卡通格**优先实时值**（`get_wallet_cards`，
+ * 脚注标「实时 / 门户快照」）；实时未到或失败时回落门户总览的数字（脚注「实时余额」）。
+ * 门户数据先渲染、实时到后替换，`walletCards` 为 null 即静默降级——**不阻塞首屏、不弹错**。
+ * 邮箱未读与图书借阅仍以门户总览为唯一来源。
+ */
+function walletCell(
+  key: (typeof WALLET_CARDS)[number]["key"],
+  wallet: PortalOverview["wallet"],
+  cards: WalletCards | null,
+): { value: string | null; note: string } {
+  if (key === "ecard") {
+    const realtime = cards?.ecard;
+    if (realtime?.valueYuan != null) {
+      return {
+        value: realtime.valueYuan.toFixed(2),
+        note: realtime.source === "realtime" ? "实时" : "门户快照",
+      };
+    }
+    return {
+      value: wallet?.cardBalance != null ? wallet.cardBalance.toFixed(2) : null,
+      note: "实时余额",
+    };
+  }
+  if (key === "mail") {
+    return {
+      value: wallet?.mailUnread != null ? String(wallet.mailUnread) : null,
+      note: "未读邮件",
+    };
+  }
+  return {
+    value: wallet?.bookBorrowed != null ? String(wallet.bookBorrowed) : null,
+    note: "在借图书",
+  };
+}
 
 // 快捷动作：panel 有值则切对应面板；enabled=false 为未落地门户模块（M2+ 接上）
 const QUICK_ACTIONS: {
@@ -135,6 +159,8 @@ export function TodayPanel() {
   const [guideDismissed, setGuideDismissed] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ phase: "loading" });
   const [localCourses, setLocalCourses] = useState<LocalCoursesState>({ phase: "loading" });
+  // 首页钱包卡的实时一卡通（后端聚合 + 门户降级）：到达后替换门户数字，失败静默为 null
+  const [walletCards, setWalletCards] = useState<WalletCards | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
   const authed = status === "authed";
@@ -176,6 +202,24 @@ export function TodayPanel() {
       if (!alive) return;
       if (r.success && r.data) setLocalCourses({ phase: "ready", data: r.data });
       else setLocalCourses({ phase: "error", message: r.message ?? "本地课表获取失败" });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [authed, reloadTick]);
+
+  // 首页钱包卡实时一卡通（M3 §2.4）：与门户总览**并行**发起——门户数字先渲染，
+  // 实时值到达后替换脚注为「实时 / 门户快照」；失败（校外/桥失败/未登录）静默，
+  // 不弹错、不阻塞首屏（回落门户数字）
+  useEffect(() => {
+    if (!authed) {
+      setWalletCards(null);
+      return;
+    }
+    let alive = true;
+    invokeCommand<WalletCards>("get_wallet_cards").then((r) => {
+      if (!alive) return;
+      setWalletCards(r.success && r.data ? r.data : null);
     });
     return () => {
       alive = false;
@@ -234,27 +278,30 @@ export function TodayPanel() {
 
       {/* 钱包三卡：非对称栅格；加载骨架 → 真实数字，单项取失败回落 "—" */}
       <div className="mt-5 grid grid-cols-12 gap-3">
-        {WALLET_CARDS.map((card) => (
-          <Surface
-            key={card.label}
-            accent={card.accent}
-            hover
-            className={cn("col-span-12 px-4 py-4", card.span)}
-          >
-            <p className="text-caption text-text-2">{card.label}</p>
-            {loading ? (
-              <div
-                aria-hidden
-                className="mt-2 h-7 w-20 animate-pulse rounded bg-line"
-              />
-            ) : (
-              <p className="tabular-num mt-2 text-display font-semibold text-text">
-                {card.pick(wallet) ?? "—"}
-              </p>
-            )}
-            <p className="mt-3 text-caption text-text-2">{card.note}</p>
-          </Surface>
-        ))}
+        {WALLET_CARDS.map((card) => {
+          const cell = walletCell(card.key, wallet, walletCards);
+          return (
+            <Surface
+              key={card.key}
+              accent={card.accent}
+              hover
+              className={cn("col-span-12 px-4 py-4", card.span)}
+            >
+              <p className="text-caption text-text-2">{card.label}</p>
+              {loading ? (
+                <div
+                  aria-hidden
+                  className="mt-2 h-7 w-20 animate-pulse rounded bg-line"
+                />
+              ) : (
+                <p className="tabular-num mt-2 text-display font-semibold text-text">
+                  {cell.value ?? "—"}
+                </p>
+              )}
+              <p className="mt-3 text-caption text-text-2">{cell.note}</p>
+            </Surface>
+          );
+        })}
       </div>
 
       {/* 总览取数失败：可重试（钱包三卡已回落 "—"，不白屏） */}

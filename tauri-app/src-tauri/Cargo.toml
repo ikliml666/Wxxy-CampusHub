@@ -25,4 +25,6 @@ campus-auth = { path = "../../crates/campus-auth" }
 campus-portal = { path = "../../crates/campus-portal" }
 # 课表领域模型（Timetable/Course 等，get_timetable IPC 透出；解析仍在 campus-schedule）
 campus-schedule = { path = "../../crates/campus-schedule" }
+# 慧新E校（一卡通）协议核心：钱包页与首页钱包卡取数（M3 批 2）
+campus-synjones = { path = "../../crates/campus-synjones" }
 tauri-plugin-opener = "2"

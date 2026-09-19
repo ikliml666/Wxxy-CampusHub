@@ -31,10 +31,11 @@ use campus_auth::captcha::{solve, KaptchaTemplates};
 use campus_auth::cas::CasClient;
 use campus_auth::rsa::rsa_encrypt_hex;
 use campus_synjones::client::Envelope;
+use campus_synjones::ecard::{fetch_current_card, fetch_transactions, EP_TURNOVER};
 use campus_synjones::sso::{default_target_url, ly_cas_service_url, ly_cas_redirect_url, sso_token};
 use campus_synjones::{SynjonesClient, SynjonesToken, BERSERKER_BASE};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ==================== recon 目录 ====================
 
@@ -774,6 +775,453 @@ async fn synjones_oauth_password_experiment() {
         v.get("access_token").is_some(),
         v.get("token_type")
     );
+}
+
+// ==================== M3 批 2：一卡通取数 live 探针 ====================
+
+/// 批 2 live 探针：余额口径复核 + 流水解析 + 「今日/本月消费」参数实测（计划 §1.7 未知 3）。
+///
+/// 复跑：`cargo test -p campus-synjones -- --ignored synjones_ecard_live --nocapture`
+#[tokio::test]
+#[ignore = "live：需校园网 + 本机会话/凭据，仅主智能体验收时 -- --ignored 运行"]
+async fn synjones_ecard_live() {
+    let dir = recon_dir();
+    std::fs::create_dir_all(&dir).expect("创建 recon 目录失败");
+    println!("[recon] 样本目录: {}", dir.display());
+
+    let cas = CasClient::new().expect("创建 CasClient 失败");
+    // 凭据来源 1（最省）：本机 app 会话的 TGT；换票失败（TGT 隔夜过期）→ 回落账密登录
+    let mut token = None;
+    if let Some(t) = tgt_from_app_session() {
+        println!("[凭据] 来源=session.json(DPAPI TGT) 长度={}", t.len());
+        match sso_token(&cas, &t, &default_target_url()).await {
+            Ok(tok) => token = Some(tok),
+            Err(e) => println!("[凭据] 本机 TGT 换票失败（{e}）→ 回落账密登录"),
+        }
+    } else {
+        println!("[凭据] session.json 无可用 TGT");
+    }
+    let token = match token {
+        Some(t) => t,
+        None => {
+            let (tgt, _src) = login_tgt_via_password().await;
+            sso_token(&cas, &tgt, &default_target_url())
+                .await
+                .expect("账密登录取得的新 TGT 应能换到 token")
+        }
+    };
+    // 业务请求只认 token 头（无 TGT → 不触发静默重进，纯测本次取数）
+    let client = SynjonesClient::new(CasClient::new().expect("新建 client 失败"), None, Some(token));
+
+    // ---------- 1) 当前卡 ----------
+    let card = fetch_current_card(&client)
+        .await
+        .expect("queryCurrentCard 应可解析出首卡");
+    println!(
+        "[卡] cardname 长度={} account 长度={} 状态={} 卡账户={} 元 电子账户={} 元",
+        card.cardname.chars().count(),
+        card.account.chars().count(),
+        card.status_label,
+        card.balance_yuan,
+        card.elec_accamt_yuan
+    );
+    assert!(
+        card.account.chars().count() > 3,
+        "卡号应非空（后续流水查询要用它）"
+    );
+
+    // ---------- 2) 流水（支出方向，批 1 实测 total=1006） ----------
+    let page = fetch_transactions(&client, &card.account, 1, 5, "2")
+        .await
+        .expect("turnover?type=2 应成功");
+    println!("[流水 type=2] total={} 本页条数={}", page.total, page.records.len());
+    assert!(!page.records.is_empty(), "支出方向流水应有记录");
+    if let Some(first) = page.records.first() {
+        println!(
+            "[流水 首条] time={:?} 摘要长度={} 金额={} 元 收入={} 交易方长度={} 地点长度={}",
+            first.time,
+            first.summary.chars().count(),
+            first.amount_yuan,
+            first.is_income,
+            first.pay_name.chars().count(),
+            first.location_name.chars().count()
+        );
+        assert!(!first.is_income, "type=2 方向下首条应为支出（负号）");
+        assert!(first.amount_yuan < 0.0, "支出金额应为负：{}", first.amount_yuan);
+    }
+
+    // 收支两个方向都取一页（收入方向 total 批 1 实测 36）
+    if let Ok(income) = fetch_transactions(&client, &card.account, 1, 3, "1").await {
+        println!("[流水 type=1] total={} 本页条数={}", income.total, income.records.len());
+    }
+    // 不带 type = 全部？决定钱包页流水列表要不要过滤方向
+    match client
+        .get(
+            EP_TURNOVER,
+            &[("account", &card.account), ("current", "1"), ("size", "3")],
+            Envelope::Search,
+        )
+        .await
+    {
+        Ok(v) => println!(
+            "[流水 不带 type] code=200 total={} 条数={}（> 支出 total 即为全量）",
+            v["data"]["total"],
+            v["data"]["records"].as_array().map(Vec::len).unwrap_or(0)
+        ),
+        Err(e) => println!("[流水 不带 type] 失败：{e}"),
+    }
+
+    // ---------- 3) 口径复核：最新一条流水的 cardBalance == elec_accamt ----------
+    if let Ok(v) = client
+        .get(
+            EP_TURNOVER,
+            &[
+                ("account", &card.account),
+                ("current", "1"),
+                ("size", "1"),
+                ("type", "2"),
+            ],
+            Envelope::Search,
+        )
+        .await
+    {
+        let raw = &v["data"]["records"][0]["cardBalance"];
+        println!("[口径复核] 最新流水 cardBalance 原值={raw:?}（类型 {:?}）", raw);
+        let snap = raw
+            .as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .or_else(|| raw.as_f64());
+        if let Some(fen) = snap {
+            println!("  → 换算 {} 元 ↔ 电子账户 {} 元（应相等）", fen / 100.0, card.elec_accamt_yuan);
+            assert_eq!(
+                fen / 100.0,
+                card.elec_accamt_yuan,
+                "电子账户余额应等于最新流水的交易后余额快照（批 1 口径）"
+            );
+        } else {
+            println!("  ⚠️ cardBalance 缺失或非数值——口径复核未做（见流水样本字段）");
+        }
+    }
+
+    // ---------- 4) 「今日/本月消费」端点参数实测 ----------
+    // 日期从最新流水的 jndatetimeStr 取（不引 chrono，零新依赖）
+    let stamp = page
+        .records
+        .first()
+        .map(|r| r.time.clone())
+        .unwrap_or_default();
+    let today = stamp.chars().take(10).collect::<String>();
+    let month_start = if today.len() >= 7 {
+        format!("{}-01", &today[..7])
+    } else {
+        String::new()
+    };
+    println!("[统计探针] 以最新流水日期为基准：today={today:?} month_start={month_start:?}");
+
+    let acct = card.account.as_str();
+    let sum_variants: Vec<(&str, Vec<(&str, String)>)> = vec![
+        ("无参", vec![]),
+        ("account", vec![("account", acct.to_string())]),
+        (
+            "account+type2",
+            vec![("account", acct.to_string()), ("type", "2".to_string())],
+        ),
+        (
+            "account+beginTime/endTime=今天",
+            vec![
+                ("account", acct.to_string()),
+                ("beginTime", format!("{today} 00:00:00")),
+                ("endTime", format!("{today} 23:59:59")),
+            ],
+        ),
+        (
+            "account+beginTime/endTime=本月",
+            vec![
+                ("account", acct.to_string()),
+                ("beginTime", format!("{month_start} 00:00:00")),
+                ("endTime", format!("{today} 23:59:59")),
+            ],
+        ),
+        (
+            "account+startTime/endTime=今天",
+            vec![
+                ("account", acct.to_string()),
+                ("startTime", format!("{today} 00:00:00")),
+                ("endTime", format!("{today} 23:59:59")),
+            ],
+        ),
+        (
+            "account+startDate/endDate=今天",
+            vec![
+                ("account", acct.to_string()),
+                ("startDate", today.clone()),
+                ("endDate", today.clone()),
+            ],
+        ),
+    ];
+    let sum_hit = probe_matrix(
+        &dir,
+        &client,
+        "sum_user",
+        "/berserker-search/statistics/turnover/sum/user",
+        sum_variants,
+    )
+    .await;
+
+    let count_variants: Vec<(&str, Vec<(&str, String)>)> = vec![
+        ("account", vec![("account", acct.to_string())]),
+        (
+            "account+type2",
+            vec![("account", acct.to_string()), ("type", "2".to_string())],
+        ),
+        (
+            "account+三日期参",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "1".to_string()),
+                ("dateStr", today.clone()),
+                ("statisticsDateStr", today.clone()),
+            ],
+        ),
+        (
+            "account+三日期参 dateType=2",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "2".to_string()),
+                ("dateStr", today.clone()),
+                ("statisticsDateStr", today.clone()),
+            ],
+        ),
+    ];
+    let count_hit = probe_matrix(
+        &dir,
+        &client,
+        "turnover_count",
+        "/berserker-search/statistics/turnover/count",
+        count_variants,
+    )
+    .await;
+
+    // ---------- 5) sum/user 必填三参（第一轮实测：缺任一 → code=400 点名三字段）----------
+    // 服务端索赔：`statisticsDateStr` / `dateType` / `dateStr` 均不能为空 → 组合试探语义
+    let month = month_start.chars().take(7).collect::<String>();
+    let daily = |dt: &str| -> Vec<(&str, String)> {
+        vec![
+            ("account", acct.to_string()),
+            ("dateType", dt.to_string()),
+            ("dateStr", today.clone()),
+            ("statisticsDateStr", today.clone()),
+        ]
+    };
+    let sum_variants2: Vec<(&str, Vec<(&str, String)>)> = vec![
+        ("dateType=1 今天", daily("1")),
+        ("dateType=2 今天", daily("2")),
+        ("dateType=3 今天", daily("3")),
+        ("dateType=0 今天", daily("0")),
+        ("dateType=day 今天", daily("day")),
+        ("dateType=month 今天", daily("month")),
+        (
+            "dateType=2 dateStr=本月首日 stat=今天",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "2".to_string()),
+                ("dateStr", month_start.clone()),
+                ("statisticsDateStr", today.clone()),
+            ],
+        ),
+        (
+            "dateType=2 dateStr=今天 stat=本月首日",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "2".to_string()),
+                ("dateStr", today.clone()),
+                ("statisticsDateStr", month_start.clone()),
+            ],
+        ),
+        (
+            "dateType=2 dateStr=月份 stat=月份",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "2".to_string()),
+                ("dateStr", month.clone()),
+                ("statisticsDateStr", month.clone()),
+            ],
+        ),
+    ];
+    let sum_hit2 = probe_matrix(
+        &dir,
+        &client,
+        "sum_user2",
+        "/berserker-search/statistics/turnover/sum/user",
+        sum_variants2,
+    )
+    .await;
+
+    // ---------- 6) sum/user 第三轮：日期**格式**试探（第二轮三参齐备仍 400「业务异常」）----------
+    let sum_variants3: Vec<(&str, Vec<(&str, String)>)> = vec![
+        (
+            "dateType=1 yyyyMMdd",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "1".to_string()),
+                ("dateStr", "20260918".to_string()),
+                ("statisticsDateStr", "20260918".to_string()),
+            ],
+        ),
+        (
+            "dateType=2 yyyyMMdd",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "2".to_string()),
+                ("dateStr", "20260918".to_string()),
+                ("statisticsDateStr", "20260918".to_string()),
+            ],
+        ),
+        (
+            "dateType=1 ISO+0000",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "1".to_string()),
+                ("dateStr", "2026-09-18T00:00:00.000+0000".to_string()),
+                ("statisticsDateStr", "2026-09-18T00:00:00.000+0000".to_string()),
+            ],
+        ),
+        (
+            "dateType=2 yyyyMM",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "2".to_string()),
+                ("dateStr", "202609".to_string()),
+                ("statisticsDateStr", "202609".to_string()),
+            ],
+        ),
+        (
+            "dateType=1 三参 + size",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "1".to_string()),
+                ("dateStr", today.clone()),
+                ("statisticsDateStr", today.clone()),
+                ("size", "10".to_string()),
+            ],
+        ),
+        (
+            "dateType=1 三参 + type=2",
+            vec![
+                ("account", acct.to_string()),
+                ("dateType", "1".to_string()),
+                ("dateStr", today.clone()),
+                ("statisticsDateStr", today.clone()),
+                ("type", "2".to_string()),
+            ],
+        ),
+    ];
+    let sum_hit3 = probe_matrix(
+        &dir,
+        &client,
+        "sum_user3",
+        "/berserker-search/statistics/turnover/sum/user",
+        sum_variants3,
+    )
+    .await;
+
+    // ---------- 7) sum/user 第四轮：第三轮实测「+ type 才不再 400」，固化为日/月两种取值 ----------
+    let daily2 = |dt: &str, dstr: &str, stat: &str, ty: &str| -> Vec<(&str, String)> {
+        vec![
+            ("account", acct.to_string()),
+            ("dateType", dt.to_string()),
+            ("dateStr", dstr.to_string()),
+            ("statisticsDateStr", stat.to_string()),
+            ("type", ty.to_string()),
+        ]
+    };
+    let sum_variants4: Vec<(&str, Vec<(&str, String)>)> = vec![
+        ("日 type=2（有流水的那天）", daily2("1", &today, &today, "2")),
+        ("日 type=1（有流水的那天）", daily2("1", &today, &today, "1")),
+        ("月 type=2 首日→今天", daily2("2", &month_start, &today, "2")),
+        ("月 type=2 首日→首日", daily2("2", &month_start, &month_start, "2")),
+        ("dateType=3 type=2 首日→今天", daily2("3", &month_start, &today, "2")),
+        ("dateType=0 type=2 首日→今天", daily2("0", &month_start, &today, "2")),
+    ];
+    let sum_hit4 = probe_matrix(
+        &dir,
+        &client,
+        "sum_user4",
+        "/berserker-search/statistics/turnover/sum/user",
+        sum_variants4,
+    )
+    .await;
+
+    println!(
+        "[统计探针结论] sum/user 第一轮={sum_hit} 第二轮={sum_hit2} 第三轮={sum_hit3} 第四轮={sum_hit4} count 可用={count_hit}"
+    );
+
+    // 交易类型字典（计划 §1.4 待实测项，顺手固化）
+    probe_matrix(
+        &dir,
+        &client,
+        "turnover_type",
+        "/berserker-search/search/turnoverType",
+        vec![("无参", vec![])],
+    )
+    .await;
+
+    println!("[统计探针结论] sum/user 有可用变体={sum_hit} count 有可用变体={count_hit}");
+    println!("✅ 批 2 取数路径（当前卡 + 流水）live 通过");
+}
+
+/// 未知端点的参数矩阵探针：逐个变体打印响应形状（已脱敏），返回是否有任一变体成功。
+async fn probe_matrix(
+    dir: &Path,
+    client: &SynjonesClient,
+    label: &str,
+    path: &str,
+    variants: Vec<(&str, Vec<(&str, String)>)>,
+) -> bool {
+    let mut hit = false;
+    for (name, owned) in variants {
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        match client.get(path, &refs, Envelope::Search).await {
+            Ok(v) => {
+                println!(
+                    "[{label} / {name}] OK data 形状: {}",
+                    shape_of(&v["data"])
+                );
+                let safe = name.replace(['/', ' ', '=', '+'], "_");
+                dump_short(dir, &format!("{label}_{safe}.json"), &v, 1200);
+                hit = true;
+            }
+            Err(e) => println!("[{label} / {name}] 失败：{e}"),
+        }
+    }
+    hit
+}
+
+/// 响应形状摘要：对象给键名、数组给长度 + 首元素形状（未固化端点的字段发现用）。
+fn shape_of(v: &Value) -> String {
+    match v {
+        Value::Object(o) => format!(
+            "object keys=[{}]",
+            o.keys().cloned().collect::<Vec<_>>().join(",")
+        ),
+        Value::Array(a) => format!(
+            "array(len={}) 首元素: {}",
+            a.len(),
+            a.first().map(shape_of).unwrap_or_else(|| "无".to_string())
+        ),
+        Value::String(s) => format!("string(len={})", s.len()),
+        Value::Number(n) => format!("number({n})"),
+        Value::Bool(b) => format!("bool({b})"),
+        Value::Null => "null".to_string(),
+    }
+}
+
+/// 脱敏后写样本 + 打印（截断按**字符**，不按字节——防切出非法 UTF-8）。
+fn dump_short(dir: &Path, name: &str, v: &Value, max_chars: usize) {
+    let text = serde_json::to_string_pretty(&redact_json(v)).unwrap_or_default();
+    let head: String = text.chars().take(max_chars).collect();
+    println!("----- {name} -----\n{head}\n----- /{name} -----");
+    std::fs::write(dir.join(name), text).ok();
 }
 
 // ==================== 脱敏（写盘/打印样本前一律过一遍） ====================

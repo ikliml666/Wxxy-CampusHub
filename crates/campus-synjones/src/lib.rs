@@ -29,9 +29,11 @@
 //! 与记录里的 `typeFrom`（`"1"`/`"2"`）一一对应。
 
 pub mod client;
+pub mod ecard;
 pub mod sso;
 
 pub use client::SynjonesClient;
+pub use ecard::{CardInfo, Transaction, Transactions};
 pub use sso::sso_token;
 
 /// 慧新E校平台内网根（明文 http，校外需 WebVPN，M3 只验校内侧）。
