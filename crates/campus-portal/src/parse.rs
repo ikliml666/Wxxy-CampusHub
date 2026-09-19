@@ -10,7 +10,8 @@
 use crate::access::classify_app_access;
 use crate::{
     AppGroup, AppItem, CourseBrief, InfoColumn, InfoItem, InfoPage, PortalError, ScheduleClassify,
-    ScheduleDayCount, ScheduleEvent, SemesterInfo, TodoItem, TodoPage, TodoTab, WalletSummary,
+    ScheduleDayCount, ScheduleEvent, ScheduleNoticeBrief, SemesterInfo, TodoItem, TodoPage,
+    TodoTab, WalletSummary,
 };
 use campus_schedule::TimeSlot;
 
@@ -159,14 +160,15 @@ pub fn parse_week_schedule(body: &str) -> Result<WeekSchedule, PortalError> {
 
 /// 校本「大节」作息表（100 分钟/大节；矩阵 10 列 = 5 大节 × 2 小节）。
 ///
+/// ponytail：**仅门户聚合兜底用**（`next_course`/「下一节课」横幅按矩阵大节
+/// 列对查时刻）——课表链路（网格/ICS/今日页）已统一为小节口径
+///（[`section_time_slots`]，tauri 层契约 §18），大节表不再参与课表取值。
+///
 /// 时间锚定：大节2 10:10-11:50、大节3 13:45-15:25 为 2026-09-18 日程服务实测
 ///（`findScheduleBetweenTime` 的 `Default-class` 事件真实上课时间）；大节1 由
 /// 大节2 起点反推（30 分钟大课间）；大节4/5 为 **2026-09-19 用户截图校准**
 ///（15:55-17:35、18:45-21:20）。**不改动 `campus-schedule::default_time_slots()`**
 ///（上游默认值，被金标测试钉住）。
-///
-/// `pub`：M2.5 起课表 ICS 导出（tauri 层）与今日页「下一节课」共用同一份
-/// 校本大节表——单点事实来源，调用方不得复制常量。
 pub fn block_time_slots() -> Vec<TimeSlot> {
     const RAW: [(u8, &str, &str); 5] = [
         // 由大节2 10:10 起反推（30 分钟大课间）；2026-09-19 随小节表校准确认
@@ -193,9 +195,10 @@ pub fn block_time_slots() -> Vec<TimeSlot> {
 /// 校本「小节」作息表（11 小节，45 分钟/节；2026-09-19 用户截图校准，上游参考
 /// 截图同为 11 节口径）。
 ///
-/// `pub`：前端课表时间列（tauri 层 `TimetableView.sectionSlots` 恒定下发）与
-/// 默认校本场景下 ICS/今日页的节次课精确时刻查询共用——单点事实来源，调用方
-/// 不得复制常量。与大节表 [`block_time_slots`] 的分叉规则见 tauri 层契约 §17。
+/// `pub`：**课表全链路的内置默认小节表**（重设计轮批 A，tauri 层契约 §18）——
+/// 网格时间列、ICS 时刻展开、今日页节次课取值统一经 `effective_slots_at` 的
+/// 第三段回落用它；与大节表 [`block_time_slots`]（仅门户聚合兜底）的分工见
+/// tauri 层契约 §18。单点事实来源，调用方不得复制常量。
 pub fn section_time_slots() -> Vec<TimeSlot> {
     const RAW: [(u8, &str, &str); 11] = [
         (1, "08:00", "08:45"),
@@ -420,6 +423,66 @@ pub fn parse_info_list(body: &str) -> Result<InfoPage, PortalError> {
         total: jnum_u32(d, "total"),
         items,
     })
+}
+
+// ---------------- 调课通知自动发现（重设计轮批 A，tauri 层契约 §18） ----------------
+
+/// 调课通知标题关键词表。
+///
+/// ponytail: 固定词表（强 = 明确调课动词，弱 = 常见调整表述）；误报/漏报
+/// 反馈后再调，升级路径 = 可配置词表（用户自定义关键词）。
+pub(crate) const NOTICE_KEYWORDS_STRONG: &[&str] = &["调课", "停课", "补课"];
+pub(crate) const NOTICE_KEYWORDS_WEAK: &[&str] = &["教学调整", "课程调整", "上课时间", "课程变更"];
+
+/// 标题关键词命中（纯函数供离线单测）：强命中任一或弱命中 ≥1 → 返回命中的
+/// 关键词列表（强在前，供前端展示与后续排序）；无命中 → 空表。
+pub fn notice_keyword_hits(title: &str) -> Vec<&'static str> {
+    let mut hits: Vec<&'static str> = Vec::new();
+    let mut push_hits = |words: &'static [&'static str]| {
+        for w in words {
+            if title.contains(w) && !hits.contains(w) {
+                hits.push(w);
+            }
+        }
+    };
+    push_hits(NOTICE_KEYWORDS_STRONG);
+    push_hits(NOTICE_KEYWORDS_WEAK);
+    hits
+}
+
+/// 各栏目资讯页 → 调课通知简报（纯函数供离线单测）：逐条按 [`notice_keyword_hits`]
+/// 过滤标题（任一命中即纳入），按 `url` 去重（同一公告多栏目转载），按日期
+/// 倒序（`publish_time` 为 `"YYYY-MM-DD HH:MM:SS"`，字典序即时间序），上限
+/// 20 条。`columns` 与 `pages` 按序对应（client 层逐栏目拉取后 zip 传入）。
+pub fn collect_schedule_notices(
+    columns: &[(&str, &str)],
+    pages: &[InfoPage],
+    max_items: usize,
+) -> Vec<ScheduleNoticeBrief> {
+    let mut out: Vec<ScheduleNoticeBrief> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for ((_id, name), page) in columns.iter().zip(pages) {
+        for it in &page.items {
+            let hits = notice_keyword_hits(&it.title);
+            if hits.is_empty() || !seen.insert(it.url.as_str()) {
+                continue;
+            }
+            out.push(ScheduleNoticeBrief {
+                title: it.title.clone(),
+                date: it.publish_time.clone(),
+                url: it.url.clone(),
+                column: if it.column_title.is_empty() {
+                    (*name).to_string()
+                } else {
+                    it.column_title.clone()
+                },
+                matched_keywords: hits.into_iter().map(str::to_string).collect(),
+            });
+        }
+    }
+    out.sort_by(|a, b| b.date.cmp(&a.date));
+    out.truncate(max_items);
+    out
 }
 
 /// 解析 `api/uppflow/affairCenter/queryTabItems?isCount=1`（纯函数供离线单测）。
@@ -1210,6 +1273,72 @@ mod tests {
             .is_empty());
         assert!(parse_info_list(r#"{"meta":{"success":false}}"#).is_err());
         assert!(parse_info_list("not json").is_err());
+    }
+
+    // ---------- 调课通知自动发现（批 A：关键词检测 + 收集/去重/倒序/截断） ----------
+
+    #[test]
+    fn notice_keywords_strong_weak_and_miss() {
+        // 强命中
+        assert_eq!(notice_keyword_hits("关于第5周周一调课的通知"), vec!["调课"]);
+        assert_eq!(notice_keyword_hits("某课程停课通知"), vec!["停课"]);
+        // 弱命中（无强词也纳入）
+        assert_eq!(notice_keyword_hits("关于课程调整的说明"), vec!["课程调整"]);
+        // 强弱同时命中：强在前；多命中不重复
+        assert_eq!(
+            notice_keyword_hits("调课安排与课程调整说明"),
+            vec!["调课", "课程调整"]
+        );
+        assert_eq!(notice_keyword_hits("停课补课通知"), vec!["停课", "补课"]);
+        // 无命中
+        assert!(notice_keyword_hits("关于运动会场地安排的通知").is_empty());
+        assert!(notice_keyword_hits("").is_empty());
+    }
+
+    #[test]
+    fn collect_schedule_notices_filters_dedups_sorts_and_truncates() {
+        let mk_item = |id: &str, title: &str, time: &str, url: &str, col: &str| InfoItem {
+            id: id.into(),
+            title: title.into(),
+            column_title: col.into(),
+            publish_time: time.into(),
+            dept: None,
+            url: url.into(),
+        };
+        let page = |items: Vec<InfoItem>| InfoPage {
+            page: 1,
+            page_size: 50,
+            page_count: 0,
+            total: 0,
+            items,
+        };
+        let columns = [("9", "通知公告"), ("ea0a5b2158bf48b3afeb026477c626e4", "教务处")];
+        let pages = [
+            page(vec![
+                mk_item("1", "示例运动会通知", "2026-09-01 10:00:00", "u1", "通知公告"),
+                mk_item("2", "关于《信息安全》调课的通知", "2026-09-03 09:00:00", "u2", "通知公告"),
+                mk_item("3", "期中考试安排", "2026-09-05 08:00:00", "u3", "通知公告"),
+            ]),
+            page(vec![
+                mk_item("4", "某课程补课通知", "2026-09-02 14:00:00", "u4", "教务处"),
+                // 同 url 跨栏目转载 → 去重（后拉到的丢弃）
+                mk_item("5", "关于《信息安全》调课的通知（转载）", "2026-09-04 09:00:00", "u2", "教务处"),
+                // columnTitle 缺失 → 回落扫描常量名
+                mk_item("6", "课程调整说明", "2026-09-06 09:00:00", "u6", ""),
+            ]),
+        ];
+        let out = collect_schedule_notices(&columns, &pages, 20);
+        // 无命中 2 条被滤、u2 跨栏目转载去重（保留先出现的原条目）→ 3 条；按日期倒序
+        let dates: Vec<&str> = out.iter().map(|b| b.date.as_str()).collect();
+        assert_eq!(
+            dates,
+            ["2026-09-06 09:00:00", "2026-09-03 09:00:00", "2026-09-02 14:00:00"]
+        );
+        assert_eq!(out[0].column, "教务处", "columnTitle 空 → 回落扫描常量名");
+        assert_eq!(out[1].column, "通知公告", "转载去重保留先出现的原条目");
+        assert_eq!(out[2].matched_keywords, vec!["补课".to_string()]);
+        // 上限截断（倒序后取前 N）
+        assert_eq!(collect_schedule_notices(&columns, &pages, 2).len(), 2);
     }
 
     // ---------- parse_todo_tabs ----------

@@ -7,14 +7,16 @@
 
 use crate::article::{extract_article, is_allowed_info_url, is_auth_wall};
 use crate::parse::{
-    guess_image_mime, meeting_query_title, parse_app_groups, parse_app_items, parse_info_columns,
-    parse_info_list, parse_meeting_events, parse_schedule_classify, parse_schedule_day_counts,
-    parse_schedule_events, parse_semester_info, parse_todo_list, parse_todo_tabs,
-    parse_wallet_summary, parse_week_schedule, teaching_week_of,
+    collect_schedule_notices, guess_image_mime, meeting_query_title, parse_app_groups,
+    parse_app_items, parse_info_columns, parse_info_list, parse_meeting_events,
+    parse_schedule_classify, parse_schedule_day_counts, parse_schedule_events,
+    parse_semester_info, parse_todo_list, parse_todo_tabs, parse_wallet_summary,
+    parse_week_schedule, teaching_week_of,
 };
 use crate::{
     AppCatalog, AppItem, InfoColumn, InfoDetail, InfoPage, PortalError, ScheduleClassify,
-    ScheduleDayCount, ScheduleEvent, SemesterInfo, TodoPage, TodoTab, WalletSummary, WeekSchedule,
+    ScheduleDayCount, ScheduleEvent, ScheduleNoticeBrief, SemesterInfo, TodoPage, TodoTab,
+    WalletSummary, WeekSchedule,
 };
 use base64::Engine as _;
 use campus_auth::cas::{csrf_token, CasClient, PORTAL_PROBE};
@@ -69,6 +71,18 @@ const EP_DOCREPO: &str = "zuul/docrepo/download?attachmentId=";
 
 /// 图标代拉并发上限（内网 RTT 短，4 路足够；更高并发对网关不友好）。
 const ICON_CONCURRENCY: usize = 4;
+
+/// 调课通知扫描栏目（重设计轮批 A，tauri 层契约 §18）：id 取自实测全量栏目表
+/// [`crate::parse::KNOWN_COLUMNS`]——「通知公告」（校级综合公告，数字短 id）与
+/// 「教务处」（调课/停课通知的发布主体）。2 栏够覆盖主来源，扩栏只改本表。
+const NOTICE_SCAN_COLUMNS: &[(&str, &str)] = &[
+    ("9", "通知公告"),
+    ("ea0a5b2158bf48b3afeb026477c626e4", "教务处"),
+];
+/// 每栏目扫描条数（首页 ~50 条，覆盖近一两个月的公告量）。
+const NOTICE_SCAN_LIMIT: u32 = 50;
+/// 返回简报上限（按日期倒序截断）。
+const NOTICE_MAX_ITEMS: usize = 20;
 
 /// 栏目 id 只允许 ASCII 字母数字（服务端下发为数字或十六进制串；拼接进查询串
 /// 前校验，防异常输入破坏 URL 结构）。
@@ -330,6 +344,27 @@ impl PortalClient {
             "{EP_INFO_LIST}?pageNum={page}&pageSize={page_size}&columnIds={column_id}&columnType=&showNewDate=0"
         );
         parse_info_list(&self.get(&ep).await?)
+    }
+
+    /// 调课通知自动发现（重设计轮批 A，tauri 层契约 §18）：逐个扫描栏目
+    ///（[`NOTICE_SCAN_COLUMNS`]）拉首页 [`NOTICE_SCAN_LIMIT`] 条，标题按
+    /// [`crate::parse::notice_keyword_hits`] 检测（强词或 ≥1 弱词命中即纳入），
+    /// 过滤/去重/倒序/截断收敛在纯函数 [`collect_schedule_notices`]。
+    ///
+    /// **只发现不解析**：返回的简报交由前端展示，用户确认后才经
+    /// `parse_notice_from_url` 走候选确认流（不静默改数据）。
+    /// 任一栏目取数失败（未登录/网络）→ Err 上抛（`NotLogin` 文案「请先登录」，
+    /// 其余 `PortalError` Display 均为中文）。
+    pub async fn query_schedule_notices(&self) -> Result<Vec<ScheduleNoticeBrief>, PortalError> {
+        let mut pages = Vec::with_capacity(NOTICE_SCAN_COLUMNS.len());
+        for (id, _name) in NOTICE_SCAN_COLUMNS {
+            pages.push(self.query_info_list(id, 1, NOTICE_SCAN_LIMIT).await?);
+        }
+        Ok(collect_schedule_notices(
+            NOTICE_SCAN_COLUMNS,
+            &pages,
+            NOTICE_MAX_ITEMS,
+        ))
     }
 
     /// 待办分栏（接口实际返回 6 个 tab，全量透传；前端按契约展示三个）。

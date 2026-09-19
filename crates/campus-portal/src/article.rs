@@ -187,6 +187,65 @@ pub fn is_auth_wall(status_success: bool, final_url: &str, page_html: &str) -> b
         .unwrap_or(false)
 }
 
+/// 清洗后的 HTML 片段 → 纯文本（重设计轮批 A，tauri 层契约 §18：
+/// `parse_notice_from_url` 把公告正文喂给 `parse_notice_text` 前的剥标签步骤）。
+///
+/// 块级/换行标签（p/div/br/tr/li/h1-6/table 等）转 `\n`——通知解析的原文摘录
+/// 按行取（`excerpt_of`），丢换行会把整篇挤成一行；其余文本节点原样拼接，
+/// 实体已由 scraper 解码。连续空行折叠为单个换行。
+pub fn html_text(html: &str) -> String {
+    const NEWLINE_TAGS: &[&str] = &[
+        "p", "div", "br", "hr", "tr", "li", "dt", "dd", "h1", "h2", "h3", "h4", "h5", "h6",
+        "table", "thead", "tbody", "tfoot", "ul", "ol", "section", "article", "blockquote",
+        "pre", "center", "form",
+    ];
+    let doc = Html::parse_fragment(html);
+    let mut out = String::with_capacity(html.len() / 2);
+    // script/style 子树整段剔除（suppress 计数法与 render_subtree 同构）；输入虽
+    // 是清洗后 HTML，本函数作为纯函数仍需对未清洗输入健壮
+    let mut suppress = 0usize;
+    for edge in doc.root_element().traverse() {
+        match edge {
+            Edge::Open(node) => match node.value() {
+                Node::Element(el) => {
+                    let name = el.name();
+                    if matches!(name, "script" | "style") {
+                        suppress = 1;
+                    } else if suppress == 0 && NEWLINE_TAGS.contains(&name) {
+                        out.push('\n');
+                    }
+                }
+                Node::Text(t) if suppress == 0 => out.push_str(&t.text),
+                _ => {}
+            },
+            Edge::Close(node) => {
+                if let Node::Element(el) = node.value() {
+                    if matches!(el.name(), "script" | "style") && suppress > 0 {
+                        suppress = 0;
+                    }
+                }
+            }
+        }
+    }
+    // 空行折叠：非空行 trim 后保留；连续空行压成单个换行
+    let mut compact = String::with_capacity(out.len());
+    let mut prev_blank = false;
+    for line in out.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            if !prev_blank && !compact.is_empty() {
+                compact.push('\n');
+            }
+            prev_blank = true;
+        } else {
+            compact.push_str(t);
+            compact.push('\n');
+            prev_blank = false;
+        }
+    }
+    compact.trim().to_string()
+}
+
 /// 从官网静态页提取正文并清洗为安全 HTML 片段（纯函数，供离线单测）。
 ///
 /// 标题：`h2` 优先，`<title>` 兜底；正文容器：`div.v_news_content` 优先，
@@ -460,6 +519,29 @@ mod tests {
         assert!(extract_article(notitle, PAGE_URL).is_err());
         // page_url 非法
         assert!(extract_article(PAGE_FIXTURE, "::bad url::").is_err());
+    }
+
+    // ---------- html_text（批 A：公告正文剥标签喂解析器） ----------
+
+    #[test]
+    fn html_text_strips_tags_keeps_line_breaks_and_drops_script() {
+        let html = r#"<p>第5周周一3-4节</p><div>《信息安全》调整到 D4-305</div>"#;
+        let text = html_text(html);
+        assert!(text.contains("第5周周一3-4节"), "实际: {text}");
+        assert!(text.contains("《信息安全》调整到 D4-305"));
+        // 块级标签 → 换行（两段不同行，供 excerpt_of 按行取）
+        assert!(text.lines().count() >= 2);
+        // script/style 整棵剔除；<br> 换行；空行折叠
+        let dirty = r#"<p>正文A</p><script>alert('x')</script><style>.x{}</style><p>正文B<br>续行</p>"#;
+        let t2 = html_text(dirty);
+        assert!(t2.contains("正文A"));
+        assert!(t2.contains("正文B"));
+        assert!(t2.contains("续行"));
+        assert!(!t2.contains("alert"), "script 内容必须剔除：{t2}");
+        assert!(!t2.contains(".x{"), "style 内容必须剔除：{t2}");
+        // 空输入 → 空串
+        assert_eq!(html_text(""), "");
+        assert_eq!(html_text("<p></p>"), "");
     }
 
     // ---------- is_auth_wall（依据主智能体 2026-09-18 实机 curl 结论构造，脱敏） ----------

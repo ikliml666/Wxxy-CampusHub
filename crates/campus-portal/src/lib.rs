@@ -14,13 +14,14 @@ pub mod client;
 pub mod parse;
 
 pub use access::{classify_app_access, AppAccess};
-pub use article::{extract_article, is_allowed_info_url, is_auth_wall, is_http_url};
+pub use article::{extract_article, html_text, is_allowed_info_url, is_auth_wall, is_http_url};
 pub use client::PortalClient;
 pub use parse::{
-    block_time_slots, elapsed_slot_count, guess_image_mime, next_course, next_course_from_now,
-    parse_app_groups, parse_app_items, parse_info_columns, parse_info_list, parse_schedule_classify,
-    parse_schedule_day_counts, parse_schedule_events, parse_semester_info, parse_todo_list,
-    parse_todo_tabs, parse_wallet_summary, parse_week_schedule, section_time_slots, WeekSchedule,
+    block_time_slots, collect_schedule_notices, elapsed_slot_count, guess_image_mime,
+    next_course, next_course_from_now, notice_keyword_hits, parse_app_groups, parse_app_items,
+    parse_info_columns, parse_info_list, parse_schedule_classify, parse_schedule_day_counts,
+    parse_schedule_events, parse_semester_info, parse_todo_list, parse_todo_tabs,
+    parse_wallet_summary, parse_week_schedule, section_time_slots, WeekSchedule,
 };
 
 /// campus-portal 协议层错误。
@@ -116,6 +117,22 @@ pub struct InfoPage {
     pub page_count: u32,
     pub total: u32,
     pub items: Vec<InfoItem>,
+}
+
+/// 调课通知简报（重设计轮批 A，tauri 层契约 §18）：资讯栏目扫描按标题关键词
+/// 命中的候选通知，**只进候选确认流，不自动改数据**（解析结果由用户确认采纳）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleNoticeBrief {
+    pub title: String,
+    /// 发布时间 `"YYYY-MM-DD HH:MM:SS"`（列表原样透传；倒序排序键）。
+    pub date: String,
+    /// 官网正文页 URL（`parse_notice_from_url` 的入参，抓取时仍过域名白名单）。
+    pub url: String,
+    /// 所属栏目名（服务端 `columnTitle`，缺失回落扫描常量表名）。
+    pub column: String,
+    /// 标题命中的关键词（强词在前）。
+    pub matched_keywords: Vec<String>,
 }
 
 /// 资讯正文（计划 §2.1 `InfoDetail { title, html }` 的兼容扩展：正常返回

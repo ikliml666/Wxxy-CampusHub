@@ -3,12 +3,12 @@ import {
   CalendarRange,
   ChevronLeft,
   ChevronRight,
-  ClipboardPaste,
   Clock,
   Download,
   Pencil,
   Plus,
   RefreshCw,
+  Rss,
   Settings,
 } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
@@ -27,6 +27,7 @@ import type {
   JsonImportResult,
   MoveResult,
   NoticeCandidate,
+  ScheduleNoticeBrief,
   OverrideKind,
   SemesterConfigInput,
   SlotRule,
@@ -69,7 +70,12 @@ const KIND_LABEL: Record<OverrideKind, string> = {
   extra: "补课",
 };
 
-/** 单小节行高（px）；网格行数 = view.sectionSlots.length（契约 §17：内置 11 小节表）。 */
+/** 公告发现区强关键词着色表（批 B 契约 §19）：与
+ *  crates/campus-portal/src/parse.rs NOTICE_KEYWORDS_STRONG 互锚，命中判定
+ *  在后端，前端只用于 tag 着色（强 = 红、弱 = 灰），改词表两处同步。 */
+const NOTICE_STRONG_WORDS = new Set(["调课", "停课", "补课"]);
+
+/** 单小节行高（px）；网格行数 = view.slots.length（契约 §18：生效小节表，默认 11 行）。 */
 const ROW_H_S = 60;
 
 const DAY_NAMES = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -242,7 +248,7 @@ function buildWeekBlocks(
   week: number,
 ): { blocks: PlacedBlock[]; columns: PlacedBlock[][] } {
   const { courses, overrides } = view.timetable;
-  const sectionSlots = view.sectionSlots;
+  const sectionSlots = view.slots; // 契约 §18 小节化：生效作息即小节表
   const maxSection = sectionSlots.length || 11;
   /** 小节坐标合法域（契约 §17）：1 ≤ s ≤ e ≤ 11（越界块/超界 override 防御性跳过） */
   const inRange = (s: number, e: number) => s >= 1 && e >= s && e <= maxSection;
@@ -533,6 +539,34 @@ function CourseForm({
     setWeeksText(fmtWeeks(ws));
   };
 
+  // 弹窗化（批 B 契约 §19）：Esc / 遮罩关闭统一走 requestCancel 的 dirty confirm
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) requestCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [busy, requestCancel]);
+  // 打开自动聚焦课程名（批 B §19 引导性）：表单由 key 重挂，effect 只跑一次
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    nameRef.current?.focus();
+  }, []);
+
+  // 上下文徽标（批 B §19 引导性）：由 initial 推导打开来源（点空白格预填的
+  // 星期/小节/展示周），编辑态显示课名——让用户一眼知道在填哪个格子
+  const contextBadge = editing
+    ? `编辑：${initial.name ?? ""}`
+    : initial.day
+      ? [
+          DAY_NAMES[initial.day],
+          `第 ${initial.startSection ?? "?"}${initial.endSection != null && initial.endSection !== initial.startSection ? `-${initial.endSection}` : ""} 小节`,
+          initial.weeks?.length ? `第 ${fmtWeeks(initial.weeks)} 周` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : null;
+
   const submit = () => {
     const weeks = parseWeeksInput(weeksText);
     if (!name.trim()) return setLocalErr("课程名不能为空");
@@ -559,23 +593,42 @@ function CourseForm({
   const field = "grid gap-1.5";
   const label = "text-caption text-text-2";
 
+  // 居中模态弹层（批 B 契约 §19）：LoginDialog/SettingsEditor 同款遮罩模式，
+  // 不再挂在页面下方——点空白格后视野不离开网格
   return (
-    <Surface accent="sched" className="mt-4 px-4 py-4">
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-body font-semibold text-text">
-          {editing ? "编辑课程" : "手动添加课程"}
-        </p>
-        {editing && (
-          <p className="text-caption text-text-2">
-            导入课程的修改会在下次导入时被教务数据覆盖
-          </p>
-        )}
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <div className={field}>
-          <label className={label} htmlFor="tf-name">课程名 *</label>
-          <Input id="tf-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="如：信息安全" />
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) requestCancel();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-label={editing ? "编辑课程" : "手动添加课程"}
+        className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-card border border-line bg-surface p-4 shadow-pop"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-body font-semibold text-text">
+              {editing ? "编辑课程" : "手动添加课程"}
+            </p>
+            {contextBadge && (
+              <p className="mt-1 inline-flex rounded bg-sched/10 px-1.5 py-0.5 text-caption font-medium text-sched">
+                {contextBadge}
+              </p>
+            )}
+          </div>
+          {editing && (
+            <p className="shrink-0 text-caption text-text-2">
+              导入课程的修改会在下次导入时被教务数据覆盖
+            </p>
+          )}
         </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className={field}>
+            <label className={label} htmlFor="tf-name">课程名 *</label>
+            <Input id="tf-name" ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：信息安全" />
+          </div>
         <div className={field}>
           <label className={label} htmlFor="tf-teacher">教师</label>
           <Input id="tf-teacher" value={teacher} onChange={(e) => setTeacher(e.target.value)} />
@@ -757,7 +810,8 @@ function CourseForm({
           取消
         </Button>
       </div>
-    </Surface>
+      </div>
+    </div>
   );
 }
 
@@ -770,14 +824,15 @@ function addMinutes(hm: string, minutes: number): string {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-/** 编辑态作息行：大节号由保存时的行序生成（1..n，天然严格递增），不手填。 */
+/** 编辑态作息行：小节号由保存时的行序生成（1..n，天然严格递增），不手填。 */
 interface SlotRow {
   startTime: string;
   endTime: string;
   alias: string | null;
 }
 
-/** 作息行编辑器（主作息与每条日期规则复用；大节号 = 行序，保存时生成）。 */
+/** 作息行编辑器（主作息与每条日期规则复用；小节号 = 行序，保存时生成；批 B
+ *  契约 §19 小节口径文案——config.slots 即小节表，契约 §18）。 */
 function SlotRowsEditor({
   rows,
   onChange,
@@ -799,13 +854,13 @@ function SlotRowsEditor({
       {rows.map((r, i) => (
         <div key={i} className="flex items-center gap-2">
           <span className="tabular-num w-14 shrink-0 text-caption font-medium text-text-2">
-            第 {i + 1} 大节
+            第 {i + 1} 节
           </span>
           <input
             type="time"
             value={r.startTime}
             onChange={(e) => update(i, { startTime: e.target.value })}
-            aria-label={`第 ${i + 1} 大节开始时间`}
+            aria-label={`第 ${i + 1} 节开始时间`}
             disabled={disabled}
             className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
           />
@@ -814,7 +869,7 @@ function SlotRowsEditor({
             type="time"
             value={r.endTime}
             onChange={(e) => update(i, { endTime: e.target.value })}
-            aria-label={`第 ${i + 1} 大节结束时间`}
+            aria-label={`第 ${i + 1} 节结束时间`}
             disabled={disabled}
             className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
           />
@@ -824,14 +879,14 @@ function SlotRowsEditor({
             value={r.alias ?? ""}
             maxLength={5}
             placeholder="别名"
-            aria-label={`第 ${i + 1} 大节别名（选填）`}
+            aria-label={`第 ${i + 1} 节别名（选填）`}
             onChange={(e) => update(i, { alias: e.target.value || null })}
             disabled={disabled}
             className="h-9 w-20 shrink-0 rounded-control border border-line bg-surface px-2 text-caption text-text placeholder:text-text-2/60 disabled:opacity-50"
           />
           <button
             type="button"
-            aria-label={`删除第 ${i + 1} 大节`}
+            aria-label={`删除第 ${i + 1} 节`}
             disabled={disabled}
             onClick={() => onChange(rows.filter((_, j) => j !== i))}
             className="shrink-0 rounded px-1.5 text-caption text-alert hover:underline disabled:opacity-50"
@@ -850,7 +905,7 @@ function SlotRowsEditor({
         className="mt-2 flex items-center gap-1 text-caption text-sched hover:underline disabled:opacity-50"
       >
         <Plus aria-hidden="true" className="size-3.5" />
-        新增大节
+        新增一节
       </button>
     </>
   );
@@ -990,7 +1045,7 @@ function SlotsEditor({
           </span>
         </div>
         <p className="mt-1 text-caption text-text-2">
-          按行即大节（第 1 行 = 第 1 大节），课表网格与 ICS 导出都会按此展开。
+          按节（第 1 行 = 第 1 节）编辑，课表网格与 ICS 导出都会按此展开。
         </p>
 
         <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
@@ -1075,7 +1130,7 @@ function SlotsEditor({
         )}
 
         <div className="mt-3 flex items-center gap-2 border-t border-line pt-3">
-          <Button variant="ghost" size="sm" disabled={busy || !usingCustom} onClick={onReset} title={usingCustom ? "清空自定义作息，恢复内置校本大节表" : "当前已是内置默认"}>
+          <Button variant="ghost" size="sm" disabled={busy || !usingCustom} onClick={onReset} title={usingCustom ? "清空自定义作息，恢复内置校本 11 节表" : "当前已是内置默认"}>
             恢复本校默认
           </Button>
           <span className="flex-1" />
@@ -1144,10 +1199,11 @@ function SettingsEditor({
   const [skipped, setSkipped] = useState<string[]>(initialSkippedDates);
   const [skipInput, setSkipInput] = useState("");
   const [skipLocalErr, setSkipLocalErr] = useState<string | null>(null);
-  // 批量调整（批 8 契约 §14.3）：搬迁两日期 + 快删周次×星期多选
+  // 批量调整（批 8 契约 §14.3 → 批 B §19 排版修订）：搬迁两日期 +
+  // 快删周次改文本输入（parseWeeksInput）+ 星期紧凑 chips
   const [moveFrom, setMoveFrom] = useState("");
   const [moveTo, setMoveTo] = useState("");
-  const [delWeeks, setDelWeeks] = useState<number[]>([]);
+  const [delWeeksText, setDelWeeksText] = useState("");
   const [delDays, setDelDays] = useState<number[]>([]);
   const [bulkLocalErr, setBulkLocalErr] = useState<string | null>(null);
 
@@ -1173,6 +1229,9 @@ function SettingsEditor({
   const toggleIn = (list: number[], v: number) =>
     list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
 
+  // 快删周次（批 B §19）：文本输入解析（"1-8,10"），非空但格式非法时 doQuickDelete 内报错
+  const delWeeks = parseWeeksInput(delWeeksText) ?? [];
+
   /** 快删预览：受影响课程数 = day 命中且 weeks 与选中周有交集（与后端口径一致） */
   const affectedPreview = courses.filter(
     (c) => delDays.includes(c.day) && c.weeks.some((w) => delWeeks.includes(w)),
@@ -1192,8 +1251,10 @@ function SettingsEditor({
   };
 
   const doQuickDelete = () => {
-    if (delWeeks.length === 0 || delDays.length === 0)
-      return setBulkLocalErr("请先选择要删除的周次与星期");
+    if (!delWeeksText.trim())
+      return setBulkLocalErr("请先填写要删除的周次（如 1-8,10）并选择星期");
+    if (delWeeks.length === 0) return setBulkLocalErr("周次格式无法识别，示例：1-8,10");
+    if (delDays.length === 0) return setBulkLocalErr("请选择要删除的星期");
     if (
       !window.confirm(
         `将从选中周次×星期的组合中移除 ${affectedPreview} 门课程（周次删空的课程将整条删除）。确认执行？`,
@@ -1203,14 +1264,6 @@ function SettingsEditor({
     setBulkLocalErr(null);
     onQuickDelete(delWeeks, delDays);
   };
-
-  const chip = (selected: boolean) =>
-    cn(
-      "tabular-num size-7 rounded-full text-caption leading-none",
-      selected
-        ? "bg-sched font-medium text-white hover:bg-sched"
-        : "border border-line text-text-2 hover:bg-sched/10",
-    );
 
   const submit = () => {
     // 契约 §17：开学日/总周数随教务导入自动维护——保存设置时原样回传当前值、
@@ -1357,7 +1410,7 @@ function SettingsEditor({
                 disabled={skippedBusy}
                 onClick={() => onSaveSkippedDates(skipped)}
               >
-                {skippedBusy ? "保存中…" : "保存跳过日期"}
+                {skippedBusy ? "保存中…" : "保存"}
               </Button>
               {(skipLocalErr ?? skippedError) && (
                 <p className="text-caption text-alert" role="alert">
@@ -1367,12 +1420,10 @@ function SettingsEditor({
             </div>
           </div>
 
-          {/* 批量调整区块（批 8 契约 §14.3）：搬迁走 override 整批可撤销；快删按周次×星期 */}
+          {/* 批量调整区块（批 8 契约 §14.3；批 B §19 排版修订——周次改文本输入）：
+              搬迁走 override 整批可撤销；快删按周次×星期 */}
           <div className={cn(field, "border-t border-line pt-3")}>
             <span className={label}>批量调整</span>
-            <p className="text-caption text-text-2">
-              调课搬迁：把某一天的全部课程整批移动到另一天（原位置留「已调出」痕迹，可整批撤销）。
-            </p>
             <div className="flex items-center gap-2">
               <input
                 type="date"
@@ -1398,34 +1449,35 @@ function SettingsEditor({
               </Button>
             </div>
             <p className="text-caption text-text-2">
-              快速删除：移除选中周次 × 星期的课程；周次被删空的课程整条删除（含其调整记录）。
+              搬迁把某一天全部课程整批移到另一天（可整批撤销）；快速删除移除选中周次×星期的课程，周次删空的整条删除。
             </p>
-            <div className="flex flex-wrap gap-1" role="group" aria-label="选择要删除的周次">
-              {Array.from({ length: initial.semesterTotalWeeks }, (_, i) => i + 1).map((w) => (
-                <button
-                  key={w}
-                  type="button"
-                  aria-pressed={delWeeks.includes(w)}
-                  aria-label={`第 ${w} 周`}
-                  disabled={bulkBusy}
-                  onClick={() => setDelWeeks((ws) => toggleIn(ws, w))}
-                  className={chip(delWeeks.includes(w))}
-                >
-                  {w}
-                </button>
-              ))}
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="要删除的周次"
+                value={delWeeksText}
+                onChange={(e) => setDelWeeksText(e.target.value)}
+                disabled={bulkBusy}
+                placeholder="周次，如 1-8,10"
+                className="tabular-num flex-1"
+              />
             </div>
             <div className="flex flex-wrap gap-1" role="group" aria-label="选择要删除的星期">
               {DAY_OPTIONS.map((name, i) => {
                 const d = i + 1;
+                const on = delDays.includes(d);
                 return (
                   <button
                     key={d}
                     type="button"
-                    aria-pressed={delDays.includes(d)}
+                    aria-pressed={on}
                     disabled={bulkBusy}
                     onClick={() => setDelDays((ds) => toggleIn(ds, d))}
-                    className={chip(delDays.includes(d))}
+                    className={cn(
+                      "h-7 rounded-control px-2 text-caption leading-none",
+                      on
+                        ? "bg-sched font-medium text-white hover:bg-sched"
+                        : "border border-line text-text-2 hover:bg-sched/10",
+                    )}
                   >
                     {name}
                   </button>
@@ -1517,8 +1569,11 @@ export function TimetablePanel() {
   /** 导入 / 导出聚合弹层（契约 §17）：顶栏单入口，ICS/JSON 导出与 JSON 导入收拢 */
   const [ioOpen, setIoOpen] = useState(false);
 
-  const [noticeText, setNoticeText] = useState("");
-  const [parsing, setParsing] = useState(false);
+  /** 公告发现（批 B 契约 §19）：null = 尚未检查过；noticeMsg/candidates 与
+   *  候选确认流共用（粘贴解析卡片已删，后端 parse_notice 命令保留） */
+  const [scanning, setScanning] = useState(false);
+  const [noticeBriefs, setNoticeBriefs] = useState<ScheduleNoticeBrief[] | null>(null);
+  const [parsingUrl, setParsingUrl] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<NoticeCandidate[] | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -1585,8 +1640,8 @@ export function TimetablePanel() {
 
   const ready = view.phase === "ready" ? view.data : null;
   const tt = ready?.timetable ?? null;
-  /** 内置 11 小节表（契约 §17）：时间列与网格小节坐标唯一事实源（恒定下发） */
-  const sectionSlots = ready?.sectionSlots ?? [];
+  /** 生效小节作息表（契约 §18 小节化）：时间列与网格小节坐标唯一事实源 */
+  const sectionSlots = ready?.slots ?? [];
   const currentWeek = ready?.currentWeek ?? null;
   /** 顶栏标题态（批 7 契约 §13.1）：后端按 weeks.rs 对齐式口径判定 */
   const weekState = ready?.weekState ?? "unset";
@@ -1940,15 +1995,33 @@ export function TimetablePanel() {
     }
   };
 
-  const parseNotice = async () => {
-    if (!noticeText.trim()) return;
-    setParsing(true);
+  /** 扫描公告（批 B 契约 §19）：只发现不解析——结果列表供用户逐条点「解析」；
+   *  需登录（未登录/网络错误透传后端中文 message）。 */
+  const scanNotices = async () => {
+    setScanning(true);
     setNoticeMsg(null);
-    const r = await invokeCommand<NoticeCandidate[]>("parse_notice", { text: noticeText });
-    setParsing(false);
+    const r = await invokeCommand<ScheduleNoticeBrief[]>("list_schedule_notices");
+    setScanning(false);
     if (r.success && r.data) {
-      setCandidates(r.data);
-      if (r.data.length === 0) setNoticeMsg({ ok: false, text: "未从该文本中识别出调课/停课/补课信息" });
+      setNoticeBriefs(r.data);
+    } else {
+      setNoticeMsg({ ok: false, text: r.message ?? "公告扫描失败" });
+    }
+  };
+
+  /** 解析单条公告正文（批 B 契约 §19）：结果喂给现有候选确认流（不自动 apply）；
+    空候选 / needsBrowser / 空正文等失败均以 noticeMsg 呈现后端中文 message。 */
+  const parseNoticeUrl = async (n: ScheduleNoticeBrief) => {
+    setParsingUrl(n.url);
+    setNoticeMsg(null);
+    const r = await invokeCommand<NoticeCandidate[]>("parse_notice_from_url", { url: n.url });
+    setParsingUrl(null);
+    if (r.success && r.data) {
+      if (r.data.length === 0) {
+        setNoticeMsg({ ok: false, text: `未从《${n.title}》中识别出调课/停课/补课信息` });
+      } else {
+        setCandidates(r.data);
+      }
     } else {
       setNoticeMsg({ ok: false, text: r.message ?? "解析失败" });
     }
@@ -2258,6 +2331,12 @@ export function TimetablePanel() {
         <ChevronRight aria-hidden="true" />
       </Button>
       <span aria-hidden className="mx-1 h-5 w-px bg-line" />
+      {/* 添加课程主入口（批 B 契约 §19）：「全部课程」列表删除后顶栏是唯一手动
+          添加入口，预填当前展示周；编辑/删除入口在网格块详情浮层 */}
+      <Button variant="outline" size="sm" onClick={() => openForm({ weeks: [week] }, null)}>
+        <Plus aria-hidden="true" className="size-3.5" />
+        添加课程
+      </Button>
       <Button variant="outline" size="sm" disabled={importing} onClick={doImport}>
         <RefreshCw aria-hidden="true" className={cn("size-3.5", importing && "animate-spin")} />
         {importing ? "同步中…" : "导入 / 同步"}
@@ -2332,7 +2411,7 @@ export function TimetablePanel() {
             icon={CalendarRange}
             domain="sched"
             title="还没有课表"
-            hint="登录教务后一键导入本学期课表；也可以先手动添加课程。"
+            hint="没有课程？点击顶栏「添加课程」手动建课，或「导入 / 同步」从教务拉取。"
             action={
               <>
                 <Button disabled={importing} onClick={doImport}>
@@ -2721,6 +2800,16 @@ export function TimetablePanel() {
                         <Pencil aria-hidden="true" className="size-3.5" />
                         编辑
                       </Button>
+                      {/* 删除入口（批 B §19）：「全部课程」列表删除后移到这里，带确认 */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-alert hover:text-alert"
+                        disabled={busyKey === `del-${c.id}`}
+                        onClick={() => removeCourse(c)}
+                      >
+                        删除
+                      </Button>
                     </div>
                   </>
                 );
@@ -2789,28 +2878,29 @@ export function TimetablePanel() {
             />
           )}
 
-          {/* 调课通知区（有课程才显示） */}
+          {/* 调整来源 · 公告发现区（批 B 契约 §19，有课程才显示）：粘贴解析卡片退役，
+              流程 = 检查公告 → 简报列表 → 逐条解析 → 候选确认流（不自动 apply） */}
           {tt.courses.length > 0 && (
             <Surface className="mt-4 px-4 py-4">
-              <div className="flex items-center gap-2">
-                <ClipboardPaste aria-hidden="true" className="size-4 text-sched" />
-                <p className="text-body font-semibold text-text">调课 / 停课 / 补课通知</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Rss aria-hidden="true" className="size-4 text-sched" />
+                <p className="text-body font-semibold text-text">调整来源 · 公告发现</p>
+                <span className="ml-auto">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={scanning}
+                    onClick={() => void scanNotices()}
+                  >
+                    <RefreshCw aria-hidden="true" className={cn("size-3.5", scanning && "animate-spin")} />
+                    {scanning ? "扫描中…" : noticeBriefs === null ? "检查公告调整" : "重新检查"}
+                  </Button>
+                </span>
               </div>
               <p className="mt-1 text-caption text-text-2">
-                粘贴教务处或学院通知原文，自动提取调课信息；要素不全的会列出原因待你确认。
+                自动扫描「通知公告」与「教务处」栏目，发现调课/停课/补课通知；解析结果确认后才会生效。
               </p>
-              <div className="mt-2.5 flex items-start gap-2">
-                <textarea
-                  value={noticeText}
-                  onChange={(e) => setNoticeText(e.target.value)}
-                  rows={3}
-                  placeholder="粘贴通知文本，例如：第5周周四3-4节 信息安全 调整到 D4-305"
-                  className="min-h-[72px] flex-1 rounded-control border border-line bg-surface px-3 py-2 text-body text-text placeholder:text-text-2/60"
-                />
-                <Button disabled={parsing || !noticeText.trim()} onClick={parseNotice}>
-                  {parsing ? "解析中…" : "解析"}
-                </Button>
-              </div>
+
               {noticeMsg && (
                 <p
                   className={cn("mt-2 text-caption", noticeMsg.ok ? "text-sched" : "text-alert")}
@@ -2818,6 +2908,56 @@ export function TimetablePanel() {
                 >
                   {noticeMsg.text}
                 </p>
+              )}
+
+              {noticeBriefs !== null && noticeBriefs.length === 0 && (
+                <p className="mt-2 text-caption text-text-2">近期公告中未发现调课类通知。</p>
+              )}
+              {noticeBriefs !== null && noticeBriefs.length > 0 && (
+                <ul className="mt-2.5 space-y-1.5">
+                  {noticeBriefs.map((n) => (
+                    <li
+                      key={n.url}
+                      className="rounded-inner border border-line bg-surface-2 px-3 py-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <p
+                          className="min-w-0 flex-1 basis-48 truncate text-body text-text"
+                          title={n.title}
+                        >
+                          {n.title}
+                        </p>
+                        <span className="tabular-num shrink-0 text-caption text-text-2">
+                          {n.date.slice(0, 10)}
+                        </span>
+                        <span className="shrink-0 rounded bg-line px-1.5 py-0.5 text-caption text-text-2">
+                          {n.column}
+                        </span>
+                        {n.matchedKeywords.map((k) => (
+                          <span
+                            key={k}
+                            className={cn(
+                              "shrink-0 rounded px-1.5 py-0.5 text-caption",
+                              NOTICE_STRONG_WORDS.has(k)
+                                ? "bg-alert/10 font-medium text-alert"
+                                : "bg-line text-text-2",
+                            )}
+                          >
+                            {k}
+                          </span>
+                        ))}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={parsingUrl === n.url || scanning}
+                          onClick={() => void parseNoticeUrl(n)}
+                        >
+                          {parsingUrl === n.url ? "解析中…" : "解析"}
+                        </Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
               )}
 
               {/* 候选列表：高置信可自动应用，低置信显示 reason */}
@@ -2906,60 +3046,6 @@ export function TimetablePanel() {
             </Surface>
           )}
 
-          {/* 全部课程列表（停开灰显；编辑/删除入口） */}
-          <div className="mt-6 mb-4 flex items-center justify-between">
-            <p className="text-body font-semibold text-text">
-              全部课程 · {tt.courses.length} 门
-            </p>
-            <Button variant="outline" size="sm" onClick={() => openForm({}, null)}>
-              <Plus aria-hidden="true" className="size-3.5" />
-              手动添加
-            </Button>
-          </div>
-          <ul className="space-y-2">
-            {[...tt.courses]
-              .sort((a, b) => a.day - b.day || (a.startSection ?? 0) - (b.startSection ?? 0))
-              .map((c) => (
-                <li key={c.id}>
-                  <Surface className={cn("flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5", c.disabled && "opacity-55")}>
-                    <span
-                      aria-hidden
-                      className="size-2.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: courseColor(c, customColors) }}
-                    />
-                    <p className="min-w-0 truncate text-body font-medium text-text">{c.name}</p>
-                    {c.disabled && (
-                      <span className="shrink-0 rounded bg-line px-1 text-caption text-text-2">已停开</span>
-                    )}
-                    <span className="tabular-num min-w-0 truncate text-caption text-text-2">
-                      {DAY_NAMES[c.day]} {courseTimeLabel(c)} · 第 {fmtWeeks(c.weeks)} 周
-                      {c.position && ` · ${c.position}`}
-                      {c.teacher && ` · ${c.teacher}`}
-                    </span>
-                    <span className="ml-auto flex shrink-0 items-center gap-2">
-                      <span className="rounded bg-line px-1 text-caption text-text-2">
-                        {c.source === "import" ? "导入" : "手动"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => openForm({ ...c }, c)}
-                        className="text-caption text-text-2 hover:text-text"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyKey === `del-${c.id}`}
-                        onClick={() => removeCourse(c)}
-                        className="text-caption text-alert hover:underline disabled:opacity-50"
-                      >
-                        删除
-                      </button>
-                    </span>
-                  </Surface>
-                </li>
-              ))}
-          </ul>
         </>
       ) : null}
 

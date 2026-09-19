@@ -325,14 +325,12 @@ export interface TimeSlot {
 /** 顶栏标题态（2026-09-19 批 7 契约 §13.1）：后端按 weeks.rs 对齐式周次口径判定。 */
 export type WeekState = "unset" | "before" | "vacation" | "normal";
 
-/** get_timetable → data（批次 4 修订契约 §2.3 + 修复轮 §17）。 */
+/** get_timetable → data（批次 4 修订契约 §2.3 + 重设计轮批 A 契约 §18 小节化）。 */
 export interface TimetableView {
   timetable: Timetable;
-  /** 生效作息（自定义优先、回落内置校本大节表）；作息编辑器的唯一事实源（大节口径） */
+  /** 生效作息（小节口径，重设计轮批 A §18）：slot_rules 命中 → config.slots →
+   *  内置 11 小节表；时间列与小节网格坐标的唯一事实源（sectionSlots 字段已删） */
   slots: TimeSlot[];
-  /** 内置 11 小节作息表（修复轮契约 §17）：恒定下发、不随 config.slots 变化；
-   *  时间列与小节网格坐标用 */
-  sectionSlots: TimeSlot[];
   /** 当前教学周；null = 未设置开学日或今天不在学期内 */
   currentWeek: number | null;
   /** 顶栏标题态（批 7 §13.1）：细分 currentWeek 为 null 的原因 */
@@ -410,6 +408,20 @@ export interface SemesterConfigInput {
   currentWeekHint?: number | null;
   /** 非本周课程降级显示（批 7 §13.2）：缺省 = 保留旧值（容忍旧调用方） */
   showNonCurrentWeek?: boolean | null;
+}
+
+/** 公告简报（list_schedule_notices → data，重设计轮批 B 契约 §19；镜像
+ *  crates/campus-portal/src/lib.rs::ScheduleNoticeBrief 的 camelCase 序列化）。 */
+export interface ScheduleNoticeBrief {
+  title: string;
+  /** "YYYY-MM-DD HH:MM:SS"（列表原样透传，倒序排序键） */
+  date: string;
+  /** 官网正文页 URL（parse_notice_from_url 的入参） */
+  url: string;
+  /** 所属栏目名（服务端 columnTitle，缺失回落扫描常量表名） */
+  column: string;
+  /** 标题命中的关键词（强词在前；展示着色用，命中判定在后端） */
+  matchedKeywords: string[];
 }
 
 /** 调课通知候选（parse_notice → data，不入库）。
