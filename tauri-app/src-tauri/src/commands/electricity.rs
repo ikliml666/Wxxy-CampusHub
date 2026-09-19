@@ -1,9 +1,29 @@
-//! 电费命令面（M3 批 3）：片区目录 / 级联查询 / 常用房间（本地存）/ 内嵌充值页。
+//! 电费命令面（M3 批 3 + M3.1 批 C）：片区目录 / 级联查询 / 常用房间（本地存）/ 去官网充值（系统浏览器）
+//! / **充值六条**（建单 → 支付方式 → 账户与安全键盘 → 提交 → 状态 → 取消）。
 //!
 //! # 取数口径
 //!
 //! 目录与级联全部来自 `campus_synjones::charge`（协议事实见该模块头注，含两条 live 实测关键结论：
-//! 「末级是输入级，服务端不下发下拉」「`showData` 键名恒为 `信息`，值是各片区格式不同的自由文本」）。
+//! 「末级是输入级，服务端不下发下拉」「`showData` 键名恒为 `信息`，值是各片区格式不同的自由文本」）；
+//! 充值协议全部来自 `campus_synjones::recharge`（模块头注含 live 实测的 paystep/错误文案/取消订单等事实）。
+//!
+//! # 充值红线（M3.1 计划 §2 的 Global Constraints，逐条落在这里）
+//!
+//! 1. **密码**：`recharge_query_account` 把服务端下发的安全键盘（`pad.keys`，**只用于渲染**）交给前端；
+//!    提交走 `recharge_submit` 的 `password_seq`（**用户点击的键位下标序列**）。本模块**绝不**把 `keys`
+//!    还原成密码、**绝不**落盘/打日志/回填输入框，两个字段都只在一次调用内存在（不写任何 storage）。
+//! 2. **金额语义不碰**：`tranamt` 原样透传（crate 只校验「非空且为正数」），下限/上限只由前端提示。
+//! 3. **副作用不重试**：`recharge_create` / `recharge_submit` / `recharge_cancel` 各只发一次
+//!    （crate 层仅在服务端明确拒绝 401 时静默重进一次），结果一律以 `recharge_status` 兜底判定。
+//! 4. **轮询上限**在前端（2s × 15 次）；本模块只提供单次查询。
+//! 5. **跳转分支不实现**：响应命中 `webUrl`/`paysubmit`/`paymentcashierStr`/`qrCodeUrl` 时 crate 直接报错，
+//!    本模块只把文案转给用户。
+//! 6. **清理**：失败/放弃时前端调 `recharge_cancel`（crate 实测该端点**必须 JSON body**）。
+//!    ⚠️ 实测学校侧没有可用的「遗留未支付订单列表」接口（`/charge/order/personal_data?status=0` 恒
+//!    `code=500`，见 `tests/recharge_live.rs::recharge_diag_live`），故无法在进入流程前预检遗留单。
+//! 7. **`third_party` 由后端合成**：`recharge_create` 收「房间路径」而不是上下文串——crate 内部按路径
+//!    重放一次 `getThirdData` 取末级 `map.data`（含户号 PII）拼串后随建单发出，PII 全程不出后端，
+//!    前端也无从伪造房间上下文（见 `recharge::third_party_for_room`）。
 //!
 //! # token 单活 → 沿用批 2 的全局唯一客户端
 //!
@@ -22,31 +42,28 @@
 //!
 //! # 敏感纪律
 //!
-//! token **只在 Rust 内存**直接拼进 webview 初始化脚本与落点 URL（不经前端 JS API、不进日志、
-//! 不进错误文案）；`showData` 之外的 `map.data` 含户号（PII），crate 层已不透出。
+//! token **只在 Rust 内存**使用（不经前端 JS API、不进日志、不进错误文案）；浏览器兜底 URL 只含
+//! 片区 id、不带 token；`showData` 之外的 `map.data` 含户号（PII），crate 层已不透出。
 
 use super::auth::{session_client, CommandResult};
 use super::synjones::{err_text, synjones_session};
 use crate::infra::state::{self, AppState};
 use campus_auth::cas::CasClient;
 use campus_synjones::charge::{self, ElectricityQuery, FeeItem, RoomStep};
-use campus_synjones::{CampusSynjonesError, BERSERKER_BASE, SYN_ACCESS_SOURCE};
+use campus_synjones::recharge::{self, PayMethod, PasswordPad, RechargeOrder};
+use campus_synjones::{CampusSynjonesError, BERSERKER_BASE};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
 /// 无会话时的约定文案（与 portal.rs / profile.rs / synjones.rs 同口径）。
 const ERR_NO_SESSION: &str = "请先登录";
 /// 常用房间数量上限（防无界增长；超出时给可操作文案）。
 const MAX_SAVED_ROOMS: usize = 20;
-/// 充值窗口标题（用户要求：窗口标题用客户端品牌）。
-const RECHARGE_TITLE: &str = "电费充值 · 锡院助手";
-/// 充值窗口尺寸（用户要求：约 1000×760）。
-const RECHARGE_SIZE: (f64, f64) = (1000.0, 760.0);
-/// 充值页面路径前缀（官方 SPA；批 1 实测该路径是带 token 的合法落点）。
+/// 官方充值页路径前缀（官方 SPA；`/charge-pc/pays/<feeitemid>` 是批 1 实测的合法落点）。
 const RECHARGE_PATH_PREFIX: &str = "/charge-pc/pays/";
 
 // ---------------- 常用房间（本地存） ----------------
@@ -260,341 +277,10 @@ pub async fn delete_electricity_room(id: String) -> Result<CommandResult<Vec<Sav
     }
 }
 
-// ---------------- 内嵌充值页（计划 §2.6） ----------------
+// ---------------- 去官网充值（系统浏览器） ----------------
 
-/// 窗口 label：只留 ASCII 字母数字（Tauri label 限制）+ 长度截断。
-fn window_label(feeitem_id: &str, room: Option<&SavedRoom>) -> String {
-    let safe = |s: &str| -> String {
-        s.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .take(24)
-            .collect()
-    };
-    match room {
-        Some(r) => {
-            let room_id = safe(&r.id);
-            if room_id.is_empty() {
-                // 前端可能只带路径、不带 id（房间参数仅用于窗口标识）→ 退回「每片区一窗」
-                format!("recharge-{}", safe(feeitem_id))
-            } else {
-                format!("recharge-{}-{room_id}", safe(feeitem_id))
-            }
-        }
-        None => format!("recharge-{}", safe(feeitem_id)),
-    }
-}
-
-/// 内嵌充值页的 4030 处置脚本：**在官方页面脚本之前**接管 fetch/XHR，把 `synAccessSource` 的
-/// `pc` 值改写为 [`SYN_ACCESS_SOURCE`]（`app`）。
-///
-/// # 为什么需要它（2026-09-19 实测确证）
-///
-/// 学校慧新E校服务端按请求参数 `synAccessSource` 做**来源授权**：`pc` 来源被拒、`app` 来源放行，
-/// 拒绝形态是 HTTP 401 + `body.code == 4030`。官方 `charge-pc` 页自己部分请求**硬编码**
-/// `synAccessSource=pc`（不读我们注入的 `agentType`），于是内嵌窗弹出「提示 服务大厅未授权(1)」，
-/// 充值流程被挡。宿主侧无法约束官方页的请求体，只能在页面侧把这些请求的来源参数改写掉。
-///
-/// # 覆盖范围（三种携带位置，且**只**改这一个参数）
-///
-/// 1. URL query —— `fetch(url)` / `XHR.open(method, url)`
-/// 2. 请求头 —— `fetch` 的 `init.headers`（`Headers` / 键值对数组 / 普通对象）、`Request` 实例的
-///    `headers`、`XHR.setRequestHeader`（键名大小写不敏感）
-/// 3. 请求体 —— `XHR.send(body)` / `fetch` 的 `init.body`，覆盖 urlencoded 字符串、
-///    `URLSearchParams`、`FormData`
-///
-/// 思路直接借鉴用户自写的油猴脚本 `xll-apk-analysis/fix-4030.user.js`（同目的：hook fetch/XHR
-/// 改写来源参数），此处补齐请求头与请求体两条路径，并**内联为常量**（不引用外部文件、不新增依赖）。
-///
-/// # 纪律
-///
-/// - 幂等：`window.__campushub4030Hook` 只装一次；改写只匹配 `synAccessSource=pc`，重复执行结果不变。
-/// - 绝不碰其它内容（token 头等），也**不新增**该参数——官方没带的请求保持原样。
-/// - 全程 `try/catch`：hook 的任何异常都不许影响后续 token/configs 注入与官方页面本身。
-///
-/// **这是为绕开学校服务端 PC 来源授权缺陷（4030）而做的参数改写，属已知的临时措施；
-/// 学校若修复 PC 授权即可整段移除（连同 [`init_script`] 里对本常量的拼接）。**
-///
-/// `__SYN_ACCESS_SOURCE__` 占位符由 [`init_script`] 替换为 [`SYN_ACCESS_SOURCE`]。
-const RECHARGE_4030_HOOK: &str = r#"(function () {
-  'use strict';
-  try {
-    if (window.__campushub4030Hook) return;
-    window.__campushub4030Hook = true;
-    var SOURCE = '__SYN_ACCESS_SOURCE__';
-    var isSourceKey = function (name) {
-      return typeof name === 'string' && name.toLowerCase() === 'synaccesssource';
-    };
-    var isPc = function (value) { return typeof value === 'string' && /^pc$/i.test(value); };
-
-    /* 位置一：URL query（fetch(url) / XHR.open(method, url)）。只改 synAccessSource 的值。 */
-    var fixUrl = function (url) {
-      try {
-        if (typeof url !== 'string' || url.indexOf('synAccessSource') === -1) return url;
-        return url.replace(/(^|[?&])synAccessSource=pc(?![0-9A-Za-z_])/gi, '$1synAccessSource=' + SOURCE);
-      } catch (e) { return url; }
-    };
-
-    /* 位置二：请求头。键名大小写不敏感，值只有 pc 才改。 */
-    var fixHeaders = function (headers) {
-      try {
-        if (!headers) return headers;
-        if (typeof Headers !== 'undefined' && headers instanceof Headers) {
-          if (!isPc(headers.get('synAccessSource'))) return headers;
-          try {
-            headers.set('synAccessSource', SOURCE);
-            return headers;
-          } catch (e) {
-            var cloned = new Headers(headers);
-            cloned.set('synAccessSource', SOURCE);
-            return cloned;
-          }
-        }
-        if (Array.isArray(headers)) {
-          return headers.map(function (pair) {
-            if (pair && isSourceKey(pair[0]) && isPc(pair[1])) return [pair[0], SOURCE];
-            return pair;
-          });
-        }
-        if (typeof headers === 'object') {
-          var out = {};
-          var hit = false;
-          Object.keys(headers).forEach(function (key) {
-            if (isSourceKey(key) && isPc(headers[key])) { out[key] = SOURCE; hit = true; }
-            else { out[key] = headers[key]; }
-          });
-          return hit ? out : headers;
-        }
-      } catch (e) {}
-      return headers;
-    };
-
-    /* 位置三：请求体。覆盖 urlencoded 字符串 / URLSearchParams / FormData。 */
-    var fixBody = function (body) {
-      try {
-        if (typeof body === 'string') {
-          if (body.indexOf('synAccessSource') === -1) return body;
-          return body.replace(/(^|&)synAccessSource=pc(?![0-9A-Za-z_])/gi, '$1synAccessSource=' + SOURCE);
-        }
-        if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
-          if (isPc(body.get('synAccessSource'))) body.set('synAccessSource', SOURCE);
-          return body;
-        }
-        if (typeof FormData !== 'undefined' && body instanceof FormData) {
-          if (isPc(body.get('synAccessSource'))) body.set('synAccessSource', SOURCE);
-          return body;
-        }
-      } catch (e) {}
-      return body;
-    };
-
-    /* Request 实例：URL 须改写时重建（body 走 duplex 半双工透传）；失败退回原对象，绝不阻断请求。 */
-    var rebuildRequest = function (req, url) {
-      try {
-        var opt = { method: req.method, headers: new Headers(req.headers) };
-        ['mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy',
-          'integrity', 'keepalive', 'signal'].forEach(function (key) {
-          try { if (req[key] != null) opt[key] = req[key]; } catch (e) {}
-        });
-        if (req.body) { opt.body = req.body; opt.duplex = 'half'; }
-        return new Request(url, opt);
-      } catch (e) { return null; }
-    };
-
-    /* 官方页 axios 走 XHR —— 主路径。 */
-    var xhrOpen = XMLHttpRequest.prototype.open;
-    var xhrSend = XMLHttpRequest.prototype.send;
-    var xhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-    XMLHttpRequest.prototype.open = function () {
-      try { arguments[1] = fixUrl(arguments[1]); } catch (e) {}
-      return xhrOpen.apply(this, arguments);
-    };
-    XMLHttpRequest.prototype.send = function (body) {
-      try { body = fixBody(body); } catch (e) {}
-      return xhrSend.call(this, body);
-    };
-    XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-      try { if (isSourceKey(name) && isPc(value)) value = SOURCE; } catch (e) {}
-      return xhrSetHeader.call(this, name, value);
-    };
-
-    if (typeof window.fetch === 'function') {
-      var nativeFetch = window.fetch;
-      window.fetch = function (input, init) {
-        try {
-          if (typeof input === 'string') {
-            input = fixUrl(input);
-          } else if (typeof Request !== 'undefined' && input instanceof Request) {
-            try { fixHeaders(input.headers); } catch (e) {}
-            var fixed = fixUrl(input.url);
-            if (fixed !== input.url) {
-              var rebuilt = rebuildRequest(input, fixed);
-              if (rebuilt) input = rebuilt;
-            }
-          } else if (input) {
-            input = fixUrl(String(input));
-          }
-          if (init) {
-            var headers = fixHeaders(init.headers);
-            var body = fixBody(init.body);
-            if (headers !== init.headers || body !== init.body) {
-              init = Object.assign({}, init, { headers: headers, body: body });
-            }
-          }
-        } catch (e) {}
-        return nativeFetch.call(this, input, init);
-      };
-    }
-  } catch (e) { /* hook 失败不影响后续 token/configs 注入与官方页面 */ }
-})();
-"#;
-
-/// 官方充值页所需的注入内容（2026-09-19 逆向官方 bundle + 实测确定）：
-///
-/// 1. `localStorage.configs` —— 官方 bundle 在**模块顶层** `JSON.parse(localStorage.getItem("configs"))`
-///    后取 `.base` 作 axios baseURL。该键本应由一次**同步** XHR 拉 `/config/base.config.json`
-///    （随后 `e.pc.base = window.location.origin`）写入；**那次请求一旦失败，`JSON.parse(null)` 会让整页抛错白屏**，
-///    故必须预注入。形状 = 该文件 `pc` 对象：实测 `{"title":"xayf","version":"1.0.0"}` + `base`。
-/// 2. `sessionStorage.access_token` —— 官方 store 初始化即 `get("access_token", true)`，其 getter 实现为
-///    `JSON.parse(原文)`（失败回落原文）；官方 setter 对**字符串**是原样存（不 stringify），
-///    故此处也**原样存裸 token**，与官方写入口径一致，任何按原文读的第三方读取者也不会拿到带引号的值。
-///    官方原路径是落点 URL 的 `synjones-auth` 参数（`App.getInfo()`），我们两处都给（见 [`recharge_url`]）。
-/// 3. `sessionStorage.agentType` —— 官方请求拦截器**按原文**读它（`sessionStorage.getItem("agentType")`），
-///    作为 FormData 分支的 `synAccessSource`；官方代码只在拦截器里把它硬编码成 `pc` 用于 GET/其它 POST。
-///    该值由宿主应用写入（本 bundle 无写入点），故填 [`SYN_ACCESS_SOURCE`]（`app`）。
-/// 4. `token_type` —— 官方有缺省 `bearer`，仍显式写入，防未来版本改缺省。
-///
-/// 官方还有 `ecardConfigPC`/`frontConfigPC`/`currentThemePC` 三个 localStorage 键（主题色），
-/// **不预注入**：缺失时官方会自己同步 XHR `/berserker-app/frontInfo?type=pc&synAccessSource=pc`
-/// （2026-09-19 实测匿名 200）补齐；预注入反而可能与其主题结构不符或被覆盖。
-///
-/// 5. **4030 处置 hook**（见 [`RECHARGE_4030_HOOK`]）——必须排在脚本最前：`initialization_script`
-///    保证先于官方页面脚本执行，hook 装上后才轮得到官方页发请求；属**已知临时措施**
-///    （学校修复 PC 来源授权即可移除）。
-///
-/// 脚本在**每次导航**都会执行，故整体幂等（样式只在缺失时插一次、hook 只装一次、改写只匹配 `pc`）。
-fn init_script(token: &str) -> String {
-    let token_js = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".to_string());
-    // hook 先于 token/configs 注入落位；占位符换成 crate 常量，避免在 JS 里重复硬编码来源值。
-    let hook = RECHARGE_4030_HOOK.replace("__SYN_ACCESS_SOURCE__", SYN_ACCESS_SOURCE);
-    format!(
-        r#"{hook}(function () {{
-  try {{
-    sessionStorage.setItem('access_token', {token_js});
-    sessionStorage.setItem('token_type', 'bearer');
-    sessionStorage.setItem('agentType', '{source}');
-    localStorage.setItem('configs', JSON.stringify({{ title: 'xayf', version: '1.0.0', base: '{base}' }}));
-    // 统一显示风格（尽力而为）：官方把主题色写成 .theme-class 上的 --color-* 变量，
-    // 这里用更高优先级 + !important 把主色族覆盖为「锡院紫」；官方改版换变量名即失效。
-    if (!document.getElementById('campushub-recharge-style')) {{
-      var s = document.createElement('style');
-      s.id = 'campushub-recharge-style';
-      s.textContent = [
-        'html.theme-class, :root {{',
-        '  --color-primary: #5b2e90 !important;',
-        '  --color-primary-hover: #7040a8 !important;',
-        '  --color-primary-active: #47246f !important;',
-        '  --color-primary-disabled: #ad97c8 !important;',
-        '  --color-primary-hover-border: #ad97c8 !important;',
-        '  --color-primary-hsla: 272, 52%, 37% !important;',
-        '  --color-gradualPrimary: linear-gradient(0, #7040a8 0%, #5b2e90 100%) !important;',
-        '}}',
-        '.el-button, .el-input__inner, .el-card, .el-dialog, .el-message-box {{ border-radius: 8px !important; }}'
-      ].join('\n');
-      (document.head || document.documentElement).appendChild(s);
-    }}
-  }} catch (e) {{ /* 注入失败不阻塞官方页面：官方仍会自行拉 config 与主题 */ }}
-}})();"#,
-        base = BERSERKER_BASE,
-        source = SYN_ACCESS_SOURCE
-    )
-}
-
-/// 充值页 URL。带官方落点参数 `synjones-auth`（批 1 实测 `/charge-pc/pays/450?synjones-auth=…`
-/// 是该页合法落点，其 `App.getInfo()` 会读它、写入 sessionStorage 并顺手拉 userInfo）；
-/// 初始化脚本同时写 sessionStorage，两条路径互不冲突，任一条成立即已登录。
-fn recharge_url(token: &str, feeitem_id: &str) -> Result<Url, String> {
-    let raw = format!(
-        "{BERSERKER_BASE}{RECHARGE_PATH_PREFIX}{}?synjones-auth={token}",
-        feeitem_id.trim()
-    );
-    raw.parse::<Url>()
-        .map_err(|e| format!("充值页地址非法：{e}"))
-}
-
-/// 在应用内 webview 打开官方充值页（已是登录态，无需跳浏览器）。
-///
-/// - 先取客户端缓存里的 token；没有才走一次 SSO（`reenter`）——**不重复 SSO**，避免把其他调用方
-///   正在用的 token 顶掉（token 单活，见 crate 头注）。
-/// - 同一房间重复打开只聚焦已有窗口（label 唯一），不叠窗口。
-/// - 窗口以主窗口为父：主窗口关闭时一并关闭（Windows 属主窗口语义）；挂父失败退化为独立窗口。
-/// - **不给官方页面任何 Tauri API 能力**，且**无需改 `capabilities/`**（2026-09-19 查证）：
-///   `core:webview:allow-create-webview-window` 只管控**前端 JS 命令**
-///   （`tauri::webview::plugin::create_webview_window`），本命令走 Rust `WebviewWindowBuilder::build()`，
-///   不受 ACL 约束；官方页所在窗口不被任何 capability 覆盖 ⇒ 其 JS 无 IPC 权限
-///   （Tauri 2 默认只对 `withGlobalTauri: true` 且 capability 显式授权的源注入 IPC；
-///   本工程 `withGlobalTauri` 缺省 false）。
-#[tauri::command]
-pub async fn open_recharge_page(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    feeitem_id: String,
-    room: Option<SavedRoom>,
-) -> Result<CommandResult<()>, String> {
-    let id = feeitem_id.trim();
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(CommandResult::err("片区 id 非法"));
-    }
-    let Some(guard) = synjones_session(&state).await else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
-    };
-    let Some(sess) = guard.as_ref() else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
-    };
-    let token = match sess.client.token() {
-        Some(t) if !t.is_empty() => t,
-        _ => match sess.client.reenter().await {
-            Ok(t) => t,
-            Err(e) => return Ok(CommandResult::err(&elec_err(&e))),
-        },
-    };
-
-    let label = window_label(id, room.as_ref());
-    if let Some(existing) = app.get_webview_window(&label) {
-        let _ = existing.set_focus();
-        return Ok(CommandResult::empty());
-    }
-    let url = match recharge_url(&token.access_token, id) {
-        Ok(u) => u,
-        Err(e) => return Ok(CommandResult::err(&e)),
-    };
-    let script = init_script(&token.access_token);
-    let make = || {
-        WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url.clone()))
-            .title(RECHARGE_TITLE)
-            .inner_size(RECHARGE_SIZE.0, RECHARGE_SIZE.1)
-            .initialization_script_for_all_frames(script.clone())
-    };
-    let builder = match app.get_webview_window("main") {
-        Some(main) => match make().parent(&main) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!("充值窗口挂主窗口失败（{e}），退化为独立窗口");
-                make()
-            }
-        },
-        None => make(),
-    };
-    // 只记 label 与片区 id（URL 含 token，绝不进日志）
-    match builder.build() {
-        Ok(_) => {
-            log::info!("已打开充值窗口 {label}（片区 {id}）");
-            Ok(CommandResult::empty())
-        }
-        Err(e) => Ok(CommandResult::err(&format!("打开充值窗口失败：{e}"))),
-    }
-}
-
-/// 兜底：在系统浏览器打开同一官方充值页（内嵌窗被学校侧改动搞坏时的退路）。
+/// 充值入口：在系统浏览器打开官方充值页（2026-09-19 裁决：不再内嵌官方界面，
+/// 客户端直调官方接口的充值在后续批次接入）。
 /// 入参只允许数字片区 id，URL 由后端拼装，前端无法借它打开任意地址（与 `portal::open_in_browser`
 /// 的白名单思路一致，只是这里的合法目标是内网 IP）。
 #[tauri::command]
@@ -613,6 +299,210 @@ pub async fn open_recharge_in_browser(
             Err(e) => CommandResult::err(&format!("打开浏览器失败：{e}")),
         },
     )
+}
+
+// ---------------- 充值六条（M3.1 批 C） ----------------
+
+/// 充值命令面取会话（与 `query_electricity` 同一把锁/同一个客户端）。
+macro_rules! with_synjones {
+    ($state:expr, |$client:ident| $body:expr) => {{
+        let Some(guard) = synjones_session(&$state).await else {
+            return Ok(CommandResult::err(ERR_NO_SESSION));
+        };
+        let Some(sess) = guard.as_ref() else {
+            return Ok(CommandResult::err(ERR_NO_SESSION));
+        };
+        let $client = &sess.client;
+        $body
+    }};
+}
+
+/// `recharge_create` → data。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RechargeCreated {
+    pub order_id: String,
+}
+
+/// `recharge_pay_methods` / `recharge_status` → data。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RechargePayMethods {
+    pub order: RechargeOrder,
+    pub methods: Vec<PayMethod>,
+}
+
+/// `recharge_query_account` → data。`pad` 只有**需密码**且服务端下发键盘时才有值（见 [`PasswordPad`] 红线）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RechargeAccounts {
+    pub accounts: Vec<String>,
+    pub ccctypes: Vec<String>,
+    pub pad: Option<PasswordPad>,
+}
+
+/// **建单**（电费 `paystep=0`，金额 1 元起；副作用请求只发一次）。
+///
+/// `path` = 当前房间的完整级联路径（校区 → 楼栋 → 房间，与 `query_electricity` 的入参同构）——**必填语义**。
+/// `third_party`（房间上下文串）**由后端按该路径合成**——前端拿不到也不需要（见模块头注红线 7）。
+///
+/// ⚠️ `path` 声明成 `Option` **只为兼容尚未升级的旧前端**：批 D 已提交的调用没传 `path`
+/// （它在等后端给上下文串）。不声明 `Option` 时 Tauri 会在反序列化阶段就报 `invalid args`（IPC 层错误，
+/// 界面只能显示通用失败），声明后我们能把「请更新客户端」这句可读文案送到用户面前。
+///
+/// 失败文案：服务端原文一并透出（如 `dayTotalMoney-日消费最大金额判断异常了-null`），便于排查。
+#[tauri::command]
+pub async fn recharge_create(
+    state: State<'_, AppState>,
+    feeitem_id: String,
+    tranamt: String,
+    path: Option<Vec<RoomStep>>,
+) -> Result<CommandResult<RechargeCreated>, String> {
+    let Some(path) = path.filter(|p| !p.is_empty()) else {
+        return Ok(CommandResult::err(
+            "缺少房间信息，请返回上一步重新选择房间后再试（客户端需更新）",
+        ));
+    };
+    with_synjones!(state, |client| {
+        Ok(match recharge::create_order(client, &feeitem_id, &tranamt, &path).await {
+            Ok(order_id) => CommandResult::ok(RechargeCreated { order_id }),
+            Err(e) => CommandResult::err(&elec_err(&e)),
+        })
+    })
+}
+
+/// **支付方式**（`getpayinfo`）：返回订单状态 + 账户类支付方式（crate 已过滤到 `ACCOUNT`/`ACCOUNTTSM`）。
+#[tauri::command]
+pub async fn recharge_pay_methods(
+    state: State<'_, AppState>,
+    order_id: String,
+) -> Result<CommandResult<RechargePayMethods>, String> {
+    with_synjones!(state, |client| {
+        Ok(
+            match recharge::fetch_pay_methods(client, &order_id).await {
+                Ok((order, methods)) => {
+                    CommandResult::ok(RechargePayMethods { order, methods })
+                }
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **查账户 / 安全键盘**（`paystep=2`，两步协议，见 `recharge::query_account`）：
+///
+/// - 不带 `accountno` → 回**账号列表**（渲染「选择账号」）；
+/// - 带已选 `accountno` → 回该账号的**账户类型**与**安全键盘**（需密码的渠道才有 `pad`）。
+///
+/// `pad.keys` **只允许**交给渲染层画键盘；提交只回传下标序列（见 `recharge_submit`）。
+#[tauri::command]
+pub async fn recharge_query_account(
+    state: State<'_, AppState>,
+    order_id: String,
+    code: String,
+    payid: String,
+    accountno: Option<String>,
+) -> Result<CommandResult<RechargeAccounts>, String> {
+    with_synjones!(state, |client| {
+        let pay = PayMethod {
+            code,
+            payid,
+            name: String::new(),
+            // 提交/查询只用到 code 与 payid；nopassword 由 `recharge_pay_methods` 的结果决定
+            nopassword: false,
+            remark: None,
+        };
+        Ok(
+            match recharge::query_account(client, &order_id, &pay, accountno.as_deref()).await {
+                Ok((accounts, ccctypes, pad)) => {
+                    CommandResult::ok(RechargeAccounts {
+                        accounts,
+                        ccctypes,
+                        pad,
+                    })
+                }
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **提交支付**（`paystep=2`，**唯一会扣款的命令**）。
+///
+/// `password_seq` = 用户点击的**键位下标序列**（6 位数字字符串，如 `"013579"`）配 `uuid`；免密时都不传。
+/// 红线：本模块只转发这串下标，**绝不**用 `keys` 还原真实字符，也不把它写进任何日志/存储。
+// 8 个扁平入参是 Tauri 命令的既有形态（前端 `invoke("recharge_submit", { orderId, code, … })` 按名传参）；
+// 改成结构体会直接破坏已提交的前端契约，故只压制计数告警。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn recharge_submit(
+    state: State<'_, AppState>,
+    order_id: String,
+    code: String,
+    payid: String,
+    accountno: String,
+    ccctype: String,
+    password_seq: Option<String>,
+    uuid: Option<String>,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        let pay = PayMethod {
+            code,
+            payid,
+            name: String::new(),
+            // 提交路径不消费 `nopassword`（是否免密由前端按 `recharge_pay_methods` 的结果决定）
+            nopassword: false,
+            remark: None,
+        };
+        Ok(
+            match recharge::submit_pay(
+                client,
+                &order_id,
+                &pay,
+                &accountno,
+                &ccctype,
+                password_seq.as_deref(),
+                uuid.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => CommandResult::empty(),
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **结果查询**（`getpayinfo` 单次；轮询与上限由前端把关：`order.status` 0=待支付、1=已完成）。
+#[tauri::command]
+pub async fn recharge_status(
+    state: State<'_, AppState>,
+    order_id: String,
+) -> Result<CommandResult<RechargePayMethods>, String> {
+    with_synjones!(state, |client| {
+        Ok(
+            match recharge::fetch_order_status(client, &order_id).await {
+                Ok((order, methods)) => {
+                    CommandResult::ok(RechargePayMethods { order, methods })
+                }
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        )
+    })
+}
+
+/// **取消/清理未支付订单**（失败/放弃/超时后调用；crate 实测该端点必须 JSON body）。
+#[tauri::command]
+pub async fn recharge_cancel(
+    state: State<'_, AppState>,
+    order_id: String,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        Ok(match recharge::cancel_order(client, &order_id).await {
+            Ok(()) => CommandResult::empty(),
+            Err(e) => CommandResult::err(&elec_err(&e)),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -739,90 +629,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// 初始化脚本：四个必需键都在、品牌样式在、token 只作 JS 字符串字面量、整体幂等。
-    #[test]
-    fn init_script_carries_required_keys_and_brand_css() {
-        let s = init_script("T0KEN");
-        for key in [
-            r#"sessionStorage.setItem('access_token', "T0KEN")"#,
-            "sessionStorage.setItem('token_type', 'bearer')",
-            "sessionStorage.setItem('agentType', 'app')",
-            "localStorage.setItem('configs'",
-            "campushub-recharge-style",
-            "--color-primary: #5b2e90",
-        ] {
-            assert!(s.contains(key), "脚本缺 {key}：{s}");
-        }
-        assert!(s.contains(BERSERKER_BASE), "configs.base 应为内网根");
-        assert!(!s.contains("bearer T0KEN"), "token 不带 bearer 前缀（官方自己拼）");
-        assert!(s.contains("if (!document.getElementById('campushub-recharge-style'))"));
-        // 含引号/反斜杠的 token 也必须被转义成合法 JS 字符串
-        let risky = init_script("a\"b\\c");
-        assert!(
-            risky.contains(r#"sessionStorage.setItem('access_token', "a\"b\\c")"#),
-            "{risky}"
-        );
-    }
-
-    /// 4030 处置 hook：排在脚本最前（官方页面脚本之前）、覆盖三种携带位置、占位符已替换、
-    /// 不引用外部文件；注入本体（token/configs）与品牌样式不受影响。
-    #[test]
-    fn init_script_puts_4030_hook_first_and_covers_three_carriers() {
-        let s = init_script("T0KEN");
-        let hook_at = s.find("__campushub4030Hook").expect("缺 hook 幂等标记");
-        let inject_at = s
-            .find("sessionStorage.setItem('access_token'")
-            .expect("缺 token 注入");
-        assert!(hook_at < inject_at, "hook 必须最先执行（初始化脚本首段）");
-
-        // 位置一/二/三：URL query、请求头、请求体
-        for mark in [
-            "XMLHttpRequest.prototype.open =",
-            "XMLHttpRequest.prototype.setRequestHeader =",
-            "XMLHttpRequest.prototype.send =",
-            "window.fetch =",
-            "init.headers",
-            "init.body",
-            "URLSearchParams",
-            "FormData",
-        ] {
-            assert!(s.contains(mark), "hook 缺覆盖点 {mark}");
-        }
-        // 只改 synAccessSource 这一个值：正则与替换片段都在，且顺序为 hook → 注入 → 样式
-        assert!(s.contains("synAccessSource=' + SOURCE"), "{s}");
-        assert!(s.contains(r"synAccessSource=pc(?![0-9A-Za-z_])"));
-        assert!(!s.contains("__SYN_ACCESS_SOURCE__"), "占位符必须已替换");
-        assert!(s.contains("var SOURCE = 'app';"), "来源值应取 crate 常量");
-        assert!(!s.contains("fix-4030.user.js"), "不得引用外部脚本文件");
-        // 只新增该参数是不允许的：脚本不含「无条件补写 app」的追加逻辑
-        assert!(!s.contains("includes('?') ? '&' : '?'"), "不得为缺失参数的请求补写来源");
-    }
-
-    /// 充值 URL 与窗口 label：URL 带官方落点参数、id 去空白；label 只含 ASCII 字母数字并截断。
-    #[test]
-    fn recharge_url_and_window_label() {
-        let url = recharge_url("T0KEN", "450 ").unwrap();
-        assert_eq!(
-            url.as_str(),
-            "http://10.3.100.110/charge-pc/pays/450?synjones-auth=T0KEN"
-        );
-        let mut r = room("宿舍", "101");
-        r.id = "1758-2/9:9".to_string();
-        assert_eq!(window_label("450", Some(&r)), "recharge-450-1758299");
-        assert_eq!(window_label("450", None), "recharge-450");
-        // id 为空（只带路径）→ 退回每片区一窗，不产生 "recharge-450-" 这类尾部连字符
-        let mut no_id = room("宿舍", "101");
-        no_id.id = String::new();
-        assert_eq!(window_label("450", Some(&no_id)), "recharge-450");
-        let mut long = room("宿舍", "101");
-        long.id = "a".repeat(80);
-        assert_eq!(
-            window_label("450", Some(&long)).len(),
-            "recharge-450-".len() + 24,
-            "超长 id 应截断"
-        );
-    }
-
     /// 失败文案：网络层失败点明「需校园网」，空文案的业务错误不出现悬空冒号。
     #[test]
     fn elec_err_messages_are_actionable() {
@@ -837,5 +643,67 @@ mod tests {
             elec_err(&CampusSynjonesError::NotLogin),
             "登录已过期，请重新登录"
         );
+        // 服务端原文必须透出（排查用：实测建单失败会给这类文案）
+        let raw = elec_err(&CampusSynjonesError::Api {
+            code: 500,
+            msg: "dayTotalMoney-日消费最大金额判断异常了-null".to_string(),
+        });
+        assert!(raw.contains("dayTotalMoney"), "实际 {raw}");
+    }
+
+    /// 充值命令的 IPC 契约：全 camelCase（前端 `types.ts` 按这些键名取值，改键名即破坏前端）。
+    #[test]
+    fn recharge_dtos_are_camel_case() {
+        let order = RechargeOrder {
+            order_id: "1".to_string(),
+            status: 0,
+            pay_exp_date: Some("2026-09-19 17:30:00".to_string()),
+            tranamt: Some(1.0),
+        };
+        let pay = PayMethod {
+            code: "ACCOUNTTSM".to_string(),
+            payid: "64".to_string(),
+            name: "电子账户".to_string(),
+            nopassword: false,
+            remark: None,
+        };
+        let json = serde_json::to_value(RechargePayMethods {
+            order,
+            methods: vec![pay.clone()],
+        })
+        .unwrap();
+        assert!(json["order"].get("orderId").is_some(), "实际 {json}");
+        assert!(json["order"].get("payExpDate").is_some());
+        assert_eq!(json["methods"][0]["payid"], "64");
+        assert_eq!(json["methods"][0]["nopassword"], false);
+        assert!(json["methods"][0].get("remark").is_some(), "None 也要在场（前端判 null）");
+
+        let created = serde_json::to_value(RechargeCreated {
+            order_id: "1".to_string(),
+        })
+        .unwrap();
+        assert!(created.get("orderId").is_some(), "实际 {created}");
+
+        let accounts = serde_json::to_value(RechargeAccounts {
+            accounts: vec!["A1".to_string()],
+            ccctypes: vec!["000".to_string()],
+            pad: Some(PasswordPad {
+                uuid: "u".to_string(),
+                keys: vec!["1".to_string(), "2".to_string()],
+            }),
+        })
+        .unwrap();
+        assert_eq!(accounts["accounts"][0], "A1");
+        assert_eq!(accounts["ccctypes"][0], "000");
+        assert_eq!(accounts["pad"]["uuid"], "u");
+        assert_eq!(accounts["pad"]["keys"][1], "2");
+        // 无键盘时字段仍在场且为 null（前端据此判断「免密」）
+        let no_pad = serde_json::to_value(RechargeAccounts {
+            accounts: vec![],
+            ccctypes: vec![],
+            pad: None,
+        })
+        .unwrap();
+        assert!(no_pad["pad"].is_null());
     }
 }

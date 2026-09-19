@@ -31,6 +31,7 @@
 pub mod charge;
 pub mod client;
 pub mod ecard;
+pub mod recharge;
 pub mod sso;
 
 pub use charge::{
@@ -39,6 +40,10 @@ pub use charge::{
 };
 pub use client::SynjonesClient;
 pub use ecard::{CardInfo, Transaction, Transactions};
+pub use recharge::{
+    cancel_order, create_order, fetch_order_status, fetch_pay_methods, query_account, submit_pay,
+    PayMethod, PasswordPad, RechargeOrder,
+};
 pub use sso::sso_token;
 
 /// 慧新E校平台内网根（明文 http，校外需 WebVPN，M3 只验校内侧）。

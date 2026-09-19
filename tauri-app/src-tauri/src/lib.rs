@@ -70,8 +70,13 @@ pub fn run() {
             commands::electricity::get_electricity_rooms,
             commands::electricity::save_electricity_room,
             commands::electricity::delete_electricity_room,
-            commands::electricity::open_recharge_page,
             commands::electricity::open_recharge_in_browser,
+            commands::electricity::recharge_create,
+            commands::electricity::recharge_pay_methods,
+            commands::electricity::recharge_query_account,
+            commands::electricity::recharge_submit,
+            commands::electricity::recharge_status,
+            commands::electricity::recharge_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
