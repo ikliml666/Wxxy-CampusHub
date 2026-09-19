@@ -331,8 +331,9 @@ export function RechargeFlow({
 
   const orderYuan = (order?.tranamt ?? numeric).toFixed(2);
 
+  // 外边距交给父容器（M4 重设计后左列用 flex-col gap-3 排卡）
   return (
-    <Surface accent="wallet" className="mt-3 px-4 py-4">
+    <Surface accent="wallet" className="px-4 py-4">
       <div className="flex items-baseline justify-between gap-3">
         <p className="text-body font-medium text-text">充值</p>
         <span className="min-w-0 truncate text-caption text-text-2">{roomLabel}</span>
@@ -491,7 +492,7 @@ export function RechargeFlow({
           ) : pad ? (
             <>
               <p className="mt-3 text-caption text-text-2">
-                请输入校园卡查询密码（{PASSWORD_LEN} 位，点满自动提交）
+                请输入校园卡查询密码（{PASSWORD_LEN} 位，默认为身份证后六位，点满自动提交）
               </p>
               <div className="mt-2 flex items-center gap-2">
                 {Array.from({ length: PASSWORD_LEN }, (_, i) => (

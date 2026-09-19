@@ -1,5 +1,7 @@
-import { History, RefreshCw, Zap } from "lucide-react";
+import { Home, History, RefreshCw, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ElectricityPaymentsCard } from "@/components/ElectricityPaymentsCard";
+import { ElectricityTrendCard } from "@/components/ElectricityTrendCard";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader } from "@/components/PanelHeader";
 import { RechargeFlow } from "@/components/RechargeFlow";
@@ -12,6 +14,7 @@ import { invokeCommand } from "@/shared/tauriApi";
 import { cn } from "@/shared/cn";
 import type {
   ElectricityChoice,
+  ElectricitySnapshot,
   ElectricityLevel,
   ElectricityView,
   FeeItem,
@@ -24,8 +27,11 @@ type ListPhase = "loading" | "ready" | "error";
 /** 级联查询三态。 */
 type QueryPhase = "idle" | "loading" | "error";
 
-const SELECT_CLS =
-  "h-9 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50";
+/**
+ * 自动级联深度护栏：自动选定只可能逐级推进 path（见 runQuery 内防死循环注释），
+ * 这里给整条链一个绝对上限（远大于真实层数 3），即使学校侧将来改成循环层级也不会挂死。
+ */
+const MAX_CASCADE_STEPS = 10;
 
 /**
  * 服务端那句展示文本 → 折行数组。**只按分隔符折行、不做语义解构**（2026-09-19 live 实测：
@@ -45,13 +51,15 @@ export function isNegativeLine(line: string): boolean {
 }
 
 /**
- * 电费页（M3 批 3）：片区 → 校区 → 楼栋 → 房间 级联查余额，常用房间本地存，充值走官方页面
- * （系统浏览器打开；客户端直调官方接口的充值在后续批次接入）。
+ * 电费页（M4 批 3 重设计，任务书 §5）：容器 `max-w-5xl`，宽屏双列
+ * `lg:grid-cols-[minmax(0,1fr)_340px]`（左=操作主线：选择/结果/充值；右=数据侧栏：
+ * 电费变化/缴费记录/常用房间），窄屏单列——消除旧版 `max-w-3xl` 单列的两侧大片空白。
  *
- * 两条 live 实测约束体现在 UI 上：
+ * 两条 live 实测约束仍体现在 UI 上：
  * ① 末级（房间）是**输入级**（片区 `lastLevelIsInput`）：服务端在末级前一档不下发选项，
  *    故 `options` 为空**不是**出错，此处渲染房间号输入框；
- * ② 末级结果只有一句服务端自由文本（`fields`），**通用渲染 + 折行**，不解构、不硬编码标签。
+ * ② 末级结果 `fields` 是服务端自由文本，**通用渲染 + 折行**，不解构；主数字用后端已
+ *    结构化提取的 `view.balanceYuan`（`null` = 没提取到 ⇒ 显示「无数据」，绝不当 0）。
  */
 export function PowerPanel() {
   const status = useAuthStore((s) => s.status);
@@ -75,10 +83,20 @@ export function PowerPanel() {
   const [rooms, setRooms] = useState<SavedRoom[]>([]);
   const [saveLabel, setSaveLabel] = useState("");
   const [notice, setNotice] = useState("");
+  const [noticeBad, setNoticeBad] = useState(false);
+  const [roomsNotice, setRoomsNotice] = useState("");
+
+  /** 自动选定的层（用户裁决 1：唯一选项 ⇒ 自动选定）；渲染成弱提示，不占交互位。 */
+  const [autoLevels, setAutoLevels] = useState<number[]>([]);
+  /** 右列电费变化卡的刷新信号：采集成功 / 绑定变化后自增。 */
+  const [trendTick, setTrendTick] = useState(0);
+  const [snapBusy, setSnapBusy] = useState(false);
+  const [bindBusy, setBindBusy] = useState(false);
 
   const area = items.find((i) => i.id === areaId);
   const depth = steps.length;
   const level = levels[depth];
+  const boundRoom = rooms.find((r) => r.bound === true);
 
   // 片区目录：免登录也能渲染（未登录时级联处给登录引导）
   useEffect(() => {
@@ -110,11 +128,23 @@ export function PowerPanel() {
     };
   }, []);
 
-  /** 一次级联查询：path 为空取第 1 级选项；到末级则出 view。 */
+  /**
+   * 一次级联查询：path 为空取第 1 级选项；到末级则出 view。
+   *
+   * **校区自动选定（用户裁决 1）+ 防死循环**：拿到 `options` 后若 `options.length === 1`
+   * 且该层不是末级（输入级 `options` 恒空，不会命中），就自动选定并携带**增长后的** path
+   * 续查下一级。循环收敛的两道闸：
+   * ① 每次自动选定都让 path **严格增长一级**（`nextPath = [...path, step]`），真实层级
+   *    有限（3 级），链必然到达 isFinal；
+   * ② 若 path 末段已等于该唯一选项（服务端同层重发同一选项的病态情形）则不再自动选，
+   *    直接渲染让用户手动处理；外加 `MAX_CASCADE_STEPS` 绝对上限兜底。
+   * 判据只有「选项数 == 1」，不写死「校区」——将来学校加校区自动退回手动选。
+   */
   const runQuery = async (feeitemId: string, path: RoomStep[]) => {
     setPhase("loading");
     setError("");
     setNotice("");
+    setNoticeBad(false);
     const r = await invokeCommand<{
       levels: ElectricityLevel[];
       options: ElectricityChoice[];
@@ -132,6 +162,24 @@ export function PowerPanel() {
     setLevels(r.data.levels);
     setOptions(r.data.options);
     setView(r.data.isFinal ? (r.data.view ?? null) : null);
+
+    const only = r.data.options.length === 1 ? r.data.options[0] : undefined;
+    const last = path[path.length - 1];
+    if (
+      !r.data.isFinal &&
+      only &&
+      !(last && last.level === only.level && last.value === only.value) &&
+      path.length < MAX_CASCADE_STEPS
+    ) {
+      setAutoLevels((prev) => (prev.includes(only.level) ? prev : [...prev, only.level]));
+      const nextPath: RoomStep[] = [
+        ...path,
+        { level: only.level, code: only.code, value: only.value, name: only.label },
+      ];
+      setSteps(nextPath);
+      setView(null);
+      void runQuery(feeitemId, nextPath);
+    }
   };
 
   const pickArea = (id: string) => {
@@ -144,6 +192,7 @@ export function PowerPanel() {
     setLevels([]);
     setOptions([]);
     setView(null);
+    setAutoLevels([]);
     setRoomText("");
     setSaveLabel("");
     void runQuery(id, []);
@@ -188,11 +237,34 @@ export function PowerPanel() {
     setLevels([]);
     setOptions([]);
     setView(null);
+    setAutoLevels([]);
     setPhase("idle");
     setError("");
     setRoomText("");
     if (areaId) void runQuery(areaId, []);
   };
+
+  /** 当前已选路径对应的常用房间（未保存过则为 undefined）。 */
+  const currentRoom =
+    area && steps.length > 0
+      ? rooms.find(
+          (r) =>
+            r.feeitemId === areaId &&
+            r.path.length === steps.length &&
+            steps.every((s, i) => r.path[i]?.value === s.value),
+        )
+      : undefined;
+
+  /** 房间号输入级的一键重查 chips：已存房间中路径前缀（除房间号那步外）与当前选中完全一致者。 */
+  const recentRooms =
+    area && steps.length > 0 && isInputLevelSafe(levels, steps, area)
+      ? rooms.filter(
+          (r) =>
+            r.feeitemId === areaId &&
+            r.path.length === steps.length + 1 &&
+            steps.every((s, i) => r.path[i]?.value === s.value),
+        )
+      : [];
 
   const saveRoom = async () => {
     if (!area) return;
@@ -209,23 +281,103 @@ export function PowerPanel() {
       setRooms(r.data);
       setSaveLabel("");
       setNotice("已保存为常用房间");
+      setNoticeBad(false);
     } else {
       setNotice(r.message ?? "保存失败");
+      setNoticeBad(true);
+    }
+  };
+
+  /**
+   * 绑定当前房间为「我的宿舍」（同一时刻最多一个，绑新的后端自动解绑旧的）。
+   * 当前路径未保存过时先落一次 `save_electricity_room`（绑定键是 `SavedRoom.id`），
+   * 再走 `bind_electricity_room`——绑定关系只经该命令变更（types.ts 注释约束）。
+   */
+  const bindCurrent = async () => {
+    if (!area) return;
+    setBindBusy(true);
+    setNotice("");
+    setNoticeBad(false);
+    try {
+      let target = currentRoom;
+      if (!target) {
+        const saved = await invokeCommand<SavedRoom[]>("save_electricity_room", {
+          room: {
+            id: "",
+            feeitemId: area.id,
+            feeitemName: area.name,
+            path: steps,
+            label: "",
+          },
+        });
+        if (!(saved.success && saved.data)) {
+          setNotice(saved.message ?? "保存房间失败，无法绑定");
+          setNoticeBad(true);
+          return;
+        }
+        setRooms(saved.data);
+        target = saved.data.find(
+          (x) =>
+            x.feeitemId === area.id &&
+            x.path.length === steps.length &&
+            steps.every((s, i) => x.path[i]?.value === s.value),
+        );
+      }
+      if (!target) {
+        setNotice("已保存但未能定位新房间，请重试");
+        setNoticeBad(true);
+        return;
+      }
+      const b = await invokeCommand<SavedRoom[]>("bind_electricity_room", {
+        id: target.id,
+        bound: true,
+      });
+      if (b.success && b.data) {
+        setRooms(b.data);
+        setTrendTick((t) => t + 1);
+        setNotice(`已绑定「${target.label || "当前房间"}」为我的宿舍`);
+        setNoticeBad(false);
+      } else {
+        setNotice(b.message ?? "绑定失败");
+        setNoticeBad(true);
+      }
+    } finally {
+      setBindBusy(false);
+    }
+  };
+
+  /** 常用房间卡内的绑定/解绑（本地操作，不需登录）。 */
+  const toggleBind = async (room: SavedRoom) => {
+    setRoomsNotice("");
+    const b = await invokeCommand<SavedRoom[]>("bind_electricity_room", {
+      id: room.id,
+      bound: !(room.bound === true),
+    });
+    if (b.success && b.data) {
+      setRooms(b.data);
+      setTrendTick((t) => t + 1);
+    } else {
+      setRoomsNotice(b.message ?? "绑定状态修改失败");
     }
   };
 
   const removeRoom = async (id: string) => {
     const r = await invokeCommand<SavedRoom[]>("delete_electricity_room", { id });
     if (r.success && r.data) setRooms(r.data);
-    else setNotice(r.message ?? "删除失败");
+    else setRoomsNotice(r.message ?? "删除失败");
   };
 
   const openRoom = (room: SavedRoom) => {
+    if (!authed) {
+      openLoginDialog();
+      return;
+    }
     setAreaId(room.feeitemId);
     setSteps(room.path);
     setLevels([]);
     setOptions([]);
     setView(null);
+    setAutoLevels([]);
     setRoomText("");
     void runQuery(room.feeitemId, room.path);
   };
@@ -235,315 +387,487 @@ export function PowerPanel() {
     if (!areaId) return;
     const r = await invokeCommand("open_recharge_in_browser", { feeitemId: areaId });
     setNotice(r.success ? "" : (r.message ?? "打开充值页失败"));
+    setNoticeBad(!r.success);
+  };
+
+  /** 立即采集：对「我的宿舍」跑一次余额快照（未绑定/未登录时后端回可读中文）。 */
+  const runSnapshot = async () => {
+    setSnapBusy(true);
+    setNotice("");
+    setNoticeBad(false);
+    const r = await invokeCommand<ElectricitySnapshot>("run_electricity_snapshot");
+    setSnapBusy(false);
+    if (r.success && r.data) {
+      setNotice(r.data.replaced ? "已更新今日余额记录" : "已记录今日余额");
+      setTrendTick((t) => t + 1);
+    } else {
+      setNotice(r.message ?? "采集失败");
+      setNoticeBad(true);
+    }
   };
 
   const isInputLevel = !!level && depth === levels.length - 1 && area?.lastLevelIsInput === true;
   const complete = steps.length > 0 && steps.length === levels.length;
+  /** 楼栋卡片「上次查过」角标的数据集（已存房间走过的全部层值）。 */
+  const seenKeys = new Set(
+    rooms.flatMap((r) => r.path.map((s) => `${s.level}:${s.value}`)),
+  );
+  /** 常用房间列表：绑定项置顶。 */
+  const sortedRooms = [...rooms].sort(
+    (a, b) => Number(b.bound === true) - Number(a.bound === true),
+  );
 
   return (
-    <section className="mx-auto mt-8 max-w-3xl px-4">
-      <PanelHeader title="电费" description="宿舍电费查询与充值" domain="wallet" />
+    <section className="mx-auto mt-8 max-w-5xl px-4">
+      <PanelHeader title="电费" description="宿舍电费查询、充值与用量统计" domain="wallet" />
 
-      {/* 片区：该接口免登录（唯一匿名端点），未登录也先渲染出来 */}
-      <Surface className="px-4 py-4">
-        <div className="flex items-baseline justify-between gap-3">
-          <p className="text-body font-medium text-text">缴费片区</p>
-          {itemsPhase === "ready" && (
-            <span className="text-caption text-text-2">共 {items.length} 个启用片区</span>
-          )}
-        </div>
-        {itemsPhase === "loading" ? (
-          <div aria-hidden className="mt-3 flex gap-2">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="h-8 w-32 animate-pulse rounded-control bg-line" />
-            ))}
-          </div>
-        ) : itemsPhase === "error" ? (
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <p className="min-w-0 truncate text-body text-text-2">{itemsError}</p>
-            <Button variant="outline" size="sm" onClick={() => setItemsTick((t) => t + 1)}>
-              <RefreshCw />
-              重试
-            </Button>
-          </div>
-        ) : items.length === 0 ? (
-          <EmptyState compact icon={Zap} domain="wallet" title="暂无启用的电费片区" />
-        ) : (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {items.map((it) => (
-              <Button
-                key={it.id}
-                variant={it.id === areaId ? "default" : "outline"}
-                size="sm"
-                aria-pressed={it.id === areaId}
-                onClick={() => pickArea(it.id)}
-              >
-                {it.name}
-              </Button>
-            ))}
-          </div>
-        )}
-      </Surface>
-
-      {/* 级联查询 */}
-      <Surface accent="wallet" className="mt-3 px-4 py-4">
-        <div className="flex items-baseline justify-between gap-3">
-          <p className="text-body font-medium text-text">查询房间余额</p>
-          {complete && (
-            <Button variant="ghost" size="xs" onClick={resetAll}>
-              重选
-            </Button>
-          )}
-        </div>
-
-        {!authed ? (
-          <EmptyState
-            compact
-            icon={Zap}
-            domain="wallet"
-            title="登录后可查询房间电费"
-            hint="电费接口需慧新E校会话；片区列表已可查看。"
-            action={<Button onClick={openLoginDialog}>登录</Button>}
-          />
-        ) : !areaId ? (
-          <EmptyState
-            compact
-            icon={Zap}
-            domain="wallet"
-            title="先选择缴费片区"
-            hint="再逐级选择校区、楼栋并填写房间号。"
-          />
-        ) : (
-          <>
-            {/* 面包屑：可点回退到任一级 */}
-            {steps.length > 0 && (
-              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
-                {steps.map((s, i) => (
-                  <span key={`${s.code}-${i}`} className="flex items-center gap-2">
-                    {i > 0 && (
-                      <span aria-hidden className="text-caption text-text-2">
-                        ›
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      className="rounded-control px-1 text-caption text-text-2 underline-offset-4 hover:text-text hover:underline"
-                      onClick={() => backTo(i)}
-                    >
-                      {s.name || s.value}
-                    </button>
-                  </span>
+      <div className="mt-3 grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-4">
+        {/* ── 左列：操作主线 ── */}
+        <div className="flex min-w-0 flex-col gap-3">
+          {/* 片区：该接口免登录（唯一匿名端点），未登录也先渲染出来 */}
+          <Surface className="px-4 py-4">
+            <div className="flex items-baseline justify-between gap-3">
+              <p className="text-body font-medium text-text">缴费片区</p>
+              {itemsPhase === "ready" && (
+                <span className="text-caption text-text-2">共 {items.length} 个启用片区</span>
+              )}
+            </div>
+            {itemsPhase === "loading" ? (
+              <div aria-hidden className="mt-3 flex gap-2">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-8 w-32 animate-pulse rounded-control bg-line" />
                 ))}
               </div>
-            )}
-
-            {/* 当前该选的一级（level 名来自服务端 map.total） */}
-            {phase !== "error" && level && (
-              <div className="mt-3">
-                <label className="mb-1 block text-caption text-text-2" htmlFor="elec-cascade">
-                  {level.name}
-                </label>
-                {options.length > 0 ? (
-                  <select
-                    id="elec-cascade"
-                    className={SELECT_CLS}
-                    value=""
-                    disabled={phase === "loading"}
-                    onChange={(e) => {
-                      const hit = options.find((o) => o.value === e.target.value);
-                      if (hit) pickChoice(hit);
-                    }}
-                  >
-                    <option value="">
-                      {phase === "loading" ? "加载中…" : `请选择${level.name}`}
-                    </option>
-                    {options.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                ) : isInputLevel ? (
-                  <form
-                    className="flex gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      submitRoom(roomText);
-                    }}
-                  >
-                    <Input
-                      id="elec-cascade"
-                      value={roomText}
-                      inputMode="numeric"
-                      placeholder={`请输入${level.name}（例如 101）`}
-                      disabled={phase === "loading"}
-                      onChange={(e) => setRoomText(e.target.value)}
-                    />
-                    <Button type="submit" disabled={phase === "loading"}>
-                      查询
-                    </Button>
-                  </form>
-                ) : (
-                  <p className="text-body text-text-2">
-                    该层暂无可选项，请点上一级重选。
-                  </p>
-                )}
-              </div>
-            )}
-
-            {phase === "loading" && (
-              <div aria-hidden className="mt-3 h-9 w-full animate-pulse rounded bg-line" />
-            )}
-
-            {phase === "error" && (
+            ) : itemsPhase === "error" ? (
               <div className="mt-3 flex items-center justify-between gap-3">
-                <p className="min-w-0 text-body text-text-2">{error}</p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void runQuery(areaId, steps)}
-                >
+                <p className="min-w-0 truncate text-body text-text-2">{itemsError}</p>
+                <Button variant="outline" size="sm" onClick={() => setItemsTick((t) => t + 1)}>
+                  <RefreshCw />
                   重试
                 </Button>
               </div>
+            ) : items.length === 0 ? (
+              <EmptyState compact icon={Zap} domain="wallet" title="暂无启用的电费片区" />
+            ) : (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {items.map((it) => (
+                  <Button
+                    key={it.id}
+                    variant={it.id === areaId ? "default" : "outline"}
+                    size="sm"
+                    aria-pressed={it.id === areaId}
+                    onClick={() => pickArea(it.id)}
+                  >
+                    {it.name}
+                  </Button>
+                ))}
+              </div>
             )}
+          </Surface>
 
-            {/* 末级结果：通用字典渲染（键名与文案都来自服务端） */}
-            {view && (
-              <div className="mt-3 rounded-inner border border-line bg-surface-2 px-3 py-3">
-                {view.tip ? (
-                  <p className="text-body text-alert">{view.tip}</p>
-                ) : view.fields.length === 0 && view.money == null ? (
-                  <p className="text-body text-text-2">该房间暂无用电信息</p>
-                ) : (
-                  <dl className="space-y-1.5">
-                    {view.fields.map((f) => (
-                      <div key={f.label}>
-                        <dt className="text-caption text-text-2">{f.label}</dt>
-                        {fieldLines(f.value).map((line) => (
-                          <dd
-                            key={line}
-                            className={cn(
-                              "tabular-num text-body",
-                              isNegativeLine(line) ? "text-alert" : "text-text",
-                            )}
+          {/* 选择卡：面包屑（自动层收成弱提示）→ 楼栋卡片网格 / 房间号输入 */}
+          <Surface accent="wallet" className="px-4 py-4">
+            <div className="flex items-baseline justify-between gap-3">
+              <p className="text-body font-medium text-text">查询房间余额</p>
+              {complete && (
+                <Button variant="ghost" size="sm" onClick={resetAll}>
+                  重选
+                </Button>
+              )}
+            </div>
+
+            {!authed ? (
+              <EmptyState
+                compact
+                icon={Zap}
+                domain="wallet"
+                title="登录后可查询房间电费"
+                hint="电费接口需慧新E校会话；片区列表已可查看。"
+                action={<Button onClick={openLoginDialog}>登录</Button>}
+              />
+            ) : !areaId ? (
+              <EmptyState
+                compact
+                icon={Zap}
+                domain="wallet"
+                title="先选择缴费片区"
+                hint="再逐级选择校区、楼栋并填写房间号。"
+              />
+            ) : (
+              <>
+                {/* 面包屑：手动选过的层可点回退；自动选定的层收成弱提示（不占交互位） */}
+                {steps.length > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {steps.map((s, i) => {
+                      const auto = autoLevels.includes(s.level);
+                      const lvName = levels.find((l) => l.level === s.level)?.name;
+                      return (
+                        <span key={`${s.code}-${i}`} className="flex items-center gap-2">
+                          {i > 0 && (
+                            <span aria-hidden className="text-caption text-text-2">
+                              ›
+                            </span>
+                          )}
+                          {auto ? (
+                            <span className="text-caption text-text-2">
+                              {lvName ? `${lvName} · ` : ""}
+                              {s.name || s.value}（自动）
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="rounded-control px-1.5 py-1 text-caption text-text-2 underline-offset-4 hover:text-text hover:underline"
+                              onClick={() => backTo(i)}
+                            >
+                              {s.name || s.value}
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* 当前该选的一级（level 名来自服务端 map.total） */}
+                {phase !== "error" && level && (
+                  <div className="mt-3">
+                    <p className="mb-1 text-caption text-text-2" id="elec-level-name">
+                      {level.name}
+                    </p>
+                    {options.length > 0 && !isInputLevel ? (
+                      /* 楼栋卡片网格：单击即进，替代旧原生 select */
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                        {options.map((o) => (
+                          <button
+                            key={o.value}
+                            type="button"
+                            aria-label={`选择${o.label}`}
+                            className="min-h-9 rounded-inner border border-line bg-surface px-2.5 py-2 text-left transition-[border-color,box-shadow] duration-[var(--dur-fast)] ease-out-soft hover:border-line-strong hover:shadow-card"
+                            onClick={() => pickChoice(o)}
                           >
-                            {line}
-                          </dd>
+                            <span className="block truncate text-body text-text">
+                              {o.label}
+                            </span>
+                            {seenKeys.has(`${o.level}:${o.value}`) && (
+                              <span className="mt-0.5 block text-caption text-text-2">
+                                上次查过
+                              </span>
+                            )}
+                          </button>
                         ))}
                       </div>
-                    ))}
-                    {view.money != null && (
-                      <div>
-                        <dt className="text-caption text-text-2">金额</dt>
-                        <dd className="tabular-num text-body text-text">
-                          ¥ {view.money.toFixed(2)}
-                        </dd>
-                      </div>
+                    ) : isInputLevel ? (
+                      <>
+                        <form
+                          className="flex gap-2"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            submitRoom(roomText);
+                          }}
+                        >
+                          <Input
+                            id="elec-room"
+                            autoFocus
+                            aria-describedby="elec-level-name"
+                            value={roomText}
+                            inputMode="numeric"
+                            autoComplete="off"
+                            placeholder={`请输入${level.name}（例如 101）`}
+                            disabled={phase === "loading"}
+                            onChange={(e) => setRoomText(e.target.value)}
+                          />
+                          <Button type="submit" disabled={phase === "loading"}>
+                            查询
+                          </Button>
+                        </form>
+                        {recentRooms.length > 0 && (
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <span className="text-caption text-text-2">最近查过：</span>
+                            {recentRooms.map((r) => (
+                              <Button
+                                key={r.id}
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openRoom(r)}
+                              >
+                                {r.label}
+                              </Button>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-body text-text-2">
+                        该层暂无可选项，请点上一级重选。
+                      </p>
                     )}
-                  </dl>
+                  </div>
                 )}
 
-                {/* 保存为常用房间（用户起名，留空则用「楼栋 房间号」） */}
-                {complete && (
-                  <form
-                    className="mt-3 flex gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void saveRoom();
-                    }}
-                  >
-                    <Input
-                      value={saveLabel}
-                      placeholder="给这个房间起个名（选填）"
-                      onChange={(e) => setSaveLabel(e.target.value)}
-                    />
-                    <Button type="submit" variant="outline" size="sm">
-                      保存房间
+                {phase === "loading" && options.length === 0 && (
+                  <div aria-hidden className="mt-3 h-9 w-full animate-pulse rounded bg-line" />
+                )}
+
+                {phase === "error" && (
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <p className="min-w-0 text-body text-text-2">{error}</p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => void runQuery(areaId, steps)}
+                    >
+                      重试
                     </Button>
-                  </form>
+                  </div>
                 )}
-
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <Button size="sm" onClick={() => void recharge()}>
-                    <Zap />
-                    去官网充值
-                  </Button>
-                  {notice && <span className="text-caption text-text-2">{notice}</span>}
-                </div>
-              </div>
+              </>
             )}
+          </Surface>
 
-            {/* 未到末级也允许直接充值（官方页里可以自己选房间） */}
-            {!view && phase !== "error" && (
+          {/* 结果卡：主数字 = 后端结构化余额 balanceYuan（null ⇒ 无数据，绝不当 0） */}
+          {view && (
+            <Surface accent="wallet" className="px-4 py-4">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-body font-medium text-text">房间余额</p>
+                {complete && (
+                  <span className="min-w-0 truncate text-caption text-text-2">
+                    {steps.map((s) => s.name || s.value).join(" · ")}
+                  </span>
+                )}
+              </div>
+
+              {view.tip ? (
+                <p className="mt-3 text-body text-alert">{view.tip}</p>
+              ) : view.fields.length === 0 && view.money == null && view.balanceYuan == null ? (
+                <p className="mt-3 text-body text-text-2">该房间暂无用电信息</p>
+              ) : (
+                <>
+                  {view.balanceYuan != null ? (
+                    <>
+                      <p className="mt-3 text-caption text-text-2">当前余额</p>
+                      <p
+                        className={cn(
+                          "tabular-num text-display font-semibold",
+                          view.balanceYuan < 0 ? "text-alert" : "text-text",
+                        )}
+                      >
+                        ¥ {view.balanceYuan.toFixed(2)}
+                      </p>
+                      {view.balanceYuan < 0 && (
+                        <p className="mt-1 text-caption text-alert">余额为负，已欠费</p>
+                      )}
+                    </>
+                  ) : (
+                    !view.tip && (
+                      <p className="mt-3 text-body text-text-2">
+                        余额无数据：学校返回的文本里没有可识别的金额（未采到 ≠ 0 元）。
+                      </p>
+                    )
+                  )}
+
+                  {/* 服务端明细行：通用渲染 + 折行 + 负数标红 */}
+                  {view.fields.length > 0 && (
+                    <dl className="mt-3 space-y-1.5">
+                      {view.fields.map((f) => (
+                        <div key={f.label}>
+                          <dt className="text-caption text-text-2">{f.label}</dt>
+                          {fieldLines(f.value).map((line) => (
+                            <dd
+                              key={line}
+                              className={cn(
+                                "tabular-num text-body",
+                                isNegativeLine(line) ? "text-alert" : "text-text",
+                              )}
+                            >
+                              {line}
+                            </dd>
+                          ))}
+                        </div>
+                      ))}
+                      {view.money != null && (
+                        <div>
+                          <dt className="text-caption text-text-2">金额</dt>
+                          <dd className="tabular-num text-body text-text">
+                            ¥ {view.money.toFixed(2)}
+                          </dd>
+                        </div>
+                      )}
+                    </dl>
+                  )}
+                </>
+              )}
+
+              {area?.maxmoney != null && (
+                <p className="mt-2 text-caption text-text-2">
+                  单笔充值限额 ¥ {area.maxmoney}
+                </p>
+              )}
+
+              {/* 保存为常用房间（用户起名，留空则用「楼栋 房间号」） */}
+              {complete && !currentRoom && (
+                <form
+                  className="mt-3 flex gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void saveRoom();
+                  }}
+                >
+                  <Input
+                    value={saveLabel}
+                    placeholder="给这个房间起个名（选填）"
+                    onChange={(e) => setSaveLabel(e.target.value)}
+                  />
+                  <Button type="submit" variant="outline" size="sm">
+                    保存房间
+                  </Button>
+                </form>
+              )}
+              {complete && currentRoom && (
+                <p className="mt-2 text-caption text-text-2">已存为常用房间：{currentRoom.label}</p>
+              )}
+
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => void recharge()}>
+                <Button size="sm" onClick={() => void recharge()}>
+                  <Zap />
                   去官网充值
                 </Button>
-                {notice && <span className="text-caption text-text-2">{notice}</span>}
-              </div>
-            )}
-          </>
-        )}
-      </Surface>
-
-      {/* 充值（M3.1 批 D）：房间选全且视图无 tip 才出现——金额 → 风险声明 → 支付方式 →
-          免密/安全键盘 → 轮询。房间路径交给后端合成 third_party（批 C 收口：PII 不出后端）。 */}
-      {complete && area && view && !view.tip && (
-        <RechargeFlow
-          feeitem={area}
-          roomLabel={steps.map((s) => s.name || s.value).join(" · ")}
-          path={steps}
-        />
-      )}
-
-      {/* 常用房间：本地存（重启仍在），一键复查余额 */}
-      <Surface className="mt-3 px-4 py-4">
-        <p className="text-body font-medium text-text">常用房间</p>
-        {rooms.length === 0 ? (
-          <EmptyState
-            compact
-            icon={History}
-            domain="wallet"
-            title="还没有常用房间"
-            hint="查到房间后点「保存房间」，之后可一键查余额。"
-          />
-        ) : (
-          <ul className="mt-2 divide-y divide-line">
-            {rooms.map((r) => (
-              <li key={r.id} className="flex items-center gap-3 py-2.5">
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-body text-text">{r.label}</span>
-                  <span className="mt-0.5 block truncate text-caption text-text-2">
-                    {[r.feeitemName, r.path.map((s) => s.name || s.value).join(" · ")]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
-                </span>
                 <Button
+                  size="sm"
                   variant="outline"
-                  size="sm"
-                  disabled={!authed}
-                  onClick={() => (authed ? openRoom(r) : openLoginDialog())}
+                  aria-busy={snapBusy}
+                  disabled={snapBusy}
+                  onClick={() => void runSnapshot()}
                 >
-                  查余额
+                  立即采集
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`删除 ${r.label}`}
-                  onClick={() => void removeRoom(r.id)}
-                >
-                  删除
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )}
-        {!authed && rooms.length > 0 && (
-          <p className="mt-2 text-caption text-text-2">登录后才能查询，房间保存在本机。</p>
-        )}
-      </Surface>
+                {currentRoom?.bound === true ? (
+                  <span className="text-wallet inline-flex items-center gap-1 rounded-control bg-surface-2 px-2 py-1.5 text-caption font-medium">
+                    <Home aria-hidden className="size-3.5" />
+                    我的宿舍
+                  </span>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    aria-busy={bindBusy}
+                    disabled={bindBusy}
+                    onClick={() => void bindCurrent()}
+                  >
+                    绑定为我的宿舍
+                  </Button>
+                )}
+              </div>
+              {notice && (
+                <p className={cn("mt-2 text-caption", noticeBad ? "text-alert" : "text-text-2")}>
+                  {notice}
+                </p>
+              )}
+            </Surface>
+          )}
+
+          {/* 充值（M3.1 批 D）：房间选全且视图无 tip 才出现——金额 → 风险声明 → 支付方式 →
+              免密/安全键盘 → 轮询。房间路径交给后端合成 third_party（批 C 收口：PII 不出后端）。 */}
+          {complete && area && view && !view.tip && (
+            <RechargeFlow
+              feeitem={area}
+              roomLabel={steps.map((s) => s.name || s.value).join(" · ")}
+              path={steps}
+            />
+          )}
+        </div>
+
+        {/* ── 右列：数据侧栏 ── */}
+        <div className="flex min-w-0 flex-col gap-3">
+          <ElectricityTrendCard
+            roomId={boundRoom?.id ?? null}
+            roomLabel={boundRoom?.label ?? null}
+            reloadTick={trendTick}
+          />
+
+          <ElectricityPaymentsCard authed={authed} openLoginDialog={openLoginDialog} />
+
+          {/* 常用房间：本地存（重启仍在），绑定项置顶标「我的宿舍」 */}
+          <Surface className="px-4 py-4">
+            <p className="text-body font-medium text-text">常用房间</p>
+            {sortedRooms.length === 0 ? (
+              <EmptyState
+                compact
+                icon={History}
+                domain="wallet"
+                title="还没有常用房间"
+                hint="查到房间后点「保存房间」，之后可一键查余额。"
+              />
+            ) : (
+              <ul className="mt-2 divide-y divide-line">
+                {sortedRooms.map((r) => (
+                  <li key={r.id} className="flex items-center gap-3 py-2.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        {r.bound === true && (
+                          <span
+                            aria-label="我的宿舍"
+                            className="text-wallet inline-flex items-center"
+                          >
+                            <Home aria-hidden className="size-3.5" />
+                          </span>
+                        )}
+                        <span className="block truncate text-body text-text">{r.label}</span>
+                      </span>
+                      <span className="mt-0.5 block truncate text-caption text-text-2">
+                        {[r.feeitemName, r.path.map((s) => s.name || s.value).join(" · ")]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!authed}
+                      onClick={() => openRoom(r)}
+                    >
+                      查余额
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-pressed={r.bound === true}
+                      onClick={() => void toggleBind(r)}
+                    >
+                      {r.bound === true ? "解绑" : "绑定"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`删除 ${r.label}`}
+                      onClick={() => void removeRoom(r.id)}
+                    >
+                      删除
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {roomsNotice && <p className="mt-2 text-caption text-alert">{roomsNotice}</p>}
+            {!authed && rooms.length > 0 && (
+              <p className="mt-2 text-caption text-text-2">登录后才能查询，房间保存在本机。</p>
+            )}
+          </Surface>
+        </div>
+      </div>
     </section>
   );
+}
+
+/**
+ * 输入级判定（`recentRooms` 的守卫用；与渲染处 `isInputLevel` 同口径）：
+ * 最后一层 + 片区 `lastLevelIsInput`。提出来是因为 `recentRooms` 在 `isInputLevel`
+ * 声明之前求值（两者都在组件体顶层，无 Hook 顺序问题）。
+ */
+function isInputLevelSafe(
+  levels: ElectricityLevel[],
+  steps: RoomStep[],
+  area: FeeItem,
+): boolean {
+  return steps.length === levels.length - 1 && area.lastLevelIsInput === true;
 }
