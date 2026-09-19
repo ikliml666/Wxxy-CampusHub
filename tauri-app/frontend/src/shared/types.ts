@@ -235,6 +235,18 @@ export interface CourseTableConfig {
   /** 跳过日期（2026-09-19 批 2 契约 §8.1）：全校性停课日 "YYYY-MM-DD" 列表；
    *  网格该列不渲染课程 +「休」徽标，ICS 剔除该日 VEVENT */
   skippedDates: string[];
+  /** 按日期生效的作息规则（2026-09-19 批 3 契约 §9.1）：区间含端点、重叠取先声明；
+   *  无命中回落 slots → 内置 */
+  slotRules: SlotRule[];
+}
+
+/** 按日期区间的作息规则（契约 §9.1）。slots 恒非空（保存时校验）。 */
+export interface SlotRule {
+  /** 生效起始日期（含）"YYYY-MM-DD" */
+  startDate: string;
+  /** 生效结束日期（含）"YYYY-MM-DD" */
+  endDate: string;
+  slots: TimeSlot[];
 }
 
 /** 调整类型：调课 / 停课 / 补课（Rust OverrideKind snake_case）。 */

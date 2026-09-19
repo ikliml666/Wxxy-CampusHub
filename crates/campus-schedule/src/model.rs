@@ -95,6 +95,25 @@ pub struct CourseTableConfig {
     /// 显 `skipped` 态。旧文件无该键 → 空列表（serde default）。
     #[serde(default)]
     pub skipped_dates: Vec<NaiveDate>,
+    /// 按日期生效的作息规则（契约 §9.1，2026-09-19 批 3 追加）：每条规则在
+    /// `[start_date, end_date]`（含端点）区间内生效；区间允许重叠，命中取
+    /// 首个声明者。无命中回落 [`CourseTableConfig::slots`] → 仍无则内置校本
+    /// 大节表（三段回落链，收敛点在 tauri 层 `effective_slots_at`）。
+    /// 旧文件无该键 → 空列表（serde default）。
+    #[serde(default)]
+    pub slot_rules: Vec<SlotRule>,
+}
+
+/// 按日期区间的作息规则（契约 §9.1，批 3）。`slots` 恒非空（保存时校验）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotRule {
+    /// 生效起始日期（含）
+    pub start_date: NaiveDate,
+    /// 生效结束日期（含）
+    pub end_date: NaiveDate,
+    /// 该区间的作息
+    pub slots: Vec<TimeSlot>,
 }
 
 fn default_total_weeks() -> u32 {
@@ -220,6 +239,8 @@ mod tests {
         assert!(tt.config.slots.is_none());
         // skipped_dates serde 缺省（契约 §8.1）：旧文件无该键 → 空列表
         assert!(tt.config.skipped_dates.is_empty());
+        // slot_rules serde 缺省（契约 §9.1）：旧文件无该键 → 空列表
+        assert!(tt.config.slot_rules.is_empty());
 
         let full = Timetable {
             config: CourseTableConfig {
@@ -230,6 +251,16 @@ mod tests {
                 first_day_of_week: 1,
                 slots: None,
                 skipped_dates: vec![NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()],
+                slot_rules: vec![SlotRule {
+                    start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
+                    slots: vec![TimeSlot {
+                        number: 1,
+                        start_time: "09:00".into(),
+                        end_time: "10:40".into(),
+                        alias: None,
+                    }],
+                }],
             },
             courses: vec![],
             overrides: vec![],
@@ -238,6 +269,10 @@ mod tests {
         let json = serde_json::to_string(&full).unwrap();
         assert!(json.contains("\"updatedAt\""));
         assert!(json.contains("\"skippedDates\":[\"2026-10-01\"]"));
+        assert!(
+            json.contains("\"slotRules\":[{\"startDate\":\"2026-12-01\",\"endDate\":\"2027-02-28\""),
+            "slot_rules 序列化为 camelCase 键"
+        );
         let back: Timetable = serde_json::from_str(&json).unwrap();
         assert_eq!(back, full);
     }

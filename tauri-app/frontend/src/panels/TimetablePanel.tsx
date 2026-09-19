@@ -27,6 +27,7 @@ import type {
   NoticeCandidate,
   OverrideKind,
   SemesterConfigInput,
+  SlotRule,
   TimeSlot,
   TimetableView,
 } from "@/shared/types";
@@ -532,21 +533,100 @@ interface SlotRow {
   alias: string | null;
 }
 
+/** 作息行编辑器（主作息与每条日期规则复用；大节号 = 行序，保存时生成）。 */
+function SlotRowsEditor({
+  rows,
+  onChange,
+  disabled,
+}: {
+  rows: SlotRow[];
+  onChange: (rows: SlotRow[]) => void;
+  disabled: boolean;
+}) {
+  const update = (i: number, patch: Partial<SlotRow>) =>
+    onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const addRow = () => {
+    const last = rows[rows.length - 1];
+    const start = last ? last.endTime : "08:00";
+    onChange([...rows, { startTime: start, endTime: addMinutes(start, 100), alias: null }]);
+  };
+  return (
+    <>
+      {rows.map((r, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <span className="tabular-num w-14 shrink-0 text-caption font-medium text-text-2">
+            第 {i + 1} 大节
+          </span>
+          <input
+            type="time"
+            value={r.startTime}
+            onChange={(e) => update(i, { startTime: e.target.value })}
+            aria-label={`第 ${i + 1} 大节开始时间`}
+            disabled={disabled}
+            className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+          />
+          <span aria-hidden className="text-caption text-text-2">–</span>
+          <input
+            type="time"
+            value={r.endTime}
+            onChange={(e) => update(i, { endTime: e.target.value })}
+            aria-label={`第 ${i + 1} 大节结束时间`}
+            disabled={disabled}
+            className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+          />
+          <button
+            type="button"
+            aria-label={`删除第 ${i + 1} 大节`}
+            disabled={disabled}
+            onClick={() => onChange(rows.filter((_, j) => j !== i))}
+            className="shrink-0 rounded px-1.5 text-caption text-alert hover:underline disabled:opacity-50"
+          >
+            删除
+          </button>
+        </div>
+      ))}
+      {rows.length === 0 && (
+        <p className="py-3 text-center text-caption text-text-2">暂无作息行，点击下方新增。</p>
+      )}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={addRow}
+        className="mt-2 flex items-center gap-1 text-caption text-sched hover:underline disabled:opacity-50"
+      >
+        <Plus aria-hidden="true" className="size-3.5" />
+        新增大节
+      </button>
+    </>
+  );
+}
+
 function SlotsEditor({
   initial,
+  initialRules,
   usingCustom,
   busy,
+  rulesBusy,
   error,
+  rulesError,
   onSave,
+  onSaveRules,
   onReset,
   onClose,
 }: {
   /** 当前生效作息（自定义或内置默认），打开时快照 */
   initial: TimeSlot[];
+  /** 日期作息规则快照（契约 §9，批 3） */
+  initialRules: SlotRule[];
   usingCustom: boolean;
   busy: boolean;
+  /** 规则保存独立 busy（save_slot_rules 整体替换提交） */
+  rulesBusy: boolean;
   error: string | null;
+  rulesError: string | null;
   onSave: (slots: TimeSlot[]) => void;
+  /** null = 清空全部规则（契约 §9.3） */
+  onSaveRules: (rules: SlotRule[] | null) => void;
   onReset: () => void;
   onClose: () => void;
 }) {
@@ -554,23 +634,56 @@ function SlotsEditor({
     initial.map((s) => ({ startTime: s.startTime, endTime: s.endTime, alias: s.alias })),
   );
   const [localErr, setLocalErr] = useState<string | null>(null);
+  // 日期规则草稿：起止日期 + 作息行，独立整体替换保存
+  const [rules, setRules] = useState<{ startDate: string; endDate: string; rows: SlotRow[] }[]>(
+    initialRules.map((r) => ({
+      startDate: r.startDate,
+      endDate: r.endDate,
+      rows: r.slots.map((s) => ({ startTime: s.startTime, endTime: s.endTime, alias: s.alias })),
+    })),
+  );
+  const [rulesLocalErr, setRulesLocalErr] = useState<string | null>(null);
 
   // Esc 关闭（busy 时忽略）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key === "Escape" && !busy && !rulesBusy) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  }, [busy, rulesBusy, onClose]);
 
-  const update = (i: number, patch: Partial<SlotRow>) =>
-    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const updateRule = (i: number, patch: Partial<{ startDate: string; endDate: string; rows: SlotRow[] }>) =>
+    setRules((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
-  const addRow = () => {
-    const last = rows[rows.length - 1];
-    const start = last ? last.endTime : "08:00";
-    setRows((rs) => [...rs, { startTime: start, endTime: addMinutes(start, 100), alias: null }]);
+  const submitRules = () => {
+    if (rules.length === 0) {
+      setRulesLocalErr(null);
+      return onSaveRules(null); // 全部删除 = 清空规则（契约 §9.3）
+    }
+    for (const [i, r] of rules.entries()) {
+      const n = i + 1;
+      if (!r.startDate || !r.endDate) return setRulesLocalErr(`第 ${n} 条规则需填写起止日期`);
+      if (r.startDate > r.endDate) return setRulesLocalErr(`第 ${n} 条规则的开始日期不能晚于结束日期`);
+      if (r.rows.length === 0) return setRulesLocalErr(`第 ${n} 条规则的作息至少需要一行`);
+      for (const row of r.rows) {
+        if (!row.startTime || !row.endTime) return setRulesLocalErr(`第 ${n} 条规则每行都需要开始与结束时间`);
+        if (row.endTime <= row.startTime) return setRulesLocalErr(`第 ${n} 条规则的结束时间必须晚于开始时间`);
+      }
+    }
+    setRulesLocalErr(null);
+    onSaveRules(
+      rules.map((r) => ({
+        startDate: r.startDate,
+        endDate: r.endDate,
+        slots: r.rows.map((row, j) => ({
+          number: j + 1,
+          startTime: row.startTime,
+          endTime: row.endTime,
+          alias: row.alias,
+        })),
+      })),
+    );
   };
 
   const submit = () => {
@@ -606,53 +719,79 @@ function SlotsEditor({
         </p>
 
         <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
-          {rows.map((r, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <span className="tabular-num w-14 shrink-0 text-caption font-medium text-text-2">
-                第 {i + 1} 大节
-              </span>
-              <input
-                type="time"
-                value={r.startTime}
-                onChange={(e) => update(i, { startTime: e.target.value })}
-                aria-label={`第 ${i + 1} 大节开始时间`}
-                disabled={busy}
-                className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
-              />
-              <span aria-hidden className="text-caption text-text-2">–</span>
-              <input
-                type="time"
-                value={r.endTime}
-                onChange={(e) => update(i, { endTime: e.target.value })}
-                aria-label={`第 ${i + 1} 大节结束时间`}
-                disabled={busy}
-                className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
-              />
-              <button
-                type="button"
-                aria-label={`删除第 ${i + 1} 大节`}
-                disabled={busy}
-                onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
-                className="shrink-0 rounded px-1.5 text-caption text-alert hover:underline disabled:opacity-50"
-              >
-                删除
-              </button>
-            </div>
-          ))}
-          {rows.length === 0 && (
-            <p className="py-3 text-center text-caption text-text-2">暂无作息行，点击下方新增。</p>
-          )}
+          <SlotRowsEditor rows={rows} onChange={setRows} disabled={busy} />
         </div>
 
-        <button
-          type="button"
-          disabled={busy}
-          onClick={addRow}
-          className="mt-2 flex items-center gap-1 text-caption text-sched hover:underline disabled:opacity-50"
-        >
-          <Plus aria-hidden="true" className="size-3.5" />
-          新增大节
-        </button>
+        {/* 按日期生效的作息规则（契约 §9，批 3）：独立整体替换保存，主作息作回落 */}
+        <div className="mt-3 border-t border-line pt-3">
+          <p className="text-body font-semibold text-text">按日期生效的作息规则</p>
+          <p className="mt-1 text-caption text-text-2">
+            命中日期区间（含端点）时优先于上方主作息；区间重叠取先声明的规则。
+          </p>
+          <div className="mt-2 space-y-2">
+            {rules.map((r, i) => (
+              <div key={i} className="rounded-control border border-line p-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={r.startDate}
+                    aria-label={`规则 ${i + 1} 开始日期`}
+                    onChange={(e) => updateRule(i, { startDate: e.target.value })}
+                    disabled={busy || rulesBusy}
+                    className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+                  />
+                  <span aria-hidden className="text-caption text-text-2">–</span>
+                  <input
+                    type="date"
+                    value={r.endDate}
+                    aria-label={`规则 ${i + 1} 结束日期`}
+                    onChange={(e) => updateRule(i, { endDate: e.target.value })}
+                    disabled={busy || rulesBusy}
+                    className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    aria-label={`删除规则 ${i + 1}`}
+                    disabled={busy || rulesBusy}
+                    onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}
+                    className="shrink-0 rounded px-1.5 text-caption text-alert hover:underline disabled:opacity-50"
+                  >
+                    删除
+                  </button>
+                </div>
+                <div className="mt-2">
+                  <SlotRowsEditor
+                    rows={r.rows}
+                    onChange={(rows) => updateRule(i, { rows })}
+                    disabled={busy || rulesBusy}
+                  />
+                </div>
+              </div>
+            ))}
+            {rules.length === 0 && (
+              <p className="text-caption text-text-2/70">暂无规则，日期区间外使用上方主作息。</p>
+            )}
+          </div>
+          <div className="mt-2 flex items-center gap-3">
+            <button
+              type="button"
+              disabled={busy || rulesBusy}
+              onClick={() => setRules((rs) => [...rs, { startDate: "", endDate: "", rows: [] }])}
+              className="flex items-center gap-1 text-caption text-sched hover:underline disabled:opacity-50"
+            >
+              <Plus aria-hidden="true" className="size-3.5" />
+              新增规则
+            </button>
+            <Button type="button" variant="outline" size="sm" disabled={rulesBusy} onClick={submitRules}>
+              {rulesBusy ? "保存中…" : "保存规则"}
+            </Button>
+          </div>
+          {(rulesLocalErr ?? rulesError) && (
+            <p className="mt-2 text-caption text-alert" role="alert">
+              {rulesLocalErr ?? rulesError}
+            </p>
+          )}
+        </div>
 
         {(localErr ?? error) && (
           <p className="mt-2 text-caption text-alert" role="alert">
@@ -989,7 +1128,8 @@ export function TimetablePanel() {
   const [slotsOpen, setSlotsOpen] = useState(false);
   const [slotsBusy, setSlotsBusy] = useState(false);
   const [slotsErr, setSlotsErr] = useState<string | null>(null);
-
+  const [rulesBusy, setRulesBusy] = useState(false);
+  const [rulesErr, setRulesErr] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
@@ -1266,6 +1406,20 @@ export function TimetablePanel() {
   };
 
   // ---------------- 学期设置保存（契约 §7.1：命令返回刷新后的 TimetableView） ----------------
+
+  // ---------------- 日期作息规则保存（契约 §9.3：整体替换，null = 清空） ----------------
+
+  const saveSlotRules = async (rules: SlotRule[] | null) => {
+    setRulesBusy(true);
+    setRulesErr(null);
+    const r = await invokeCommand<TimetableView>("save_slot_rules", { rules });
+    setRulesBusy(false);
+    if (r.success && r.data) {
+      setView({ phase: "ready", data: r.data });
+    } else {
+      setRulesErr(r.message ?? "保存失败");
+    }
+  };
 
   const saveSemesterConfig = async (input: SemesterConfigInput) => {
     setSettingsBusy(true);
@@ -1757,14 +1911,18 @@ export function TimetablePanel() {
             />
           )}
 
-          {/* 作息时间表编辑弹层（打开时快照当前生效作息） */}
-          {slotsOpen && ready && (
+          {/* 作息时间表编辑弹层（打开时快照当前生效作息与日期规则） */}
+          {slotsOpen && ready && tt && (
             <SlotsEditor
               initial={ready.slots}
+              initialRules={tt.config.slotRules}
               usingCustom={tt?.config.slots != null && tt.config.slots.length > 0}
               busy={slotsBusy}
+              rulesBusy={rulesBusy}
               error={slotsErr}
+              rulesError={rulesErr}
               onSave={(slots) => void saveSlots(slots)}
+              onSaveRules={(rules) => void saveSlotRules(rules)}
               onReset={() => void resetSlots()}
               onClose={() => setSlotsOpen(false)}
             />

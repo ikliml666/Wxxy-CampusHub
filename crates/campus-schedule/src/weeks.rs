@@ -102,6 +102,7 @@ mod tests {
             first_day_of_week: 1,
             slots: None,
             skipped_dates: vec![],
+            slot_rules: vec![],
         };
         assert_eq!(
             current_week(

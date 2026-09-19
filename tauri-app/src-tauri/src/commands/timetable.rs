@@ -33,7 +33,7 @@ use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use crate::infra::{state, timetable};
 use campus_portal::block_time_slots;
-use campus_schedule::model::{Course, CourseOverride, TimeSlot, Timetable};
+use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
     current_week, diff_courses, expand_occurrences, parse_kb_response, parse_notice_text,
     previous_or_same_day_of_week, semester_start_from_week, OccurrenceKind, NoticeConfidence,
@@ -61,20 +61,25 @@ pub struct TimetableView {
     pub today: String,
 }
 
-/// 生效作息的**单点取值**（冻结契约 §2.3 slots 取值口径，2026-09-18 收尾轮修订）：
-/// `config.slots` 有值且非空 → 用户自定义作息（唯一事实源）；`None`/空 → 回落
-/// 内置校本大节表 [`campus_portal::block_time_slots`]。
+/// 生效作息的**单点取值**（冻结契约 §2.3 slots 取值口径；批 3 契约 §9.2 三段回落链）：
+/// ① `slot_rules` 首个日期命中的规则（`start_date <= date <= end_date` 含端点；
+/// 区间允许重叠、重叠取**先声明**者，对齐上游 firstOrNull）；② 无命中 →
+/// `config.slots` 有值且非空 → 用户自定义作息；③ 仍无 → 内置校本大节表
+/// [`campus_portal::block_time_slots`]。
 /// 网格行（[`TimetableView::slots`]）、ICS 展开、大节号→时间查找必须全部经本函数
 /// 取值，不得一处分发一处硬编码。
-///
-/// `date` 参数为批 3（P3 slot_rules 区间命中）预留的扩展点（契约 §8.3）：批 2
-/// 仅完成签名迁移、暂不消费；批 3 在此实现 rules → config.slots → 内置的三段
-/// 回落链，调用点无需再动。
 fn effective_slots_at(
     config: &campus_schedule::model::CourseTableConfig,
     date: NaiveDate,
 ) -> Vec<TimeSlot> {
-    let _ = date; // P3 扩展点：slot_rules 区间命中（决策 2）
+    // 规则 slots 恒非空（save_slot_rules 校验）；手改 JSON 的空规则防御性跳过回落
+    if let Some(rule) = config
+        .slot_rules
+        .iter()
+        .find(|r| r.start_date <= date && date <= r.end_date && !r.slots.is_empty())
+    {
+        return rule.slots.clone();
+    }
     match config.slots.as_deref() {
         Some(custom) if !custom.is_empty() => custom.to_vec(),
         _ => block_time_slots(),
@@ -82,7 +87,7 @@ fn effective_slots_at(
 }
 
 /// 纯函数组装（便于单测）：周次口径与 [`parse_notice`] 一致
-/// （`campus_schedule::current_week`）。`slots` 取「今天」的生效作息（契约 §8.3：
+/// （`campus_schedule::current_week`）。`slots` 取「今天」的生效作息（契约 §9.4：
 /// 跨作息区间的换季周无法逐天变行，与上游周视图同口径的已知取舍，ICS 逐事件
 /// 日期精确取值）。
 fn build_timetable_view(tt: Timetable, today: chrono::NaiveDate) -> TimetableView {
@@ -825,6 +830,50 @@ pub async fn save_skipped_dates(
     }
 }
 
+// ---------------- 按日期生效的作息规则（2026-09-19 批 3，契约 §9） ----------------
+
+/// 作息规则校验（契约 §9.3）：每条 `start_date <= end_date`、`slots` 非空、
+/// 且规则内作息复用 [`validate_time_slots`]（号递增 / HH:MM / 结束晚于开始）。
+/// 区间是否重叠**不校验**——重叠合法，取先声明者（契约 §9.2）。
+fn validate_slot_rules(rules: &[SlotRule]) -> Result<(), String> {
+    for (i, rule) in rules.iter().enumerate() {
+        let n = i + 1;
+        if rule.start_date > rule.end_date {
+            return Err(format!("第 {n} 条规则的开始日期必须不晚于结束日期"));
+        }
+        if rule.slots.is_empty() {
+            return Err(format!("第 {n} 条规则的作息至少需要一条"));
+        }
+        validate_time_slots(&rule.slots).map_err(|e| format!("第 {n} 条规则：{e}"))?;
+    }
+    Ok(())
+}
+
+/// 保存按日期生效的作息规则（契约 §9.3 `save_slot_rules`）：**整体替换**语义；
+/// `None` = 清空全部规则（回落主作息/内置）。返回刷新后的 [`TimetableView`]
+/// （前端免二次拉取）。
+#[tauri::command]
+pub async fn save_slot_rules(
+    rules: Option<Vec<SlotRule>>,
+) -> Result<CommandResult<TimetableView>, String> {
+    if let Some(v) = &rules {
+        if let Err(e) = validate_slot_rules(v) {
+            return Ok(CommandResult::err(&e));
+        }
+    }
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        tt.config.slot_rules = rules.clone().unwrap_or_default();
+        Ok(tt.clone())
+    }) {
+        Ok(tt) => Ok(CommandResult::ok(build_timetable_view(
+            tt,
+            chrono::Local::now().date_naive(),
+        ))),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +911,7 @@ mod tests {
                 first_day_of_week: 1,
                 slots: None,
                 skipped_dates: vec![],
+                slot_rules: vec![],
             },
             courses,
             overrides: vec![],
@@ -1711,5 +1761,183 @@ mod tests {
                 NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(),
             ]
         );
+    }
+
+    // ---------------- 批 3：slot_rules 区间命中与三段回落链（契约 §9） ----------------
+
+    fn d(text: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    fn slot_rule(start: &str, end: &str, slots: Vec<TimeSlot>) -> SlotRule {
+        SlotRule { start_date: d(start), end_date: d(end), slots }
+    }
+
+    fn tt_with_slots_and_rules(
+        slots: Option<Vec<TimeSlot>>,
+        rules: Vec<SlotRule>,
+    ) -> campus_schedule::model::CourseTableConfig {
+        let mut cfg = timetable_with(None, vec![]).config;
+        cfg.slots = slots;
+        cfg.slot_rules = rules;
+        cfg
+    }
+
+    /// 区间含端点命中（契约 §9.2）：`start_date <= date <= end_date` 两端都算；
+    /// 区间外回落。冬季规则无 `config.slots` 时区间外进一步回落内置。
+    #[test]
+    fn effective_slots_at_rule_hit_inclusive_endpoints() {
+        let winter = vec![slot(1, "09:00", "10:40")];
+        let cfg = tt_with_slots_and_rules(
+            None,
+            vec![slot_rule("2026-12-01", "2027-02-28", winter.clone())],
+        );
+        assert_eq!(effective_slots_at(&cfg, d("2026-12-01")), winter, "命中起始日（含）");
+        assert_eq!(effective_slots_at(&cfg, d("2027-02-28")), winter, "命中结束日（含）");
+        assert_eq!(effective_slots_at(&cfg, d("2026-11-30")), block_time_slots(), "区间外回落内置");
+        assert_eq!(effective_slots_at(&cfg, d("2027-03-01")), block_time_slots(), "区间后回落内置");
+    }
+
+    /// 重叠区间取先声明者（契约 §9.2，对齐上游 firstOrNull）：A 先声明覆盖 B。
+    #[test]
+    fn effective_slots_at_overlapping_rules_take_first_declared() {
+        let a = vec![slot(1, "08:00", "09:00")];
+        let b = vec![slot(1, "10:00", "11:00")];
+        let cfg = tt_with_slots_and_rules(
+            None,
+            vec![
+                slot_rule("2026-01-01", "2026-06-30", a.clone()),
+                slot_rule("2026-03-01", "2026-05-01", b),
+            ],
+        );
+        assert_eq!(effective_slots_at(&cfg, d("2026-04-01")), a, "重叠区取先声明");
+        assert_eq!(effective_slots_at(&cfg, d("2026-02-01")), a);
+    }
+
+    /// 三段回落链（契约 §9.2）：rules 命中 → config.slots → 内置；空规则列表、
+    /// 命中区间外的日期、以及手改 JSON 的空 slots 规则都正确逐段回落。
+    #[test]
+    fn effective_slots_at_fallback_chain_rules_then_slots_then_builtin() {
+        let custom = vec![slot(1, "08:30", "10:00")];
+        let winter = vec![slot(1, "09:00", "10:40")];
+
+        // 空规则列表 + 自定义主作息 → 主作息（第二段）
+        let cfg = tt_with_slots_and_rules(Some(custom.clone()), vec![]);
+        assert_eq!(effective_slots_at(&cfg, d("2026-12-15")), custom);
+
+        // 有规则但日期未命中 → 主作息
+        let cfg = tt_with_slots_and_rules(
+            Some(custom.clone()),
+            vec![slot_rule("2026-12-01", "2027-02-28", winter.clone())],
+        );
+        assert_eq!(effective_slots_at(&cfg, d("2026-10-01")), custom);
+        assert_eq!(effective_slots_at(&cfg, d("2026-12-15")), winter, "命中 → 规则（第一段）");
+
+        // 未命中 + 无主作息 → 内置（第三段）
+        let cfg = tt_with_slots_and_rules(
+            None,
+            vec![slot_rule("2026-12-01", "2027-02-28", winter.clone())],
+        );
+        assert_eq!(effective_slots_at(&cfg, d("2026-10-01")), block_time_slots());
+
+        // 防御：手改 JSON 的空 slots 规则不算命中 → 继续回落主作息
+        let cfg = tt_with_slots_and_rules(Some(custom.clone()), vec![slot_rule("2026-12-01", "2027-02-28", vec![])]);
+        assert_eq!(effective_slots_at(&cfg, d("2026-12-15")), custom);
+    }
+
+    /// 旧 JSON（无 slotRules 键）反序列化无损 → 空列表，取值链为
+    /// config.slots → 内置，与批 2 行为逐字节一致。
+    #[test]
+    fn legacy_timetable_json_without_slot_rules_opens_clean() {
+        let json = r#"{
+            "config": { "courseTableId": "default", "semesterStartDate": "2026-09-07",
+                        "semesterTotalWeeks": 20, "firstDayOfWeek": 1,
+                        "slots": [{"number": 1, "startTime": "08:30", "endTime": "10:00"}] },
+            "courses": [], "overrides": [], "updatedAt": ""
+        }"#;
+        let tt: Timetable = serde_json::from_str(json).unwrap();
+        assert!(tt.config.slot_rules.is_empty());
+        assert_eq!(
+            effective_slots_at(&tt.config, d("2026-12-15")),
+            tt.config.slots.clone().unwrap(),
+            "无规则 → 主作息（回落链第二段）"
+        );
+    }
+
+    /// TimetableView.slots 取「今天」生效作息（契约 §9.4 已知取舍）：同一课表在
+    /// 换季日前后组装，slots 行数与起始时刻随 today 切换（网格行数随规则变化）。
+    #[test]
+    fn timetable_view_slots_follow_today_across_slot_rules() {
+        let mut tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+        tt.config.slots = Some(vec![
+            slot(1, "08:00", "09:40"),
+            slot(2, "10:10", "11:50"),
+            slot(3, "14:00", "15:30"),
+            slot(4, "15:40", "17:10"),
+        ]);
+        tt.config.slot_rules = vec![slot_rule(
+            "2026-12-01",
+            "2027-02-28",
+            vec![slot(1, "09:00", "10:40"), slot(2, "10:50", "12:20"), slot(3, "14:30", "16:00")],
+        )];
+        let before = build_timetable_view(tt.clone(), d("2026-11-30"));
+        assert_eq!(before.slots.len(), 4, "换季前 → 主作息 4 行");
+        assert_eq!(before.slots[0].start_time, "08:00");
+        let after = build_timetable_view(tt, d("2026-12-15"));
+        assert_eq!(after.slots.len(), 3, "换季后 → 冬季规则 3 行");
+        assert_eq!(after.slots[0].start_time, "09:00");
+    }
+
+    /// save_slot_rules 入参校验（契约 §9.3）：start>end / 空 slots / 规则内非法
+    /// 时刻逐项拒绝（带规则序号）；重叠区间合法（不校验，取先声明）。
+    #[test]
+    fn slot_rule_validation_rejects_bad_rules() {
+        let ok = slot_rule("2026-12-01", "2027-02-28", vec![slot(1, "09:00", "10:40")]);
+        assert!(validate_slot_rules(&[ok.clone()]).is_ok());
+
+        // start > end
+        let reversed = slot_rule("2027-02-28", "2026-12-01", vec![slot(1, "09:00", "10:40")]);
+        assert!(validate_slot_rules(&[reversed]).unwrap_err().contains("开始日期必须不晚于结束日期"));
+        // 空 slots
+        let empty = slot_rule("2026-12-01", "2027-02-28", vec![]);
+        assert!(validate_slot_rules(&[empty]).unwrap_err().contains("至少需要一条"));
+        // 规则内非法时刻（复用 validate_time_slots，报错带规则序号）
+        let bad_time = slot_rule("2026-12-01", "2027-02-28", vec![slot(1, "9:00", "10:40")]);
+        let err = validate_slot_rules(&[bad_time]).unwrap_err();
+        assert!(err.contains("第 1 条规则"), "报错应带规则序号：{err}");
+        assert!(err.contains("HH:MM"));
+        // 第二条规则出错时序号正确
+        let bad_second = slot_rule("2026-12-01", "2027-02-28", vec![slot(1, "10:40", "09:00")]);
+        assert!(validate_slot_rules(&[ok.clone(), bad_second])
+            .unwrap_err()
+            .contains("第 2 条规则"));
+        // 重叠区间合法（命中语义取先声明，校验不拒绝）
+        let overlap = slot_rule("2026-01-01", "2026-06-30", vec![slot(1, "08:00", "09:00")]);
+        assert!(validate_slot_rules(&[ok, overlap]).is_ok());
+    }
+
+    /// 建规则后 ICS 时刻随日期切换（蓝图批 3 验收）：换季日前的 VEVENT 用内置
+    /// 作息、之后的 VEVENT 用规则作息——ICS 逐 VEVENT 日期经 effective_slots_at
+    /// 取值（收敛点），网格与今日页自动获得同一语义。
+    #[test]
+    fn ics_event_times_follow_slot_rules_by_date() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![1, 13])],
+        );
+        // 冬季作息：第 1 大节 09:00-10:40（与内置 08:00-09:40 可区分）
+        tt.config.slot_rules = vec![slot_rule(
+            "2026-11-01",
+            "2027-02-28",
+            vec![slot(1, "09:00", "10:40")],
+        )];
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 2);
+        // 第 1 周周一 = 2026-09-07（换季前）→ 内置大节 1：08:00
+        assert!(ics.contains("DTSTART:20260907T080000"));
+        // 第 13 周周一 = 2026-11-30（换季后）→ 规则大节 1：09:00
+        assert!(ics.contains("DTSTART:20261130T090000"));
+        assert!(ics.contains("DTEND:20261130T104000"));
+        assert!(!ics.contains("DTSTART:20261130T080000"), "换季后不得再用内置时刻");
     }
 }
