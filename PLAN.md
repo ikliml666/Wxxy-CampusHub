@@ -47,10 +47,12 @@
 ### 2. 慧新E校（内网，新中中平台）
 - Spring Cloud OAuth 体系；登录 `POST /berserker-auth/oauth/token`，Basic 头为 `mobile_service_platform:mobile_service_platform_secret` 的 base64
 - token 存 sessionStorage（`access_token`/`token_type`），请求带自定义头 `synjones-auth: bearer <token>`；⚠️ sessionStorage 不跨标签页，新开标签即掉登录（2026-09-17 实测，官方产品缺陷，客户端后端持 token 规避）
-- 门户→慧新E校 SSO 桥：`http://10.3.100.110/berserker-auth/cas/redirect/lyCas?targetUrl=...`
+- 门户→慧新E校 SSO 桥（2026-09-19 实测补全）：浏览器入口 `http://10.3.100.110/berserker-auth/cas/redirect/lyCas?targetUrl=...` → 302 到 CAS，其 `service` 指向 `{BASE}/berserker-auth/cas/login/lyCas?targetUrl=<二次编码>`——**换 ST 要对准后者**（与教务 `jwglxt` 同构）；子 SPA 的 token 交接靠落点 URL 的 `?synjones-auth=<raw token>` query
 - ⚠️ **4030 故障关键结论**：服务端按请求参数 `synAccessSource` 做来源授权，`pc` 来源校验失败（当前服务端配置问题），**`app` 来源放行**——本客户端调 berserker 系接口一律带 `synAccessSource=app`
-- **电费查询直连（匿名可用，已实测）**：`http://10.3.100.110/charge-pc/pays/450`（校区→楼栋→房间→确认信息，返回剩余金额与单价；`450` 为电费项目 feeitemid，来自 appScheme 数据 `appCode:electricity`）
-- 应用方案接口 `GET /berserker-app/appScheme/info` 可拿到全部服务应用列表
+- **电费接口（2026-09-19 复核；旧说法「`charge-pc/pays/450` 匿名可用」已证伪——那只是 Vue SPA 壳 HTML）**：真链路 = `GET /charge/feeitem`（**唯一匿名可读**，返回启用片区 450 梅园1-3号 / 449 李园9-11号 / 448 桃园1-8号，另有同名停用项 428 须按 `status==1` 过滤）→ `GET /charge/feeitem/singleFeeitem?feeitemid=`（需 token）→ `POST /charge/feeitem/getThirdData`（form，`level` 0→1→2 级联、末级 `type=IEC`；结果在 `map.showData` 动态键名字典，金额 `map.money|iectranamt`）；**级联与详情均需 token**
+- 应用方案接口 `GET /berserker-app/appScheme/info?type=user&serviceType=<agentType>` 可拿到服务应用列表（**匿名可读**，2026-09-19 实测 200；缺参数报「缺少用户信息类型!」）
+- **一卡通接口（2026-09-19 实测）**：余额/卡信息 `GET /berserker-app/ykt/tsm/queryCurrentCard`、`queryCard?account=`（`db_balance`+`unsettle_amount` 单位**分** → 元；`elec_accamt` 为电控账户金额，即慧新E校侧电费余额）；**消费流水在独立服务** `GET /berserker-search/search/personal/turnover?size&current&account&type=2` → `{code,data:{total,records[]}}`（`tranamt` 分、`typeFrom=="1"` 为收入）；全部需 token
+- 鉴权细节：来源参数与头**双份携带**（GET 走 query、POST 走 body，另加同名头 `synAccessSource: app`）；4030 的判定是 **HTTP 401 + `body.code==4030`**（不是 403）；berserker 系信封 `{code,success,data,msg}` 与 charge 系 `{code,message}` **不可共用解析器**
 - ⚠️ 一卡通余额两源不同步（门户卡片 28.01 vs 慧新E校 17.51，2026-09-17 同时刻）——客户端以慧新E校实时接口为准
 
 ### 3. WebVPN（校外通道）
@@ -92,6 +94,10 @@
 - 验收：各页数据与官方一致且修复官方已知缺陷（名称截断/空态占位）；首页无信息墙
 - 2026-09-18 完成情况：五页全部接通门户真实数据并通过真机验收（`cargo test --workspace` **102 passed** / 0 failed；明细见 `CHANGELOG.md` M2 批次 1–3 与遗留项条目、设计文档附录 E–H）。原三项裁剪的现状：① **WebVPN B 类应用包装仍未做**——实测网关对未登录请求一律回落（会议代理端点无凭据 GET 返回 302 → 首页；应用域名一律落 CAS 登录页），三种明文包装形式最终 URL 完全相同、网关丢弃目标路径，包装格式在无 WebVPN 会话前提下无法验证，**会话打通 + URL 包装 + A 类 CAS 直达签发整体归 M4**（`open_app` 仍协议白名单直开；本轮已补可达性元数据徽标与分级提示，WebVPN/暂不可用类不再静默直开）；② **日程月视图与每日计数角标已做**（2026-09-18 遗留项批次：`get_schedule_day_counts` 命令 24→25，月视图自然月网格 + 服务端 count 角标，点击日期跳周；角标为全量计数——计数接口无分类参数，如实呈现）；③ **会议卡并入已做**（同日批次：DJZ 按教学周次构造标题实测四组对照、`SJ` 自然语言时间转 24h、解析不出按全天不伪造、失败降级不影响课表与日历、`[meeting-diag]` 失败打点可观测）；④ **慧新E校实时直连未做**（列为可选增强，待用户拍板）。
 - 明确不做：邮箱/图书的深度功能（仅卡片数字，点击跳官方）
+- **2026-09-19 补记（会话 `sess-36e5d8e0`）**——用户指出「M2 部分内容好像没完成」，核查后确认五页数据接线属实，缺的是三项：
+  ① **顶栏命令面板已补做**：M2 清单里**从未列过**此项（属代码注释里的超前标注「命令面板 · M2 接入」，PLAN 未承诺），2026-09-19 按用户裁决实现——`Cmd/Ctrl+K` 呼起，数据源 = Dock 页面项 + 现有 store 动作 + 设置跳转，键盘全程可达；`AppShell.tsx` 的 `aria-disabled` 占位与三处「M2 接入」注释已清除。
+  ② **修复「各界面资讯栏目获取失败」**：报错文案 `获取登录信息失败: 响应解析失败: tryLoginUserInfo 缺少 userName`。根因是**门户会话失效被误报成解析失败**——门户用 **HTTP 200 + `data:null` + `meta.statusCode=302`** 表达失效（与匿名响应逐字段相同），客户端只认 `data.userName`、上层又把非 HTTP 错误一律归 `Parse`；同时 `portal_probe` 对死会话误报 Alive（`check_session` 因此不清会话）。已归一为 `PortalNotLogin`（文案「请先登录」）+ `probe` 追加信封判定，失效即清会话引导重登。详见 [[learnings/portal-session-expiry-200-envelope]]。
+  ③ 首页钱包三卡与钱包页**统一取慧新E校实时余额**（一卡通实时优先、失败回落门户快照并标注来源），见 §M3。
 
 ### M2.5 · 课表（用户点名重点功能）✅
 - [x] **教务自动导入**：复用 CAS 会话 SSO 进正方教务 → `POST /jwglxt/kbcx/xskbcx_cxXsKb.html?gnmkdm=N2151`（xnm/xqm，已实测）→ 解析 kbList（课程/教室/教学班/节次/周次位掩码）落库；按账号角色选端点（学生已验证，教师待侦察）
@@ -112,12 +118,27 @@
   - **ICS 导出**：交付形态已修正——原前端 Blob 下载在 WebView2 里静默失效（真机点验发现），改为后端写入 `dirs::download_dir()` 并回显路径；真机确认写出 23136 字节、82 个 VEVENT 的合法 iCalendar 文件
   - **命令面 35 条**（M2.5 新增 10 条：`get_timetable` / `import_timetable` / `add_course_manual` / `update_course` / `delete_course` / `parse_notice` / `apply_override` / `revoke_notice` / `export_ics` / `save_time_slots`）
 
-### M3 · 一卡通 + 电费查询 ⬜
-- [ ] CAS→慧新E校 SSO 桥接换 token（`berserker-auth/cas/redirect/lyCas` 流程）
-- [ ] 一卡通余额/流水（`berserker-app` 接口，全部带 `synAccessSource=app`）
-- [ ] 电费查询页：校区/楼栋/房间 → 剩余金额/单价（charge-pc 直连 + 余额查询接口）
-- [ ] 常用房间绑定（多房间记忆，为 M5 电费提醒铺路）
-- 验收：查询结果与官方渠道一致；校内全程不需浏览器
+### M3 · 一卡通 + 电费查询 ✅（2026-09-19 完成，会话 `sess-36e5d8e0`）
+> 实施计划（任务级，含全部实测接口契约）：`docs/superpowers/plans/2026-09-19-m3-ecard-electricity.md`；模块与坑见 `.codewiki/modules/campus-synjones.md`
+- [x] **CAS→慧新E校 SSO 桥接换 token**：`{BASE}/berserker-auth/cas/login/lyCas` 换 ST + 302 链，**token 在落点 URL query `?synjones-auth=`**（实测 2 跳、无 Set-Cookie）；**`targetUrl` 必须指向子应用**——`/campus-card-pc/`、`/charge-pc/pays/{id}` 带 token，`/plat/shouyeUser` 与裸调用**都不带**（默认值据此定为前者）
+- [x] **一卡通余额/流水**：卡信息 `berserker-app/ykt/tsm/*`；流水在独立服务 `berserker-search/search/personal/turnover`（`type` 为**收支方向**：1 收入 / 2 支出 / 3 空，**不传即全量**）；余额口径以**电子账户 `elec_accamt`** 为主（`elec` = electronic，**不是电费余额**——实测三处数值一致，推翻旧推断）；一律 `synAccessSource=app` **双份携带**（query/body + 同名头）
+- [x] **电费查询页**：片区→校区→楼栋→**手输房间号** → 剩余金额/单价（`/charge/feeitem` 三级链路）；片区口径 = `status==1 && impl_interface` 非空（**恰好 3 条**，同名停用项靠 status 排除）；末级是**输入级**（`flag[4]=='3'`）不是下拉；结果 `map.showData` 键名**恒为「信息」**、值是三片区**格式各异**的自由文本（`map.money`/`iectranamt` 实测不存在）→ 通用字典渲染 + 逗号折行 + 负数标红，**不做文本解构**
+- [x] **常用房间绑定**：本地落盘 `%APPDATA%/campushub/electricity_rooms.json`（含三级 path 的 level/code/value/name；同片区同路径 upsert、上限 20）；平台侧 `sceneBind/add` 是写接口，不采用
+- [x] **充值（用户 2026-09-19 裁决：官方链接、软件内跳转、统一风格）**：应用内嵌 webview 打开官方缴费页，Rust 端注入 token 与 `localStorage.configs`（缺失会 `JSON.parse(null)` 白屏）+ **`synAccessSource` 改写 hook**（官方页自己硬编码 `pc`，会撞学校 4030 策略弹「服务大厅未授权」）；窗口标题/图标用客户端品牌 + 主色 CSS 覆盖（尽力而为）；**不复刻签名下单**，真实支付在官方页完成
+- [x] **token 单活纪律**：全应用共用单一 `SynjonesClient`（进程级 static + 互斥锁串行化），禁止并发 SSO；CAS TGT 隔夜过期（换票 500 且正文含票据，不得回显）
+- 验收 ✅（2026-09-19 真机 CDP 点验，`tauri dev` + WebView2 远程调试端口，方法见 `.codewiki/learnings/tauri-webview-ui-verification.md` 与 `tauri-multiwindow-cdp-verification.md`）：
+  - 电费三级链路：三片区列出 → 校区(1 项) → 楼栋(1号楼/3号楼/2号楼) → 手输房间号 `101` → 返回「房间号：101 / 剩余金额：-545.70 / 单价：0.5400」，**负数行标红** ✅
+  - 常用房间：保存 → 确认落盘 `electricity_rooms.json`（结构完整）→ 列表出现「查余额/删除」✅
+  - 钱包页：电子账户余额与 live 实测一致、**1042 条**流水分页、收入 `+`/支出 `-`、时间倒序 ✅
+  - 首页钱包卡：一卡通显示**实时值 + 「实时」来源标注**（失败静默回落门户快照，不阻塞首屏）✅
+  - 内嵌充值窗口：**登录态**（渲染出官方缴费表单而非登录页）；该窗口调 IPC 被 ACL 拒绝（安全边界验证通过）✅
+  - 自动化：`cargo test --workspace` **271 passed / 0 failed**；前端 `tsc --noEmit` + `vite build` 通过 ✅
+- 诚实边界：
+  - **今日/本月消费无解**：「`statistics/turnover/sum/user`」需五参、多种参数组合实测恒空 → UI 显示「暂不可用」（`count` 返回全时段总额且无视日期参数，不可替代）
+  - **主窗口关闭时子窗口是否联动关闭未验**：`core:window:allow-close` 未授予 JS，CDP 触发不了窗口装饰按钮，需人工点一次确认
+  - **校外不可用**：内网明文 IP，依赖 M4 的 WebVPN
+- 不做：充值金额的签名下单复刻（charge-pc 走 SHA256 签名 + 动态 HTML form 跳转，真实金钱操作留在官方页）
+- 命令面：M3 新增 10 条（一卡通 3 + 电费 7），全局 **53 条**（auth 8 / profile 5 / portal 12 / timetable 18 / synjones 3 / electricity 7）
 
 ### M4 · 网络智能路由 ⬜
 - [ ] 移植 Wxxy-CampusLogin 校园网检测（/18 子网 + Portal 可达性判定；仅移植检测，登录/注销协议不带过来）

@@ -246,13 +246,17 @@ impl CasClient {
         Ok(final_url)
     }
 
-    /// 门户会话探测：jar 有 customsid 且访问门户首页未被弹回 CAS 域 = Alive。
+    /// 门户会话探测：jar 有 `customsid` → 首页未被弹回 CAS 域 → 鉴权接口信封
+    /// `meta.success == true`（[`is_alive_envelope`]），三重确认才是 Alive。
+    ///
     /// 判据取舍（均实测）：
     /// - 正文匹配不可用：门户首页 HTML 恒含 `lyuapServer/login` 常量（2 处），会把已登录判成 Expired；
     /// - `/shiro-cas` 端点不可用：无 ticket 访问会触发服务端断连（hyper IncompleteMessage）；
-    /// - 未登录场景由 `customsid` 缺失挡住（首页未登录也返回 200 外壳，前端路由才跳登录）。
-    ///
-    /// ponytail: 过期精确检测待 M2 接入门户 API 后用鉴权接口（401/302 即过期）替代。
+    /// - 未登录场景由 `customsid` 缺失挡住（首页未登录也返回 200 外壳，前端路由才跳登录）；
+    /// - **首页判据判不出过期**：死会话首页同样 200 且不弹 CAS 域（2026-09-19 实测，用 09-18
+    ///   的旧 cookie 复原后仍被判 Alive），故追加鉴权接口判定。会话失效时该接口返回
+    ///   **HTTP 200** + `data:null` + `meta.statusCode=302`（**不是 401/302**），
+    ///   状态码与 content-type 全是成功形态，只能解信封判定。
     pub async fn portal_probe(&self) -> SessionState {
         if !self.jar.has("customsid") {
             return SessionState::Expired;
@@ -265,9 +269,26 @@ impl CasClient {
             .host_str()
             .is_some_and(|h| h.contains("wxcas.cwxu.edu.cn"));
         if bounced {
-            SessionState::Expired
-        } else {
+            return SessionState::Expired;
+        }
+        let base = PORTAL_PROBE.trim_end_matches('/');
+        let Ok(resp) = self
+            .http
+            .post(format!("{base}/tryLoginUserInfo"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await
+        else {
+            return SessionState::Expired;
+        };
+        let Ok(body) = resp.text().await else {
+            return SessionState::Expired;
+        };
+        if is_alive_envelope(&body) {
             SessionState::Alive
+        } else {
+            SessionState::Expired
         }
     }
 
@@ -292,8 +313,9 @@ impl CasClient {
     ///
     /// 复用 [`Self::http`]（与登录/探测同 jar、同 UA），门户 base 由 [`PORTAL_PROBE`]
     /// 派生（不另设常量）；解析见 [`extract_user_profile`]（纯函数，离线单测覆盖）。
-    /// 2026-09-18 实测：GET 返回 405，须 POST JSON `{}`；会话失效时响应缺 userName
-    /// → Parse 错误，上层尽力而为降级，不影响登录主流程。
+    /// 2026-09-18 实测：GET 返回 405，须 POST JSON `{}`；会话失效时信封
+    /// `meta.success=false` / `data:null` → [`CampusAuthError::PortalNotLogin`]
+    /// （上层提示重新登录），其余结构异常 → Parse。
     pub async fn portal_user_profile(&self) -> Result<PortalProfile, CampusAuthError> {
         let base = PORTAL_PROBE.trim_end_matches('/');
         let body = self
@@ -370,6 +392,20 @@ impl CasClient {
     }
 }
 
+/// tryLoginUserInfo 响应是否为「活会话」信封（纯函数供离线单测）：合法 JSON 且
+/// `meta.success == true`。其余一切（非法 JSON / 无 meta / `data:null` / `success` 非 true）
+/// 都按失效处理——失效响应是 HTTP 200 + `meta.statusCode=302`，状态码判不出来。
+pub fn is_alive_envelope(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("meta")
+                .and_then(|m| m.get("success"))
+                .and_then(|s| s.as_bool())
+        })
+        == Some(true)
+}
+
 /// 从 getLoginInfo 响应提取 `data.headPortrait` 裸 base64（纯函数供离线单测）。
 ///
 /// 实测形态为完整 data URL（`data:image/png;base64,iVBOR…`），同时容忍裸 base64：
@@ -400,15 +436,27 @@ pub fn extract_head_portrait(body: &str) -> Result<String, CampusAuthError> {
 ///
 /// 实测形态：`{"meta":...,"data":{"userId":"...","userName":"张三","departmentName":"…",
 /// "email":"…","orgId":"-1","tokenId":"<JWT>"}}`。
+/// **先判信封**：`meta.success == false` 或 `data` 缺失 / 为 `null` → 会话失效
+/// （[`CampusAuthError::PortalNotLogin`]）——失效响应是 HTTP 200 + `data:null` +
+/// `meta.statusCode=302`，与新会话的匿名响应逐字段相同，只能解信封判定。
 /// `userName` 缺失 / null / 空串（trim 后）→ [`CampusAuthError::Parse`]（上层据此回退学号）；
 /// `departmentName` / `userId` / `orgId` / `tokenId` 缺失 / null / 空串 → `None`。
 /// 姓名与院系不进日志（敏感纪律）。
 pub fn extract_user_profile(body: &str) -> Result<PortalProfile, CampusAuthError> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| CampusAuthError::Parse(format!("tryLoginUserInfo 响应解析失败: {e}")))?;
-    let data = v
-        .get("data")
-        .ok_or_else(|| CampusAuthError::Parse("tryLoginUserInfo 缺少 data".to_string()))?;
+    // data 缺失 / null = 未登录信封（不改成 HTTP 状态码判定：失效响应是 200）
+    let data = match v.get("data").filter(|d| !d.is_null()) {
+        Some(d) => d,
+        None => return Err(CampusAuthError::PortalNotLogin),
+    };
+    if v.get("meta")
+        .and_then(|m| m.get("success"))
+        .and_then(|s| s.as_bool())
+        == Some(false)
+    {
+        return Err(CampusAuthError::PortalNotLogin);
+    }
     let name = data
         .get("userName")
         .and_then(|n| n.as_str())
@@ -678,6 +726,47 @@ mod tests {
     fn user_profile_invalid_json() {
         assert!(extract_user_profile("not json").is_err());
         assert!(extract_user_profile("").is_err());
+    }
+
+    /// 会话失效信封（2026-09-19 实测原文，HTTP 200 + data:null + statusCode=302）
+    /// → PortalNotLogin，而不是原先的「缺少 userName」解析失败。
+    #[test]
+    fn user_profile_expired_envelope_is_not_login() {
+        let body = r#"{"meta":{"success":false,"statusCode":302,"message":"未登录或会话已过期，请重新登录！"},"data":null}"#;
+        assert!(matches!(
+            extract_user_profile(body).unwrap_err(),
+            CampusAuthError::PortalNotLogin
+        ));
+        // meta.success 缺失但 data 为 null（匿名响应同形）同样是失效
+        assert!(matches!(
+            extract_user_profile(r#"{"meta":{"statusCode":302},"data":null}"#).unwrap_err(),
+            CampusAuthError::PortalNotLogin
+        ));
+    }
+
+    /// 健康信封（meta.success=true + data.userName）→ Ok。
+    #[test]
+    fn user_profile_alive_envelope_ok() {
+        let p = extract_user_profile(r#"{"meta":{"success":true},"data":{"userName":"张三"}}"#)
+            .unwrap();
+        assert_eq!(p.name, "张三");
+    }
+
+    // ---------- is_alive_envelope（portal_probe 的过期判定） ----------
+
+    /// 只有 `meta.success == true` 才算活会话 → portal_probe 据此 Alive，其余一律 Expired。
+    #[test]
+    fn alive_envelope_only_on_success_true() {
+        assert!(is_alive_envelope(
+            r#"{"meta":{"success":true,"statusCode":200},"data":{"userName":"张三"}}"#
+        ));
+        assert!(!is_alive_envelope(
+            r#"{"meta":{"success":false,"statusCode":302,"message":"未登录或会话已过期，请重新登录！"},"data":null}"#
+        ));
+        assert!(!is_alive_envelope(r#"{"meta":{"statusCode":302},"data":null}"#));
+        assert!(!is_alive_envelope(r#"{"data":{"userName":"张三"}}"#));
+        assert!(!is_alive_envelope("not json"));
+        assert!(!is_alive_envelope(""));
     }
 
     // ---------- csrf_token ----------

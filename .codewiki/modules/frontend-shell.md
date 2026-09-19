@@ -10,6 +10,7 @@ source_files:
   - tauri-app/frontend/src/stores/uiStore.ts
   - tauri-app/frontend/src/stores/authStore.ts
   - tauri-app/frontend/src/components/AppShell.tsx
+  - tauri-app/frontend/src/components/CommandPalette.tsx
   - tauri-app/frontend/src/components/AccountMenu.tsx
   - tauri-app/frontend/src/components/LoginDialog.tsx
   - tauri-app/frontend/src/components/Avatar.tsx
@@ -70,7 +71,7 @@ tags:
 
 `components/AppShell.tsx`：
 
-- **新顶栏**（`AppShell.tsx:51-112`）：sticky、`bg-bg/85` 毛玻璃。左：品牌块（渐变方标「锡」+ 双行标识，`AppShell.tsx:53-69`）；中：搜索胶囊（命令面板 M2 占位，`aria-disabled` 不做假交互，`AppShell.tsx:71-92`）；右：铃铛占位（M5 接入）+ AccountMenu 账号胶囊（`AppShell.tsx:94-110`）。
+- **新顶栏**（`AppShell.tsx:51-112`）：sticky、`bg-bg/85` 毛玻璃。左：品牌块（渐变方标「锡」+ 双行标识，`AppShell.tsx:53-69`）；中：搜索胶囊（**命令面板已实现**（2026-09-19 补做，原为 M2 遗留的 `aria-disabled` 占位）：点击或 `Cmd/Ctrl+K` 呼起，`AppShell.tsx:75-97` 触发条、`:137` 挂载 `<CommandPalette />`；面板本体 `CommandPalette.tsx`，数据源 = DockNav `DOCK_ITEMS` 页面项 + 现有 store 动作 + 设置跳转，键盘 `↑/↓/Enter/Esc` 可全程操作）；右：铃铛占位（M5 接入）+ AccountMenu 账号胶囊（`AppShell.tsx:94-110`）。
 - **主题单向同步**：`useEffect` 把 uiStore `theme` 同步到 `documentElement.classList.toggle("dark")`（`AppShell.tsx:43-46`）；开关入口在 AccountMenu 的「深色模式」行。
 - **面板注册表** `PANEL_MAP: Record<PanelId, ComponentType>`（`AppShell.tsx:26-36`），9 面板静态 import。
 - **切换动画**：`useDeferredValue(activePanel)` 保证快速连切时只渲染最终面板、AnimatePresence 不闪烁（`AppShell.tsx:39-41`）；`<AnimatePresence mode="wait">` 包 `motion.div`（key=deferredPanel，进入 spring stiffness 400 / damping 40，退出 0.04s 淡出，`AppShell.tsx:114-129`）。

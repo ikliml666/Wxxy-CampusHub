@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/campus-schedule", "crates/campus-auth", "crates/campus-portal", "tauri-app/src-tauri"]
+members = ["crates/campus-schedule", "crates/campus-auth", "crates/campus-portal", "crates/campus-synjones", "tauri-app/src-tauri"]
 
 [profile.release]
 lto = "thin"

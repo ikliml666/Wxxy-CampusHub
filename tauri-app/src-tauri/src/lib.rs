@@ -62,6 +62,16 @@ pub fn run() {
             commands::timetable::get_today_courses,
             commands::timetable::list_schedule_notices,
             commands::timetable::parse_notice_from_url,
+            commands::synjones::get_ecard,
+            commands::synjones::get_ecard_transactions,
+            commands::synjones::get_wallet_cards,
+            commands::electricity::list_feeitems,
+            commands::electricity::query_electricity,
+            commands::electricity::get_electricity_rooms,
+            commands::electricity::save_electricity_room,
+            commands::electricity::delete_electricity_room,
+            commands::electricity::open_recharge_page,
+            commands::electricity::open_recharge_in_browser,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

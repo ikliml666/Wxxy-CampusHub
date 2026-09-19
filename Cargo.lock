@@ -414,6 +414,7 @@ dependencies = [
  "campus-auth",
  "campus-portal",
  "campus-schedule",
+ "campus-synjones",
  "chrono",
  "dirs",
  "log",
@@ -440,6 +441,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -450,6 +452,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "campus-synjones"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "campus-auth",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

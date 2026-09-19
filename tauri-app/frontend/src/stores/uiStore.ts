@@ -36,6 +36,10 @@ export const useUiStore = create<{
   avatarDialogOpen: boolean;
   openAvatarDialog: () => void;
   closeAvatarDialog: () => void;
+  /** 命令面板开关（M2 遗留补做）：同样属一次性 UI 状态，不进持久化 */
+  commandPaletteOpen: boolean;
+  openCommandPalette: () => void;
+  closeCommandPalette: () => void;
 }>()(
   persist(
     (set) => ({
@@ -54,6 +58,9 @@ export const useUiStore = create<{
       avatarDialogOpen: false,
       openAvatarDialog: () => set({ avatarDialogOpen: true }),
       closeAvatarDialog: () => set({ avatarDialogOpen: false }),
+      commandPaletteOpen: false,
+      openCommandPalette: () => set({ commandPaletteOpen: true }),
+      closeCommandPalette: () => set({ commandPaletteOpen: false }),
     }),
     {
       name: "campushub-ui",

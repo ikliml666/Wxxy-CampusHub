@@ -442,3 +442,149 @@ export interface NoticeCandidate {
   /** 原文摘录（命中课程所在行） */
   excerpt: string;
 }
+
+// ---------- M3 批 2：一卡通（tauri commands/synjones.rs，计划 §2.4/§2.5；后端已把单位换算成元） ----------
+
+/**
+ * 一张一卡通。**余额口径**（后端批 1 live 实测修订）：
+ * `elecAccamtYuan`（电子账户，`elec_accamt`）是页面主口径——`elec` 指 electronic，
+ * **不是电费余额**；`balanceYuan` 是卡账户 `(db_balance + unsettle_amount)/100`。
+ */
+export interface CardInfo {
+  account: string;
+  cardname: string;
+  /** 卡账户余额（元） */
+  balanceYuan: number;
+  /** 电子账户余额（元） */
+  elecAccamtYuan: number;
+  statusLabel: string;
+}
+
+/** 一条流水（`amountYuan` 带符号：收入为正、支出为负）。 */
+export interface EcardTransaction {
+  /** 服务端原文 "YYYY-MM-DD HH:MM:SS" */
+  time: string;
+  summary: string;
+  amountYuan: number;
+  isIncome: boolean;
+  payName: string;
+  locationName: string;
+}
+
+/** 流水一页（不带方向过滤 = 全量；`total` 供「加载更多」判断）。 */
+export interface EcardTransactions {
+  total: number;
+  records: EcardTransaction[];
+}
+
+/**
+ * get_ecard → data。`balanceYuan` 为电子账户（主数字）、`cardBalanceYuan` 为卡账户。
+ * ⚠️ `todaySpend` / `monthSpend` 目前恒 `null`：慧新E校
+ * `statistics/turnover/sum/user` 五参齐备仍恒返回空数据（2026-09-19 live 实测），
+ * 前端按「暂不可用」呈现，**不伪造数字**。
+ */
+export interface EcardOverview {
+  balanceYuan: number;
+  cardBalanceYuan: number;
+  account: string;
+  cards: CardInfo[];
+  todaySpend: number | null;
+  monthSpend: number | null;
+}
+
+/** 钱包卡数据来源：慧新E校实时 / 门户快照 / 两者都失败。 */
+export type WalletSource = "realtime" | "portal" | "none";
+
+/** get_wallet_cards → data（首页钱包卡：后端聚合 + 门户降级，计划 §2.4）。 */
+export interface WalletCards {
+  ecard: { valueYuan: number | null; source: WalletSource; updatedAt: string };
+  mail: { unread: number | null };
+  library: { borrowed: number | null };
+  /** 电费余额：走 `/charge/*` 级联（批 3 接入），当前恒 `null` + `source:"none"`。 */
+  elec: { valueYuan: number | null; source: WalletSource };
+}
+
+// ─────────────── 电费（M3 批 3，`campus_synjones::charge` 契约） ───────────────
+
+/**
+ * 一个缴费片区（`list_feeitems` → data）。
+ * ⚠️ `maxmoney` 是**服务端字段原文拼写**（非 camelCase 的 `maxMoney`），与后端 serde 保持一致。
+ */
+export interface FeeItem {
+  id: string;
+  name: string;
+  billingUnit: string;
+  /** 快捷金额档（`"10,50,100"` → `[10,50,100]`） */
+  layout: number[];
+  /** 单次充值下限（元），服务端为字符串形态 */
+  retainMoney: number | null;
+  maxmoney: number | null;
+  remark: string;
+  /**
+   * 末级是否为**输入级**（官方 `flag[4]=='3'`「先选择再输入」）。
+   * true 时前 N-1 级是下拉、末级（房间）由用户输入房间号——服务端在末级前一档不下发选项，
+   * 故 `options` 为空不代表出错（2026-09-19 live 实测）。
+   */
+  lastLevelIsInput: boolean;
+}
+
+/** 级联的一步（回传后端 / 存常用房间共用）。`name` 仅展示用，不参与请求。 */
+export interface RoomStep {
+  level: number;
+  /** 该级的 form 参数名（服务端 `total[].code`） */
+  code: string;
+  /** 该级已选值（选项 `value`，或用户输入的房间号） */
+  value: string;
+  name: string;
+}
+
+/** 一级候选（`query_electricity` → `options`）。 */
+export interface ElectricityChoice {
+  label: string;
+  value: string;
+  code: string;
+  level: number;
+}
+
+/** 服务端层级定义（`map.total`）：UI 用它给每级做标签（校区/楼栋/房间）。 */
+export interface ElectricityLevel {
+  level: number;
+  code: string;
+  name: string;
+}
+
+/** 末级展示信息的一项：**键名由服务端下发**（实测恒为「信息」），通用渲染，禁止硬编码。 */
+export interface ElectricityField {
+  label: string;
+  value: string;
+}
+
+/**
+ * 末级视图。⚠️ 2026-09-19 live 实测：448/449/450 都**不下发** `money`/`iectranamt`
+ * （恒 `null`），余额与单价是塞在 `fields[].value` 那句**各片区格式互不相同**的自由文本里
+ * （如 450「房间号：101,剩余金额：-545.70，单价：0.5400」、448「当前余额517.05元,当前剩余电量957.50度」），
+ * 故前端**只做通用字典渲染 + 按分隔符折行**，不解构、不硬编码任何标签。
+ */
+export interface ElectricityView {
+  fields: ElectricityField[];
+  money: number | null;
+  tip: string | null;
+}
+
+/** `query_electricity` → data。`options` 为空且 `isFinal === false` ⇒ 该级无下拉（末级输入级）。 */
+export interface ElectricityQuery {
+  levels: ElectricityLevel[];
+  options: ElectricityChoice[];
+  isFinal: boolean;
+  view: ElectricityView | null;
+}
+
+/** 一个常用房间（本地存 `%APPDATA%/campushub/electricity_rooms.json`，计划 §2.3）。 */
+export interface SavedRoom {
+  /** 本机 id（新增时留空字符串，后端补） */
+  id: string;
+  feeitemId: string;
+  feeitemName: string;
+  path: RoomStep[];
+  label: string;
+}
