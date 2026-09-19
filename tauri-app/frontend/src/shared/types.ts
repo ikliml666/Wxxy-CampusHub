@@ -424,6 +424,28 @@ export interface ScheduleNoticeBrief {
   matchedKeywords: string[];
 }
 
+/** 一键自动解析结果（auto_parse_notices → data；契约 §21）：
+ *  NoticeAutoParse 镜像 Rust camelCase 序列化，error 非 null 时 candidates 为空。 */
+export interface NoticeAutoParse {
+  title: string;
+  date: string;
+  url: string;
+  column: string;
+  error: string | null;
+  candidates: NoticeCandidate[];
+}
+
+/** 一键自动解析结果（auto_parse_notices → data；契约 §21）：
+ *  NoticeAutoParse 镜像 Rust camelCase 序列化，error 非 null 时 candidates 为空。 */
+export interface NoticeAutoParse {
+  title: string;
+  date: string;
+  url: string;
+  column: string;
+  error: string | null;
+  candidates: NoticeCandidate[];
+}
+
 /** 调课通知候选（parse_notice → data，不入库）。
  *  ⚠️ Rust 侧 Option 字段 skip_serializing_if 缺省省略 → TS 用可选属性（非 null）。 */
 export interface NoticeCandidate {

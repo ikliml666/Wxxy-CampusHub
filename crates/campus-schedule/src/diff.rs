@@ -31,10 +31,19 @@ pub struct DiffResult {
     pub changes: Vec<String>,
 }
 
-/// 匹配键：课程名 + `class_id`（缺失 → None，同名无 id 的课程互相匹配——
-/// 冻结契约 §2.4 的退化语义）。
-fn match_key(c: &Course) -> (&str, Option<&str>) {
-    (c.name.as_str(), c.class_id.as_deref())
+/// 匹配键：课程名 + `class_id` + **时段（星期/起止小节）**。正方同一教学班
+/// （同 `jxb_id`）会在 kbList 里按不同上课时段拆成多条记录（2026-09-19 实测：
+/// 马原 3 条共用同一 `jxb_id`），键若只有名字+class_id，二次导入的更新分支会
+/// 把多条本地课全部覆盖成第一条的时段（数据损坏），因此时段必须入键——
+/// 时段变更的语义 = 旧时段停开 + 新时段新增（契约 §20 修订）。
+fn match_key(c: &Course) -> (&str, Option<&str>, u8, Option<u8>, Option<u8>) {
+    (
+        c.name.as_str(),
+        c.class_id.as_deref(),
+        c.day,
+        c.start_section,
+        c.end_section,
+    )
 }
 
 /// 参与字段级 diff 的展示字段：星期 / 节次 / 周次 / 教室 / 教师。
@@ -137,7 +146,7 @@ fn push_week_run(parts: &mut Vec<String>, start: u32, end: u32) {
     }
 }
 
-/// 合并教务最新课程列表进本地课程列表（冻结契约 §2.4，见模块文档）。
+/// 合并教务最新课程列表进本地课程列表（冻结契约 §2.4 + §20 修订，见模块文档）。
 ///
 /// `existing`：本地库当前课程列表（可含 Manual 与已停开的 Import 课程）；
 /// `incoming`：教务导入列表（`parse_kb_response` 输出，全部 `source=Import`）。
@@ -146,15 +155,29 @@ pub fn diff_courses(existing: &[Course], incoming: &[Course]) -> DiffResult {
     let mut changes: Vec<String> = Vec::new();
     let (mut added, mut changed, mut removed) = (0u32, 0u32, 0u32);
 
-    // 1) 旧库逐条：Manual 原样保留；Import 按 key 匹配 incoming
+    // incoming 按 match_key 分桶（索引队列）：旧库消费式一对一配对。同 key 多条
+    // （同班多时段 / 同一时段多条记录）按顺序一一对应，杜绝旧实现 `find` 命中
+    // 首条导致的多对一覆盖（2026-09-19 实测把马原 3 条全改写成同一时段的数据损坏）。
+    let mut pool: std::collections::HashMap<
+        (&str, Option<&str>, u8, Option<u8>, Option<u8>),
+        std::collections::VecDeque<usize>,
+    > = std::collections::HashMap::new();
+    for (i, new) in incoming.iter().enumerate() {
+        pool.entry(match_key(new)).or_default().push_back(i);
+    }
+    let mut consumed = vec![false; incoming.len()];
+
+    // 1) 旧库逐条：Manual 原样保留；Import 按 key 消费式匹配 incoming
     for old in existing {
         if old.source == CourseSource::Manual {
             // 冻结契约：Manual 永不参与 diff，永不被打 disabled
             courses.push(old.clone());
             continue;
         }
-        match incoming.iter().find(|new| match_key(new) == match_key(old)) {
-            Some(new) => {
+        match pool.get_mut(&match_key(old)).and_then(|q| q.pop_front()) {
+            Some(idx) => {
+                consumed[idx] = true;
+                let new = &incoming[idx];
                 let field_diff = field_changes(old, new);
                 if old.disabled || !field_diff.is_empty() {
                     changed += 1;
@@ -186,14 +209,10 @@ pub fn diff_courses(existing: &[Course], incoming: &[Course]) -> DiffResult {
         }
     }
 
-    // 2) incoming 中旧库没有的 key → 新增
-    let existing_keys: std::collections::HashSet<(String, Option<String>)> = existing
-        .iter()
-        .filter(|c| c.source != CourseSource::Manual)
-        .map(|c| (c.name.clone(), c.class_id.clone()))
-        .collect();
-    for new in incoming {
-        if !existing_keys.contains(&(new.name.clone(), new.class_id.clone())) {
+    // 2) 未被旧库消费的 incoming → 新增（首次导入 existing 为空时全部走这里；
+    //    同 key 多条各自计入，与消费式配对语义一致）
+    for (i, new) in incoming.iter().enumerate() {
+        if !consumed[i] {
             added += 1;
             changes.push(format!("新增 {}", new.name));
             courses.push(new.clone());
@@ -384,5 +403,49 @@ mod tests {
         assert_eq!(weekday_name(9), "9");
         assert_eq!(format_sections(Some(3), Some(4)), "3-4节");
         assert_eq!(format_sections(None, None), "无");
+    }
+
+    /// 回归（2026-09-19 真机数据损坏）：正方同一教学班（同 jxb_id）按多时段
+    /// 拆多条，match_key 旧版（名+class_id）在二次导入时把多条本地课全部覆盖成
+    /// 第一条的时段。修复 = 时段入键 + 消费式一对一配对。
+    #[test]
+    fn diff_pairs_same_class_multi_section_one_to_one() {
+        let mk = |id: &str, day: u8, s: u8| {
+            let mut c = course(id, "马克思主义基本原理", Some("SAME_JXB"));
+            c.day = day;
+            c.start_section = Some(s);
+            c.end_section = Some(s + 1);
+            c
+        };
+        // 教务：三个时段（周一5-6 / 周三3-4 / 周四3-4），class_id 全同
+        let inc = vec![mk("new-a", 1, 5), mk("new-b", 3, 3), mk("new-c", 4, 3)];
+        // 旧库：同样是这三条（乱序）
+        let old = vec![mk("old-1", 4, 3), mk("old-2", 1, 5), mk("old-3", 3, 3)];
+        let r = diff_courses(&old, &inc);
+        assert_eq!((r.added, r.changed, r.removed), (0, 0, 0), "同数据重导应零变化");
+        // 每条本地课的时段各自保留，不被覆盖成同一条
+        let mut got: Vec<(u8, u8)> = r
+            .courses
+            .iter()
+            .map(|c| (c.day, c.start_section.unwrap()))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![(1, 5), (3, 3), (4, 3)]);
+        // id 稳定（override 挂靠）
+        assert_eq!(r.courses[0].id, "old-1");
+    }
+
+    /// 同 key 的本地重复记录只消费一条 incoming，多余条目停开（不再被覆盖复制）。
+    #[test]
+    fn diff_duplicate_local_keys_only_one_consumed() {
+        let inc = vec![course("new-a", "信息安全", Some("A"))];
+        let old = vec![
+            course("old-1", "信息安全", Some("A")),
+            course("old-2", "信息安全", Some("A")),
+        ];
+        let r = diff_courses(&old, &inc);
+        assert_eq!((r.added, r.removed), (0, 1));
+        assert_eq!(r.courses.iter().filter(|c| !c.disabled).count(), 1);
+        assert_eq!(r.courses.iter().filter(|c| c.disabled).count(), 1);
     }
 }

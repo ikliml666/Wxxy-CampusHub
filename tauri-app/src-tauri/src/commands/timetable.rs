@@ -39,7 +39,8 @@ use crate::infra::{state, timetable};
 use campus_portal::{html_text, section_time_slots, ScheduleNoticeBrief};
 use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
-    current_week, diff_courses, expand_occurrences, parse_kb_response, parse_notice_text,
+    current_week, diff_courses, expand_occurrences, parse_kb_response,
+    parse_notice_with_semester, parse_notice_text,
     previous_or_same_day_of_week, semester_start_from_week, week_index_at_date, OccurrenceKind,
     NoticeConfidence, OverrideKind, Semester,
 };
@@ -880,7 +881,12 @@ pub async fn parse_notice(
     let tt = timetable::load_timetable(&dir);
     let today = chrono::Local::now().date_naive();
     let cw = current_week(today, &tt.config);
-    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
+    Ok(CommandResult::ok(parse_notice_with_semester(
+        &text,
+        &tt.courses,
+        cw,
+        tt.config.semester_start_date,
+    )))
 }
 
 /// 同一 `noticeId + courseId` 重复采纳幂等：先移除旧叠加再写入（覆盖而非堆叠）。
@@ -1264,7 +1270,8 @@ pub async fn list_schedule_notices(
 
 /// parse_notice_from_url（契约 §18.3）：拉公告正文页（域名白名单在
 /// `fetch_info_detail` 内强制）→ 剥标签取纯文本（[`html_text`]，块级标签转
-/// 换行，摘录按行取依赖它）→ 复用 [`parse_notice_text`] 解析。
+/// 换行，摘录按行取依赖它）→ [`parse_notice_with_semester`] 解析（先识别全校
+/// 日期置换型公告，未命中回落 [`parse_notice_text`]，学期锚点取课表配置）。
 /// 返回结构与 [`parse_notice`] 完全一致（候选列表，confidence/reason 在候选内）；
 /// **解析结果只进候选确认流，不自动 apply**（采纳仍走 `apply_override`）。
 #[tauri::command]
@@ -1297,7 +1304,98 @@ pub async fn parse_notice_from_url(
     let tt = timetable::load_timetable(&dir);
     let today = chrono::Local::now().date_naive();
     let cw = current_week(today, &tt.config);
-    Ok(CommandResult::ok(parse_notice_text(&text, &tt.courses, cw)))
+    Ok(CommandResult::ok(parse_notice_with_semester(
+        &text,
+        &tt.courses,
+        cw,
+        tt.config.semester_start_date,
+    )))
+}
+
+/// 单条公告自动解析结果（契约 §21）：`error` 非 None 时 `candidates` 为空。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeAutoParse {
+    pub title: String,
+    pub date: String,
+    pub url: String,
+    pub column: String,
+    /// 解析失败原因（needsBrowser/空正文/抓取错误）；None = 成功（候选可能为空）
+    pub error: Option<String>,
+    pub candidates: Vec<campus_schedule::NoticeCandidate>,
+}
+
+/// auto_parse_notices（契约 §21）：**一键自动发现 + 自动解析**——扫描两个栏目
+/// 关键词命中的通知，按发布日期过滤旧通知（早于本学期开学日的丢弃；无开学日
+/// 回落当年元旦），逐条拉正文走 [`parse_notice_with_semester`]（置换型与单课
+/// 型统一），按通知聚合返回。仍不自动 apply：候选进确认流由用户采纳。
+#[tauri::command]
+pub async fn auto_parse_notices(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<NoticeAutoParse>>, String> {
+    let portal = {
+        let guard = state.session.lock().await;
+        guard.as_ref().map(|s| s.portal.clone())
+    };
+    let Some(portal) = portal else {
+        return Ok(CommandResult::err(ERR_NO_SESSION));
+    };
+    let dir = state::data_dir()?;
+    let tt = timetable::load_timetable(&dir);
+    let today = chrono::Local::now().date_naive();
+    let cw = current_week(today, &tt.config);
+    let min_date = tt
+        .config
+        .semester_start_date
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(today.year(), 1, 1).expect("当年元旦合法"));
+    let briefs = match portal.query_schedule_notices().await {
+        Ok(b) => b,
+        Err(e) => return Ok(CommandResult::err(&e.to_string())),
+    };
+    let mut out: Vec<NoticeAutoParse> = Vec::new();
+    for n in briefs {
+        // 旧通知过滤：publish_time "YYYY-MM-DD …" 前 10 位与开学日比；
+        // 日期解析失败则保留（不因格式异常丢通知）
+        if let Some(d10) = n.date.get(..10) {
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(d10, "%Y-%m-%d") {
+                if d < min_date {
+                    continue;
+                }
+            }
+        }
+        let (error, candidates) = match portal.fetch_info_detail(&n.url).await {
+            Ok(detail) if detail.needs_browser || detail.html.is_none() => (
+                Some("正文需在浏览器中打开，无法自动解析".to_string()),
+                Vec::new(),
+            ),
+            Ok(detail) => {
+                let text = html_text(detail.html.as_deref().unwrap_or_default());
+                if text.trim().is_empty() {
+                    (Some("公告正文为空".to_string()), Vec::new())
+                } else {
+                    (
+                        None,
+                        parse_notice_with_semester(
+                            &text,
+                            &tt.courses,
+                            cw,
+                            tt.config.semester_start_date,
+                        ),
+                    )
+                }
+            }
+            Err(e) => (Some(e.to_string()), Vec::new()),
+        };
+        out.push(NoticeAutoParse {
+            title: n.title,
+            date: n.date,
+            url: n.url,
+            column: n.column,
+            error,
+            candidates,
+        });
+    }
+    Ok(CommandResult::ok(out))
 }
 
 // ---------------- 作息时间表编辑（冻结契约 §2.3，2026-09-18 收尾轮追加） ----------------

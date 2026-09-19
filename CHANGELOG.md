@@ -11,6 +11,18 @@
 - **批 2 补口（同轮收尾，后端收口）**：`ElectricityView` 加 **`balance_yuan`**（serde ⇒ 前端 `balanceYuan`）——`final_query` 构造末级视图时用 `balance_from_text` 提取一次，前端结果卡主数字与趋势/统计**读它、不解析 `fields` 自由文本**（提取实现只有 crate 一处，复制到前端会随校方文案漂移）；`None` = 未提取到（显示「无数据」），**绝不用 0 代替**。桌面端自采快照 `build_entry` 改为**直接透传**该字段（不再自行提取）＋新增 `charge::raw_text_of` 供取原文；`types.ts` 加 `balanceYuan?: number | null`（不动组件）
 - **验证**：`cargo test --workspace` **323 passed / 0 failed / 13 ignored**（本轮新增单测 35：crate 侧 19 = `turnover.rs` 13 + `charge.rs` 5 + `ecard.rs` 1，tauri 侧 16 = `infra/electricity_history.rs` 10 + `commands/electricity_history.rs` 4 + `commands/electricity.rs` 2）；`tsc -p tsconfig.json` 前端类型检查零错（`SavedRoom.bound` 声明为可选，不破坏既有组件）；**真机点验与启动补采实测属批 4**，本轮未跑
 
+## 2026-09-19 · 仓库卫生续：PLAN.md 移出 git 跟踪 + 个人脚本防误提交
+
+- **模块**：`.gitignore`、git 索引（PLAN.md `git rm --cached`，本地文件保留）
+- **要点**：`PLAN.md`（项目计划，含内网地址与侦察结论，与 docs/ 同性质的本地工作文档）移出跟踪；根目录个人油猴脚本 `一键填分4.user.js` 加入 ignore 防误提交（此前仅未跟踪）；`m4_history_probe_live.rs` 属于其他会话（sess-36e5d8e0）开发物，不动
+- **验证**：`git rm --cached` 后本地文件在、`check-ignore` 两条规则命中、主目录 ff 后已 restore PLAN.md 工作区文件
+
+## 2026-09-19 · 仓库卫生：docs/ 移出 git 跟踪（本地工作文档不进远端）
+
+- **模块**：`.gitignore`、git 索引（docs/ 下 30 个文件 `git rm -r --cached`，本地文件全保留）
+- **要点**：docs/（HANDOFF 交接、cas-recon 侦察脚本与报告、superpowers 计划、verify 验证截图、upstream 清单，约 1.7MB）均为本地工作产物，按用户裁决不再推送远端；`.gitignore` 新增 `docs/` 整目录规则，删除被其覆盖的旧条目 `docs/cas-recon/captcha.png`；Tauri 应用图标、`.codewiki/` 等其余跟踪文件不动；`账号与密码.txt` 经查本就未跟踪
+- **注意**：git 历史中的 docs/ 旧版本不受影响（远端历史仍可见）；如需彻底抹除需重写历史（未执行，涉 force push）
+
 ## 2026-09-19 · M3.1：充值改客户端直调官方接口（移除内嵌官方页面）
 
 - **背景（用户裁决）**：「充值还是不要使用官方界面，我们直接使用对应的验证以及接口，同时声明风险」；配套裁决：内嵌页移除并保留「去官网充值」兜底、**真实试充由用户自己完成**（不代做不可逆的资金操作）
@@ -21,6 +33,17 @@
 - **风险披露与遗留（如实记录）**：界面常驻风险声明（真实扣款不可撤销/不接触密码/失败可取消/接口变更改用官网）；首轮 live 验证用 form 方式调 `deleteOrder` 失败（该端点只认 JSON body），留下 **1 笔 1 元未支付订单**且订单号未落盘，学校侧**没有可用的待支付订单列表接口**（`personal_data?status=0` 恒 500）⇒ 无法程序化取消，**需用户在官方缴费页手动取消或等过期**（未支付=无扣款）。自批 C 起所有运行均正确清理；计划里「进充值前检查遗留订单」这条防线被证实**无法实现**
 - **未验证**：`submit_pay` 的**成功路径**只能由用户真机试充验证（开发与点验阶段一律不提交支付）
 
+## 2026-09-19 · 自动解析轮：公告一键自动发现+解析（auto_parse_notices）+ 旧通知按学期过滤
+
+- **模块**：`commands/timetable.rs`（新命令 `auto_parse_notices`，NoticeAutoParse 聚合结构）、`lib.rs`（注册）、`TimetablePanel.tsx`（一键按钮+状态徽标列表）、`shared/types.ts`（NoticeAutoParse）、契约 §21
+- **改动**：原「检查→列表→逐条解析」两步流程收拢为一键：扫描命中 → **旧通知过滤**（发布日期早于本学期开学日丢弃，无开学日回落当年元旦）→ 逐条自动拉正文解析（置换型/单课型统一走 parse_notice_with_semester）→ 全部候选合并进确认流逐条采纳（不自动 apply 红线不变）；列表项改「N 条候选/未能解析/无调整」状态徽标
+- **验证**：tsc 零错、vite build 成功、cargo test --workspace 18 组全绿
+## 2026-09-19 · 同步覆盖修复轮：diff 匹配键加时段（修课程块压缩）+ 公告「全校日期置换」解析（修解析错位）
+
+- **模块**：`campus-schedule/src/diff.rs`（match_key 五元组 + 消费式一对一配对）、`campus-schedule/src/notice.rs`（新增 `parse_notice_with_semester` 置换识别分支）、`commands/timetable.rs`（两处解析调用点接学期锚点）、契约 §20
+- **同步压缩根因**：正方 kbList 同一教学班（同 jxb_id）按多时段拆多条（马原 3 条同 id、信安 2 条同 id），旧匹配键 `(name, class_id)` 二次同步时一对多命中 → 本地多条被覆盖成同一条时段 → 同格重叠分列渲染，块被压成 1/3 宽。修复：匹配键扩为 `(name, class_id, day, start_section, end_section)`，diff 改消费式配对，id 保持稳定；受污染用户数据已按教务真实值重排（id 不变），下次同步应零变化。回归测试 ×2
+- **公告解析根因**（取证：应用确实抓到了正文）：「9月20日补课通知」正文第二行为「9月20日（星期日）补9月28日（星期一）课程」——全校日期置换型，旧解析器把书名号《关于…放假安排的通知》误提为课程名、摘录锚到「全体师生：」。修复：置换格式识别（相邻日期对 + 连接词，括号星期提示/学期锚点推算星期与周次），对被补日每门课产出 Extra 候选（节次沿用原课），缺锚点降级 Low；未命中回落原解析。回归测试 ×4
+- **验证**：`cargo test --workspace` 全绿（diff 14 + notice 16 + 全仓 226+ 无失败）
 ## 2026-09-19 · 重设计轮（批 A+B）：作息小节化、公告自动发现调课通知、课表页弹窗化与引导性重设计
 
 - **模块**：`campus-portal`（`section_time_slots` 内置默认、公告关键词发现 `collect_schedule_notices`、`html_text` 剥标签）、`commands/timetable.rs`（`effective_slots_at` 小节统一、删大节分叉、旧 5 行大节 slots 一次性迁移丢弃、新命令 `list_schedule_notices`/`parse_notice_from_url`）、`TimetablePanel.tsx`（CourseForm 模态化+上下文徽标+自动聚焦、删「全部课程」列表与粘贴解析卡片、公告发现区、作息弹层 11 小节、设置弹层快删改周次文本框）、`PanelHeader` 不变、契约 §18/§19
