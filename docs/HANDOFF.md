@@ -17,6 +17,13 @@
 
 > 正文（一至十节）仍是 M0/M1/M2.5 的准确描述，除「第九节首条风险」与「面板/命令面计数」外无需更正。
 
+### 2026-09-19 补记（同一会话 `sess-c2ed9b35`）
+
+M2.5 四批次 + 收尾轮全部完成并入 master（真机点验、ICS 后端写盘、作息可编辑、停课口径冻结）。
+随后完成 **shiguangschedule 上游全量功能对账**：结论、P0–P5 补齐路线与安卓端储备设计见
+**`docs/HANDOFF-timetable-parity.md`**（课表域交接计划），上游全量清单存档于
+`docs/upstream-shiguangschedule-inventory.md`。第八节「下一步」中 M2/M2.5 相关内容已由该计划接替。
+
 ---
 
 ## 一、一句话现状
@@ -153,6 +160,15 @@ cargo test -p campus-auth --test captcha_solve -- --ignored captcha_solve_eval
 
 ## 八、下一步（建议顺序）
 
+> **2026-09-19 更新**：本节写于 M2 动工前；M2（门户核心页）与 M2.5（课表全链路）均已完成并入
+> master，以下原文仅存档。课表域的下一步以 **`docs/HANDOFF-timetable-parity.md`** 为准
+> （上游 shiguangschedule 全量对账 + P0–P5 补齐路线 + 安卓端储备设计），其 **P0 = 课表样式对齐
+> 上游安卓端截图**（用户点名，含时间列起止时间 / 课程块加教师 / 粒度两案）。M3（一卡通/电费）、
+> M4（WebVPN）、M5（通知中心）主线以 `PLAN.md` 为唯一来源，侦察结论已写在设计文档附录。
+
+<details>
+<summary>原文存档（2026-09-18 之前的状态，已完成，勿据此开工）</summary>
+
 **M2 门户核心页**是主线，但**缺一个协议层**——建议第一个任务就是补侦察 + 建 `crates/campus-portal`：
 
 1. 侦察门户业务接口（资讯分类/列表/正文、待办中心、日程会议、应用中心 `appScheme`），落成 F12 抓包记录 + 新 crate 的解析器与测试（沿用 `campus-auth` 的分层与测试风格）。
@@ -165,7 +181,7 @@ cargo test -p campus-auth --test captcha_solve -- --ignored captcha_solve_eval
 - 课表页 UI：周视图 + 周次切换器 + 课程详情浮层 + 手动添加 + ICS 导出。**注意**：`PanelId` 目前冻结 8 项（`frontend/src/shared/types.ts:3`），加 `timetable` 需同步改 `types.ts` + `DockNav.tsx` 的 `DOCK_ITEMS` + zustand persist 兼容
 - 调课通知引擎（L1 规则解析 + L2 置信分级，高置信自动应用 / 低置信待确认）
 
-**M3/M4/M5** 的侦察结论已写在 `PLAN.md` 与设计文档附录，不需要重新摸索。
+</details>
 
 ---
 
@@ -192,5 +208,7 @@ cargo test -p campus-auth --test captcha_solve -- --ignored captcha_solve_eval
 | `docs/design/frontend-design.md` | 前端设计定稿（信息架构、Dock 规格、线框、视觉 token、应用中心 SSO 矩阵） |
 | `docs/cas-recon/REPORT.md` | CAS/WebVPN 协议侦察原文与实测记录 |
 | `docs/superpowers/plans/2026-09-17-m0-m1-foundation.md` | M0+M1 任务级实施计划（已完成，可作后续计划的格式模板） |
+| `docs/HANDOFF-timetable-parity.md` | 课表对账与补齐路线（P0–P5 + 安卓端储备；2026-09-19 起课表域以此为准） |
+| `docs/upstream-shiguangschedule-inventory.md` | 上游 shiguangschedule 全量功能与算法清单（对账底稿 + 安卓端设计参考） |
 | `docs/verify/` | M1 验收截图（登录页 / Dock+待办页 / 今日页深色） |
 | `THIRD-PARTY-NOTICES.md` + `crates/campus-schedule/NOTICE.md` | 开源合规（shiguangschedule 逐文件映射） |
