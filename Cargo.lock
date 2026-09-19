@@ -453,6 +453,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "campus-synjones"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "campus-auth",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
