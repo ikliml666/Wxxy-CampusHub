@@ -124,21 +124,29 @@
 - [x] **一卡通余额/流水**：卡信息 `berserker-app/ykt/tsm/*`；流水在独立服务 `berserker-search/search/personal/turnover`（`type` 为**收支方向**：1 收入 / 2 支出 / 3 空，**不传即全量**）；余额口径以**电子账户 `elec_accamt`** 为主（`elec` = electronic，**不是电费余额**——实测三处数值一致，推翻旧推断）；一律 `synAccessSource=app` **双份携带**（query/body + 同名头）
 - [x] **电费查询页**：片区→校区→楼栋→**手输房间号** → 剩余金额/单价（`/charge/feeitem` 三级链路）；片区口径 = `status==1 && impl_interface` 非空（**恰好 3 条**，同名停用项靠 status 排除）；末级是**输入级**（`flag[4]=='3'`）不是下拉；结果 `map.showData` 键名**恒为「信息」**、值是三片区**格式各异**的自由文本（`map.money`/`iectranamt` 实测不存在）→ 通用字典渲染 + 逗号折行 + 负数标红，**不做文本解构**
 - [x] **常用房间绑定**：本地落盘 `%APPDATA%/campushub/electricity_rooms.json`（含三级 path 的 level/code/value/name；同片区同路径 upsert、上限 20）；平台侧 `sceneBind/add` 是写接口，不采用
-- [x] **充值（用户 2026-09-19 裁决：官方链接、软件内跳转、统一风格）**：应用内嵌 webview 打开官方缴费页，Rust 端注入 token 与 `localStorage.configs`（缺失会 `JSON.parse(null)` 白屏）+ **`synAccessSource` 改写 hook**（官方页自己硬编码 `pc`，会撞学校 4030 策略弹「服务大厅未授权」）；窗口标题/图标用客户端品牌 + 主色 CSS 覆盖（尽力而为）；**不复刻签名下单**，真实支付在官方页完成
+- [x] **充值（M3.1 改版，见下方 2026-09-19 说明）**：**客户端直调官方 App 版接口**在应用内闭环完成（建单 → 支付方式 → 免密或安全键盘 → 轮询结果 → 可取消），**不再内嵌官方页面**；界面常驻风险声明；保留「去官网充值」兜底
 - [x] **token 单活纪律**：全应用共用单一 `SynjonesClient`（进程级 static + 互斥锁串行化），禁止并发 SSO；CAS TGT 隔夜过期（换票 500 且正文含票据，不得回显）
 - 验收 ✅（2026-09-19 真机 CDP 点验，`tauri dev` + WebView2 远程调试端口，方法见 `.codewiki/learnings/tauri-webview-ui-verification.md` 与 `tauri-multiwindow-cdp-verification.md`）：
   - 电费三级链路：三片区列出 → 校区(1 项) → 楼栋(1号楼/3号楼/2号楼) → 手输房间号 `101` → 返回「房间号：101 / 剩余金额：-545.70 / 单价：0.5400」，**负数行标红** ✅
   - 常用房间：保存 → 确认落盘 `electricity_rooms.json`（结构完整）→ 列表出现「查余额/删除」✅
   - 钱包页：电子账户余额与 live 实测一致、**1042 条**流水分页、收入 `+`/支出 `-`、时间倒序 ✅
   - 首页钱包卡：一卡通显示**实时值 + 「实时」来源标注**（失败静默回落门户快照，不阻塞首屏）✅
-  - 内嵌充值窗口：**登录态**（渲染出官方缴费表单而非登录页）；该窗口调 IPC 被 ACL 拒绝（安全边界验证通过）✅
+  - 充值流程（M3.1 改版后）：真机点验到「**安全键盘就绪**」为止（不输入密码、不提交）；**真实扣款验证留给用户自己在真机试充**（详见下方 M3.1 说明）
   - 自动化：`cargo test --workspace` **271 passed / 0 failed**；前端 `tsc --noEmit` + `vite build` 通过 ✅
 - 诚实边界：
   - **今日/本月消费无解**：「`statistics/turnover/sum/user`」需五参、多种参数组合实测恒空 → UI 显示「暂不可用」（`count` 返回全时段总额且无视日期参数，不可替代）
   - **主窗口关闭时子窗口是否联动关闭未验**：`core:window:allow-close` 未授予 JS，CDP 触发不了窗口装饰按钮，需人工点一次确认
   - **校外不可用**：内网明文 IP，依赖 M4 的 WebVPN
-- 不做：充值金额的签名下单复刻（charge-pc 走 SHA256 签名 + 动态 HTML form 跳转，真实金钱操作留在官方页）
-- 命令面：M3 新增 10 条（一卡通 3 + 电费 7），全局 **53 条**（auth 8 / profile 5 / portal 12 / timetable 18 / synjones 3 / electricity 7）
+- 不做：**PC 版签名下单链路**（`/charge/order/thirdOrder` 需 SHA256 签名且 `target="_self"` 整页跳走、客户端拿不到扣款结果，故弃用；签名算法已存档于 `docs/superpowers/plans/2026-09-19-m3.1-native-recharge.md` §1.4 备查）
+- **2026-09-19 M3.1 改版（用户裁决：「充值还是不要使用官方界面，我们直接使用对应的验证以及接口，同时声明风险」）**：
+  - **移除**最初的内嵌官方 webview 方案与其 `synAccessSource` 改写 hook（`d7f6de5`，-462 行，全仓 grep 零命中），只保留 `open_recharge_in_browser`（「去官网充值」兜底）
+  - **改为客户端直调官方 App 版接口**（`/charge-app` 口径：纯 JSON、**无签名**、可拿 `orderid`、可轮询、可取消）：建单 `POST /blade-pay/pay`(`paystep:0`) → `GET /charge/pay/getpayinfo` 取 `payList`（**来源是这个接口、不是 paystep**）→ 账户两步查询 → 免密或安全键盘 → 轮询 `order.status`(1=完成) → 失败可 `deleteOrder`。协议在 `crates/campus-synjones/src/recharge.rs`，前端流程在 `components/RechargeFlow.tsx`，命令 `recharge_*` 6 条
+  - **安全红线**：免密判据 `payList[i].nopassword === 1`；需密码时服务端下发安全键盘（10 字符**显示**序列），**提交的是用户点击的键位下标序列、不是真实数字** ⇒ **客户端不需要接触真实卡密码**；但客户端持解码表，**只转发、绝不还原/落盘/打日志/回填输入框**
+  - **实测事实**：450 片区唯一账户渠道是 `ACCOUNTTSM`（电子账户）且 `nopassword=false`（**需密码**）；live 已跑到「键盘就绪」并当场取消订单；另有两个学校侧的坑已固化——`passwordMap[uuid]` 是 10 字符**字符串**（非数组）、`deleteOrder` **只有 JSON body 才通**
+  - **界面常驻风险声明**（文案见计划 §2.4）：真实扣款不可撤销、不接触密码、失败可取消、接口变更时改用官网
+  - **未验证（留给你）**：`submit_pay` 的**成功路径**只能由真机试充验证（开发与点验阶段一律不提交支付）
+  - **遗留事故（如实记录）**：首轮 live 验证用 form 方式调 `deleteOrder` 失败（该端点只认 JSON body），留下 **1 笔 1 元未支付订单**且订单号未落盘；学校侧**没有可用的待支付订单列表接口**（`personal_data?status=0` 恒 500，官方 App 同一调用亦然）⇒ 无法程序化取消，**需用户自行在官方缴费页取消或等过期**（未支付=无扣款）。自批 C 起所有运行均正确清理；计划里「进充值前检查遗留订单」这条防线被证实**无法实现**
+- 命令面：M3 + M3.1 共新增 **16 条**（一卡通 3 + 电费查询 7 + 充值 6），全局 **60 条**（auth 8 / profile 5 / portal 12 / timetable 20 / synjones 3 / electricity 12）
 
 ### M4 · 网络智能路由 ⬜
 - [ ] 移植 Wxxy-CampusLogin 校园网检测（/18 子网 + Portal 可达性判定；仅移植检测，登录/注销协议不带过来）

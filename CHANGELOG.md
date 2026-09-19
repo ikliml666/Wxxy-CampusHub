@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2026-09-19 · M3.1：充值改客户端直调官方接口（移除内嵌官方页面）
+
+- **背景（用户裁决）**：「充值还是不要使用官方界面，我们直接使用对应的验证以及接口，同时声明风险」；配套裁决：内嵌页移除并保留「去官网充值」兜底、**真实试充由用户自己完成**（不代做不可逆的资金操作）
+- **模块**：`crates/campus-synjones/src/recharge.rs`（新建）、`commands/electricity.rs`（+6 命令）、`frontend/src/components/RechargeFlow.tsx`（新建）、`PowerPanel.tsx`、`shared/types.ts`；**移除** `RECHARGE_4030_HOOK` 与 `open_recharge_page`（-462 行，全仓 grep 零命中）
+- **要点**：对比官方两条链路后选 **App 版口径**（`/charge-app`：纯 JSON、**无签名**、下单回 `orderid`、可轮询 `order.status`、可 `deleteOrder`）——PC 版需 SHA256 签名且 `target="_self"` **整页跳走**、客户端拿不到扣款结果；`payList` 来源是 `GET /charge/pay/getpayinfo`（**不是 paystep**）；免密判据 `payList[i].nopassword === 1`；`third_party` 由**后端**按房间路径重放末级查询合成（`map.data` 含户号等 PII，不下发前端）
+- **安全红线**：安全键盘下发的 `passwordMap[uuid]` 是 10 字符**显示**序列，提交的是**用户点击的键位下标序列**而非真实数字 ⇒ **客户端不接触真实卡密码**；但客户端持解码表，故**只转发、绝不还原/落盘/打日志/回填输入框**
+- **实测**：450 片区唯一账户渠道 `ACCOUNTTSM`（电子账户）且 `nopassword=false`（需密码）；live 跑到「键盘就绪」并当场取消订单；两个学校侧的坑已固化——`passwordMap[uuid]` 是 10 字符**字符串**（非数组）、`deleteOrder` **只有 JSON body 才回 200**
+- **风险披露与遗留（如实记录）**：界面常驻风险声明（真实扣款不可撤销/不接触密码/失败可取消/接口变更改用官网）；首轮 live 验证用 form 方式调 `deleteOrder` 失败（该端点只认 JSON body），留下 **1 笔 1 元未支付订单**且订单号未落盘，学校侧**没有可用的待支付订单列表接口**（`personal_data?status=0` 恒 500）⇒ 无法程序化取消，**需用户在官方缴费页手动取消或等过期**（未支付=无扣款）。自批 C 起所有运行均正确清理；计划里「进充值前检查遗留订单」这条防线被证实**无法实现**
+- **未验证**：`submit_pay` 的**成功路径**只能由用户真机试充验证（开发与点验阶段一律不提交支付）
+
 ## 2026-09-19 · 修复：内嵌充值页「服务大厅未授权」弹窗（4030 参数改写 hook）
 
 - **模块**：`commands/electricity.rs`（新增 `RECHARGE_4030_HOOK` + 离线单测，仅此一文件）
