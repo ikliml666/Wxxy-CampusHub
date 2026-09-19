@@ -9,6 +9,7 @@
 - [[decisions\recording-jar-session|决策记录 - RecordingJar 自实现与会话持久化]]
 - [[decisions\guest-mode-account-shell|决策记录 - 游客优先外壳、账号系统与头像三态]]
 - [[decisions\timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]
+- [[decisions\timetable-block-granularity|课表网格保持大节行粒度（P0 样式对齐否决小节行方案）]]
 - [[decisions\timetable-view-contract|课表视图契约（TimetableView 下发 slots 与 currentWeek）]]
 - [[decisions\timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]
 ## Learning

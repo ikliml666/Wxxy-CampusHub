@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-09-19 · P0 课表样式对齐上游安卓端：时间列起止时间、课程块教师名、点空白格新建课程
+
+- **模块**：`tauri-app/frontend/src/panels/TimetablePanel.tsx`（渲染层）；契约修订 `docs/superpowers/plans/2026-09-18-m2.5-timetable.md` §6；CodeWiki decision `timetable-block-granularity`
+- **内容**：① 时间列由「节号 + 开始时间」改为「节号 + 起止时间两行」（上游截图规格 §P0-1）；② 课程块三要素对齐截图：课名 → 教师（空不渲染）→ `@教室`（§P0-2）；③ 天列每大节行铺空位按钮（渲染在课程块之下、不遮挡块点击），点击预填星期/大节（小节 `2k-1..2k`）/展示周新建课程，未设开学日（`currentWeek===null`）时提示「请在学期内添加课程」，对齐上游「学期外不可添加」语义（§P0-6）
+- **粒度决策**：否决 HANDOFF 建议的 A 案（按小节行渲染）——`slots` 行数不固定（自定义作息契约）下「45+10+45」小节时间推导会出错，且引入第三套坐标在 `isCustomTime`（P5）前无收益；采纳 B 案（大节行 + 视觉要素对齐），理由落盘契约 §6 与 CodeWiki decision
+- **不做**：网格左上角「年份/周数」角标（顶栏已有「第 N 周 / 共 M 周」等价信息，HANDOFF 亦标注锦上添花）
+- **验证**：`tsc --noEmit` ✓；`npm run build` ✓（chunk 体积警告为既有现象）；`cargo test --workspace` ✓（36+49+37 全绿，0 失败）；真机视觉对照留待用户验收（依赖 tauri 后端与真实登录态）
+
 ## 2026-09-19 · 交互级对账补充：上游「点空白新建」等 9 项交互缺口并入交接计划（无代码改动）
 
 - **模块**：`docs/HANDOFF-timetable-parity.md`（P0 与 P5 两节）、`CHANGELOG.md`；**无代码改动**

@@ -166,6 +166,7 @@ tags:
 - **色板**：`COURSE_PALETTE` 8 档全走 token（6 个既有域色 + index.css 新增 `--color-aqua` / `--color-rose`，深浅主题各一档）；导入课程 `colorIndex` 是课名哈希 → **取色一律 `% 8`**。
 - **周视图**：`buildWeekBlocks` 纯函数产出一周块 —— 按视图周过滤 `course.weeks`；停课 override（cancelled）→ 原时段虚线占位「已停」；调课 override（rescheduled，新时间≠原时间）→ 原时段虚线「已调出」+ 新时段实体块；仅换教室 → 原位渲染新教室；补课（extra）→ 新增实体块。同列重叠做轻量分列（连通簇 + 贪心占道，对齐后端 `grid::merge_courses` 语义的前端重写）。override 匹配用**逆序取最后一条**（后采纳覆盖先采纳）。
 - **角标**：【导】= `source==="import"`；【调】= 该块关联了生效 override；ghost 块无角标。
+- **样式对齐（P0，2026-09-19）**：时间列 = 节号 + 起止时间两行；课程块三要素 = 课名 → 教师（空不渲染）→ `@教室`；天列每大节行铺空位按钮（渲染在课程块之下、不遮挡块点击），点击 `openForm` 预填该格星期/大节（小节 `2k-1..2k`）/展示周；`currentWeek===null`（未设开学日）时提示「请在学期内添加课程」。粒度保持大节行，否决小节行方案见 [[decisions/timetable-block-granularity|课表网格粒度决策]]。
 - **详情浮层**：fixed 定位（视口边缘 clamp、下方放不下上翻），Esc / 点击浮层与课程块以外关闭；展示教师/教学班（classId）/周次/教室，`remark` **按来源区分标签**——导入课程 = 「性质 · 考核」（正方 `kcxz·khfsmc`），手动课程 = 「备注」；列出该课全部 override（可撤销）；按钮「手动添加同款」（预填表单）与「编辑」（`update_course` 任意来源可编辑，提示会被下次导入覆盖）。
 - **手动表单**：CourseForm（新增 `add_course_manual` / 编辑 `update_course`），周次文本输入（`1-8,10` 混排，`parseWeeksInput`）+ 全部/单周/双周快捷 chips；`key` 重挂重置内部 state。
 - **调课通知区**：粘贴文本 → `parse_notice` → 候选列表（high = 绿标「可自动应用」、low = 琥珀 reason + excerpt 引文）→「采纳」`apply_override`；已生效 override 平铺列表「撤销此通知调整」= `revoke_notice(sourceNoticeId)` 整批撤销。

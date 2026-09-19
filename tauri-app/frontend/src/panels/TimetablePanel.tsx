@@ -1143,11 +1143,14 @@ export function TimetablePanel() {
                     className="flex flex-col items-center justify-center border-b border-line px-1 text-center last:border-b-0"
                     style={{ height: ROW_H }}
                   >
-                    <span className="tabular-num text-caption font-medium text-text-2">
+                    <span className="tabular-num text-body font-medium text-text-2">
                       {s.number}
                     </span>
                     <span className="tabular-num text-caption opacity-60 text-text-2">
                       {s.startTime}
+                    </span>
+                    <span className="tabular-num text-caption opacity-60 text-text-2">
+                      {s.endTime}
                     </span>
                   </div>
                 ))}
@@ -1165,6 +1168,31 @@ export function TimetablePanel() {
                     )}
                     style={{ height: ROW_H * slots.length }}
                   >
+                    {/* 空位按钮：点击空白格新建课程（预填星期/大节/展示周），渲染在课程块之下 */}
+                    {slots.map((s) => (
+                      <button
+                        key={`slot-${s.number}`}
+                        type="button"
+                        aria-label={`${DAY_NAMES[dayIdx + 1]}第${s.number}大节空位，点击添加课程`}
+                        onClick={() => {
+                          if (currentWeek === null) {
+                            setNoticeMsg({ ok: false, text: "请在学期内添加课程" });
+                            return;
+                          }
+                          openForm(
+                            {
+                              day: dayIdx + 1,
+                              startSection: s.number * 2 - 1,
+                              endSection: s.number * 2,
+                              weeks: [week],
+                            },
+                            null,
+                          );
+                        }}
+                        className="absolute left-0 w-full border-b border-line/50 last:border-b-0 hover:bg-sched/10 focus-visible:bg-sched/10"
+                        style={{ top: (s.number - 1) * ROW_H, height: ROW_H }}
+                      />
+                    ))}
                     {col.map((b) => {
                       const pos = layout.get(b.key) ?? { lane: 0, lanes: 1 };
                       const color = courseColor(b.course);
@@ -1206,9 +1234,16 @@ export function TimetablePanel() {
                             {b.ghost === "cancelled" ? "已停 · " : b.ghost === "moved-out" ? "已调出 · " : ""}
                             {b.course.name}
                           </p>
-                          <p className="tabular-num truncate text-caption leading-tight text-text-2">
-                            {b.room}
-                          </p>
+                          {b.course.teacher && (
+                            <p className="truncate text-caption leading-tight text-text-2">
+                              {b.course.teacher}
+                            </p>
+                          )}
+                          {b.room && (
+                            <p className="tabular-num truncate text-caption leading-tight text-text-2">
+                              @{b.room}
+                            </p>
+                          )}
                           {!b.ghost && (
                             <p className="absolute right-1 top-1 flex gap-0.5 text-[10px] leading-none">
                               {b.course.source === "import" && (
