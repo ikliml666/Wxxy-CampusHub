@@ -32,6 +32,7 @@ pub fn empty_timetable() -> Timetable {
             slots: None,
             skipped_dates: Vec::new(),
             slot_rules: Vec::new(),
+            show_non_current_week: false,
         },
         courses: Vec::new(),
         overrides: Vec::new(),

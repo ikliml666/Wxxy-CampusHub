@@ -36,8 +36,8 @@ use campus_portal::block_time_slots;
 use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
     current_week, diff_courses, expand_occurrences, parse_kb_response, parse_notice_text,
-    previous_or_same_day_of_week, semester_start_from_week, OccurrenceKind, NoticeConfidence,
-    OverrideKind, Semester,
+    previous_or_same_day_of_week, semester_start_from_week, week_index_at_date, OccurrenceKind,
+    NoticeConfidence, OverrideKind, Semester,
 };
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -49,14 +49,17 @@ use tauri::State;
 const ERR_NO_SESSION: &str = "请先登录";
 
 /// get_timetable → data（批次 4 修订契约 §2.3）：课表本体 + 校本大节作息 +
-/// 当前教学周 + 今天。`slots` 是时间标签的唯一事实源（前端不得硬编码时间），
-/// `currentWeek` 为 None 表示未配置开学日或今天不在学期范围内。
+/// 当前教学周 + 今天 + 顶栏标题态。`slots` 是时间标签的唯一事实源（前端不得
+/// 硬编码时间），`currentWeek` 为 None 表示未配置开学日或今天不在学期范围内；
+/// `week_state` 细分原因（契约 §13.1），前端据它切换顶栏文案。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimetableView {
     pub timetable: Timetable,
     pub slots: Vec<TimeSlot>,
     pub current_week: Option<u32>,
+    /// 顶栏标题态（契约 §13.1）："unset" | "before" | "vacation" | "normal"
+    pub week_state: String,
     /// 本机今天 "YYYY-MM-DD"
     pub today: String,
 }
@@ -86,6 +89,27 @@ fn effective_slots_at(
     }
 }
 
+/// 顶栏标题态（契约 §13.1，风险 R7 口径）：无开学日 → `unset`；
+/// `week_index_at_date < 1` → `before`；`> total_weeks` → `vacation`；否则
+/// `normal`。**复用 weeks.rs 既有对齐式算法**（周首日对齐，禁止自造直除），
+/// 学期末日 `week_first + total*7 - 1` 由该算法自然落在第 total 周（normal）。
+fn week_state_of(
+    cfg: &campus_schedule::model::CourseTableConfig,
+    today: NaiveDate,
+) -> String {
+    let Some(start) = cfg.semester_start_date else {
+        return "unset".into();
+    };
+    let idx = week_index_at_date(today, start, cfg.first_day_of_week);
+    if idx < 1 {
+        "before".into()
+    } else if idx > cfg.semester_total_weeks as i64 {
+        "vacation".into()
+    } else {
+        "normal".into()
+    }
+}
+
 /// 纯函数组装（便于单测）：周次口径与 [`parse_notice`] 一致
 /// （`campus_schedule::current_week`）。`slots` 取「今天」的生效作息（契约 §9.4：
 /// 跨作息区间的换季周无法逐天变行，与上游周视图同口径的已知取舍，ICS 逐事件
@@ -94,6 +118,7 @@ fn build_timetable_view(tt: Timetable, today: chrono::NaiveDate) -> TimetableVie
     TimetableView {
         slots: effective_slots_at(&tt.config, today),
         current_week: current_week(today, &tt.config),
+        week_state: week_state_of(&tt.config, today),
         today: today.format("%Y-%m-%d").to_string(),
         timetable: tt,
     }
@@ -991,6 +1016,8 @@ pub struct SemesterConfigInput {
     pub show_weekends: bool,
     /// 「今天是第 N 周」手动锚点：有值时后端反推开学日（口径单点，契约 §7.1）
     pub current_week_hint: Option<u32>,
+    /// 非本周课程降级显示开关（契约 §13.2）：`None`/缺省 = 保留旧值（容忍旧调用方）
+    pub show_non_current_week: Option<bool>,
 }
 
 /// 显示约束双向联动（契约 §7.2，上游语义）：周日开头必须显示周末；隐藏周末则
@@ -1036,6 +1063,10 @@ fn apply_semester_config(
     tt.config.semester_total_weeks = input.semester_total_weeks;
     tt.config.first_day_of_week = input.first_day_of_week;
     tt.config.show_weekends = input.show_weekends;
+    // 批 7 §13.2：None/缺省 = 保留旧值
+    if let Some(v) = input.show_non_current_week {
+        tt.config.show_non_current_week = v;
+    }
     apply_display_constraints(&mut tt.config);
     Ok(())
 }
@@ -1166,6 +1197,7 @@ mod tests {
                 slots: None,
                 skipped_dates: vec![],
                 slot_rules: vec![],
+                show_non_current_week: false,
             },
             courses,
             overrides: vec![],
@@ -1487,6 +1519,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
         );
         assert_eq!(view.current_week, Some(2));
+        assert_eq!(view.week_state, "normal");
         assert_eq!(view.today, "2026-09-17");
         assert_eq!(view.slots.len(), 5);
         assert_eq!(view.slots[0].number, 1);
@@ -1497,6 +1530,7 @@ mod tests {
         // camelCase 序列化键（前端镜像契约）
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"currentWeek\":2"));
+        assert!(json.contains("\"weekState\":\"normal\""));
         assert!(json.contains("\"timetable\":"));
     }
 
@@ -1509,6 +1543,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
         );
         assert_eq!(view.current_week, None);
+        assert_eq!(view.week_state, "unset", "无开学日 → unset（契约 §13.1）");
 
         // 开学 2026-09-07，今天 2026-09-01（开学前）→ None
         let view = build_timetable_view(
@@ -1516,6 +1551,61 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
         );
         assert_eq!(view.current_week, None);
+        assert_eq!(view.week_state, "before");
+    }
+
+    /// week_state 四态与边界（契约 §13.1 / 风险 R7）：口径 = weeks.rs 既有
+    /// `week_index_at_date`（周首日对齐），开学日 2026-09-07（周一）、总 20 周、
+    /// firstDay=1。第 20 周末日 = 2027-01-10（周日），次日 01-11 → vacation。
+    #[test]
+    fn week_state_four_states_with_boundaries() {
+        let d = |y: i32, m: u32, day: u32| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let st = |today| week_state_of(&fixture().config, today);
+
+        // before：week_index = 0 与 < 0（含首周前一日的对齐边界）
+        assert_eq!(st(d(2026, 8, 30)), "before", "开学日前一周周日 → index=-1");
+        assert_eq!(st(d(2026, 8, 31)), "before", "index=0 边界（前一周周一）");
+        assert_eq!(st(d(2026, 9, 6)), "before", "开学日前一天仍是 before");
+        // normal：index=1 起点与学期末日（week_first + total*7 - 1 = 2027-01-24）
+        assert_eq!(st(d(2026, 9, 7)), "normal", "index=1 边界（开学日当天）");
+        assert_eq!(st(d(2027, 1, 24)), "normal", "学期末日语义：第 20 周周日");
+        // vacation：> total（次日即第 21 周）
+        assert_eq!(st(d(2027, 1, 25)), "vacation", "index=total+1 边界");
+        assert_eq!(st(d(2027, 4, 1)), "vacation");
+
+        // 周首日对齐影响边界：firstDay=7 时 2026-09-13（周日）起为第 2 周，
+        // 2026-09-12（周六）仍属第 1 周 → normal（普通直除法会误判，R7 禁自造口径）
+        let mut cfg = fixture().config;
+        cfg.first_day_of_week = 7;
+        assert_eq!(week_state_of(&cfg, d(2026, 9, 12)), "normal");
+        assert_eq!(week_state_of(&cfg, d(2026, 9, 13)), "normal", "firstDay=7 时已入第 2 周");
+    }
+
+    /// show_non_current_week 保存语义（契约 §13.2）：Some → 落库；None/缺省 → 保留旧值
+    /// （serde default 容忍旧调用方）。
+    #[test]
+    fn apply_semester_config_show_non_current_week_kept_or_replaced() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 17).unwrap();
+        let base = |snw: Option<bool>| SemesterConfigInput {
+            semester_start_date: Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            semester_total_weeks: 20,
+            first_day_of_week: 1,
+            show_weekends: false,
+            current_week_hint: None,
+            show_non_current_week: snw,
+        };
+
+        // None（旧调用方缺省）→ 保留旧值
+        let mut tt = timetable_with(None, vec![]);
+        tt.config.show_non_current_week = true;
+        apply_semester_config(&mut tt, &base(None), today).unwrap();
+        assert!(tt.config.show_non_current_week, "缺省应保留旧值");
+
+        // Some(false) → 显式落库
+        let mut tt = timetable_with(None, vec![]);
+        tt.config.show_non_current_week = true;
+        apply_semester_config(&mut tt, &base(Some(false)), today).unwrap();
+        assert!(!tt.config.show_non_current_week);
     }
 
     // ---------------- 收尾轮：作息时间表编辑 ----------------
@@ -1634,6 +1724,7 @@ mod tests {
             first_day_of_week: first_day,
             show_weekends,
             current_week_hint: hint,
+            show_non_current_week: None,
         }
     }
 
@@ -1742,6 +1833,8 @@ mod tests {
         assert_eq!(input.semester_start_date, None);
         assert_eq!(input.semester_total_weeks, 0);
         assert_eq!(input.current_week_hint, None);
+        // 批 7 §13.2：缺省 = None = 保留旧值
+        assert_eq!(input.show_non_current_week, None);
         assert!(validate_semester_input(&input).is_err(), "缺省值应被校验层拒绝");
     }
 

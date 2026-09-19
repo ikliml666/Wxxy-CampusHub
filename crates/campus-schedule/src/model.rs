@@ -102,6 +102,11 @@ pub struct CourseTableConfig {
     /// 旧文件无该键 → 空列表（serde default）。
     #[serde(default)]
     pub slot_rules: Vec<SlotRule>,
+    /// 非本周课程降级显示（契约 §13.2，2026-09-19 批 7 追加）：`true` = 网格
+    /// 同时渲染非展示周课程（40% 透明度、可点详情、不可拖）；`false`（默认 /
+    /// 旧文件缺省）= 现状隐藏。仅前端渲染开关，后端不消费。
+    #[serde(default)]
+    pub show_non_current_week: bool,
 }
 
 /// 按日期区间的作息规则（契约 §9.1，批 3）。`slots` 恒非空（保存时校验）。
@@ -241,6 +246,8 @@ mod tests {
         assert!(tt.config.skipped_dates.is_empty());
         // slot_rules serde 缺省（契约 §9.1）：旧文件无该键 → 空列表
         assert!(tt.config.slot_rules.is_empty());
+        // show_non_current_week serde 缺省（契约 §13.2）：旧文件无该键 → false（现状隐藏）
+        assert!(!tt.config.show_non_current_week);
 
         let full = Timetable {
             config: CourseTableConfig {
@@ -251,6 +258,7 @@ mod tests {
                 first_day_of_week: 1,
                 slots: None,
                 skipped_dates: vec![NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()],
+                show_non_current_week: true,
                 slot_rules: vec![SlotRule {
                     start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
                     end_date: NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
@@ -273,6 +281,7 @@ mod tests {
             json.contains("\"slotRules\":[{\"startDate\":\"2026-12-01\",\"endDate\":\"2027-02-28\""),
             "slot_rules 序列化为 camelCase 键"
         );
+        assert!(json.contains("\"showNonCurrentWeek\":true"), "批 7 字段 camelCase 键");
         let back: Timetable = serde_json::from_str(&json).unwrap();
         assert_eq!(back, full);
     }

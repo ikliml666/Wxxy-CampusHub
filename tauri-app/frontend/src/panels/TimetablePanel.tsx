@@ -34,7 +34,7 @@ import type {
   TimetableView,
 } from "@/shared/types";
 
-/** 课程色板（8 档，域色系 token：6 个既有域色 + index.css 新增的 2 档扩展）。
+/** 课程固定色板（8 档，域色系 token：6 个既有域色 + index.css 新增的 2 档扩展）。
  *  ⚠️ 导入课程的 colorIndex 是课名哈希大数（zhengfang::stable_color），
  *  取色必须 % 色板长度；手动课程 colorIndex 为本表下标。 */
 const COURSE_PALETTE = [
@@ -48,6 +48,21 @@ const COURSE_PALETTE = [
   "var(--color-rose)",
 ] as const;
 
+/** 固定段长度（批 7 §13.3：自定义色段下标从这起）。 */
+const BASE_PALETTE_LEN = COURSE_PALETTE.length;
+
+/** 合成色板（批 7 契约 §13.3）= 8 档固定色 + uiStore.customCourseColors 自定义段；
+ *  固定段在前 → 旧数据 colorIndex 0..7 取色行为不变。所有色板下标消费点
+ *  （courseColor / CourseForm 色板）统一经本函数，禁止直接下标 COURSE_PALETTE。 */
+const coursePalette = (custom: string[]): string[] => [...COURSE_PALETTE, ...custom];
+
+/** 取色：导入课哈希大数与手动课下标同口径 `% 合成长度`（新增自定义色后导入课
+ *  取色可能整体位移，批 7 冻结的已知语义）。 */
+const courseColor = (c: Course, custom: string[]) => {
+  const palette = coursePalette(custom);
+  return palette[c.colorIndex % palette.length];
+};
+
 const KIND_LABEL: Record<OverrideKind, string> = {
   rescheduled: "调课",
   cancelled: "停课",
@@ -58,8 +73,6 @@ const KIND_LABEL: Record<OverrideKind, string> = {
 const ROW_H = 72;
 
 const DAY_NAMES = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-
-const courseColor = (c: Course) => COURSE_PALETTE[c.colorIndex % COURSE_PALETTE.length];
 
 /** 小节号（教务 1-based 小节）→ 大节号：ceil(小节/2)，与后端 ICS 展开口径一致。 */
 const blockOf = (section: number) => Math.ceil(section / 2);
@@ -175,6 +188,9 @@ interface PlacedBlock {
   room: string;
   /** ghost = 非实体块：moved-out（已调走）/ cancelled（已停） */
   ghost: null | "moved-out" | "cancelled";
+  /** 非本周来源（批 7 §13.2）：渲染 40% 降级、不可拖；ghost 样式优先级不变
+   *  （降级只作用于 solid 块，风险 R7） */
+  nonCurrent: boolean;
 }
 
 /** 逆序取最后一条匹配（后采纳的通知覆盖先采纳的，upsert 语义与之呼应）。 */
@@ -229,9 +245,14 @@ function buildWeekBlocks(
   const { courses, overrides } = view.timetable;
   const blocks: PlacedBlock[] = [];
   const byId = new Map(courses.map((c) => [c.id, c]));
+  // 非本周降级开关（批 7 契约 §13.2）：关闭 = 现状隐藏；开启 = 非本周课照常
+  // 展开（块标记 nonCurrent，渲染层降级、不可拖）。
+  const showNonCurrent = view.timetable.config.showNonCurrentWeek;
 
   for (const course of courses) {
-    if (course.disabled || !course.weeks.includes(week)) continue;
+    if (course.disabled) continue;
+    const inWeek = course.weeks.includes(week);
+    if (!inWeek && !showNonCurrent) continue;
     const resched = lastOverride(
       overrides,
       (o) => o.courseId === course.id && o.changeType === "rescheduled" && o.weeks.includes(week),
@@ -256,6 +277,7 @@ function buildWeekBlocks(
       endBlock: e,
       room,
       ghost,
+      nonCurrent: !inWeek,
     });
 
     /** 原时段落块（批 5 §11.2）：custom 课按 custom 时刻与各大节相交取 min..max
@@ -338,6 +360,7 @@ function buildWeekBlocks(
       endBlock: e,
       room: ov.newPosition ?? course.position,
       ghost: null,
+      nonCurrent: false,
     });
   }
 
@@ -445,9 +468,33 @@ function CourseForm({
   const [weeksText, setWeeksText] = useState(
     initial.weeks?.length ? fmtWeeks(initial.weeks) : `1-${totalWeeks}`,
   );
+  const customColors = useUiStore((s) => s.customCourseColors);
   const [colorIndex, setColorIndex] = useState(
-    typeof initial.colorIndex === "number" ? initial.colorIndex % COURSE_PALETTE.length : 0,
+    typeof initial.colorIndex === "number"
+      ? initial.colorIndex % Math.max(1, BASE_PALETTE_LEN + customColors.length)
+      : 0,
   );
+  // 原生 <input type="color"> 的取色器在拖动时连续触发 input 事件（React onChange
+  // 同名），会把中间色塞进自定义段——只监听原生 change（选择器关闭才提交），
+  // 取值走 getState 防闭包过期（批 7 §13.3，不引取色器库）。
+  const colorInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const el = colorInputRef.current;
+    if (!el) return;
+    const onCommit = () => {
+      const hex = el.value.toLowerCase();
+      const { customCourseColors, addCustomCourseColor } = useUiStore.getState();
+      const exist = customCourseColors.indexOf(hex);
+      if (exist >= 0) {
+        setColorIndex(BASE_PALETTE_LEN + exist);
+        return;
+      }
+      addCustomCourseColor(hex);
+      setColorIndex(BASE_PALETTE_LEN + customCourseColors.length);
+    };
+    el.addEventListener("change", onCommit);
+    return () => el.removeEventListener("change", onCommit);
+  }, []);
   const [remark, setRemark] = useState(initial.remark ?? "");
   // 「按时刻」模式（批 5 §11.1）：导入课编辑不出现开关（永远节次制）
   const [isCustomTime, setIsCustomTime] = useState(initial.isCustomTime ?? false);
@@ -648,7 +695,7 @@ function CourseForm({
         <div className={field}>
           <span className={label}>颜色</span>
           <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="课程颜色">
-            {COURSE_PALETTE.map((color, i) => (
+            {coursePalette(customColors).map((color, i) => (
               <button
                 key={color}
                 type="button"
@@ -663,6 +710,24 @@ function CourseForm({
                 style={{ backgroundColor: color }}
               />
             ))}
+            {/* 自定义色段「+」（批 7 §13.3）：弹原生取色器，选中即入 uiStore 自定义段 */}
+            <button
+              type="button"
+              aria-label="添加自定义颜色"
+              title="添加自定义颜色"
+              onClick={() => colorInputRef.current?.click()}
+              className="size-6 rounded-full border border-dashed border-line text-caption leading-none text-text-2 transition-colors hover:border-text-2 hover:text-text"
+            >
+              +
+            </button>
+            <input
+              ref={colorInputRef}
+              type="color"
+              defaultValue="#5b8def"
+              aria-hidden="true"
+              tabIndex={-1}
+              className="hidden"
+            />
           </div>
         </div>
         <div className={cn(field, "sm:col-span-2 lg:col-span-3")}>
@@ -1047,6 +1112,8 @@ function SettingsEditor({
     semesterTotalWeeks: number;
     firstDayOfWeek: number;
     showWeekends: boolean;
+    /** 非本周降级显示开关（批 7 契约 §13.2，随 save_semester_config 一并落库） */
+    showNonCurrentWeek: boolean;
   };
   /** 跳过日期快照（契约 §8.1，批 2） */
   initialSkippedDates: string[];
@@ -1065,6 +1132,7 @@ function SettingsEditor({
   const [weekHint, setWeekHint] = useState("");
   const [firstDay, setFirstDay] = useState(initial.firstDayOfWeek);
   const [showWeekends, setShowWeekends] = useState(initial.showWeekends);
+  const [showNonCurrentWeek, setShowNonCurrentWeek] = useState(initial.showNonCurrentWeek);
   const [localErr, setLocalErr] = useState<string | null>(null);
   // 跳过日期：本地列表增删，一次整体替换保存（YAGNI：不做日历面板）
   const [skipped, setSkipped] = useState<string[]>(initialSkippedDates);
@@ -1101,6 +1169,7 @@ function SettingsEditor({
       firstDayOfWeek: firstDay,
       showWeekends,
       currentWeekHint: hint,
+      showNonCurrentWeek, // 批 7 §13.2：随学期设置一并落库
     });
   };
 
@@ -1200,6 +1269,18 @@ function SettingsEditor({
               className="size-4 accent-sched"
             />
             <span className="text-body text-text">显示周末列</span>
+          </label>
+          {/* 非本周课程降级显示（批 7 契约 §13.2） */}
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showNonCurrentWeek}
+              onChange={(e) => setShowNonCurrentWeek(e.target.checked)}
+              disabled={busy}
+              className="size-4 accent-sched"
+            />
+            <span className="text-body text-text">显示非本周课程</span>
+            <span className="text-caption text-text-2">以半透明样式叠加，可点击查看、不可拖动</span>
           </label>
           {/* 联动提示（契约 §7.2：前端只提示、不禁用，实际联动由后端保存时收口） */}
           {firstDay === 7 && (
@@ -1312,6 +1393,8 @@ interface DetailPos {
 export function TimetablePanel() {
   const status = useAuthStore((s) => s.status);
   const openLoginDialog = useUiStore((s) => s.openLoginDialog);
+  /** 合成色板自定义段（批 7 §13.3）：所有 courseColor 消费点共用 */
+  const customColors = useUiStore((s) => s.customCourseColors);
   const authed = status === "authed";
 
   const [view, setView] = useState<TtState>({ phase: "loading" });
@@ -1335,6 +1418,9 @@ export function TimetablePanel() {
   const [candidates, setCandidates] = useState<NoticeCandidate[] | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  /** 周次选择弹层（蓝图批 7 小件 1）：顶栏「第 N 周」按钮的下拉网格 */
+  const [weekPickerOpen, setWeekPickerOpen] = useState(false);
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Course | null>(null);
@@ -1393,6 +1479,34 @@ export function TimetablePanel() {
   const tt = ready?.timetable ?? null;
   const slots = ready?.slots ?? [];
   const currentWeek = ready?.currentWeek ?? null;
+  /** 顶栏标题态（批 7 契约 §13.1）：后端按 weeks.rs 对齐式口径判定 */
+  const weekState = ready?.weekState ?? "unset";
+  /** before 态文案的 N = 开学日 − today 天数（前端日差计算，契约 §13.1） */
+  const daysUntilStart = useMemo(() => {
+    if (!tt?.config.semesterStartDate || !ready) return null;
+    const start = parseDay(tt.config.semesterStartDate);
+    const today = parseDay(ready.today);
+    if (!start || !today) return null;
+    return Math.round((start.getTime() - today.getTime()) / 86400000);
+  }, [tt?.config.semesterStartDate, ready]);
+
+  // 周次选择弹层：Esc / 点击弹层以外区域关闭
+  useEffect(() => {
+    if (!weekPickerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setWeekPickerOpen(false);
+    };
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest("[data-week-picker]")) setWeekPickerOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [weekPickerOpen]);
+
   /** 展示周：用户切换 > 后端当前周 > 第 1 周 */
   const week = viewWeek ?? currentWeek ?? 1;
   const totalWeeks = Math.max(tt?.config.semesterTotalWeeks ?? 20, currentWeek ?? 1);
@@ -1469,9 +1583,13 @@ export function TimetablePanel() {
   }, []);
 
   /** 可拖块：实体块且非 extra 补课；ghost（已停/已调出）不可拖（契约 §10.3）；
-   *  custom 课（startSection 为 null）无法生成 override 节次，不可拖（契约 §11.2）。 */
+   *  非本周来源块不可拖（批 7 §13.2）；custom 课（startSection 为 null）无法生成
+   *  override 节次，不可拖（契约 §11.2）。 */
   const isDraggable = (b: PlacedBlock) =>
-    b.ghost === null && b.override?.changeType !== "extra" && b.course.startSection != null;
+    b.ghost === null &&
+    !b.nonCurrent &&
+    b.override?.changeType !== "extra" &&
+    b.course.startSection != null;
 
   /** 落点命中测试（契约 §10.2 纯前端几何，不走 grid.rs 互转）：显示列 = 天列 rect
    *  命中（网格外 clamp 到首/末列）；目标大节 = clamp(floor((y-网格顶)/ROW_H)+1,
@@ -1898,9 +2016,70 @@ export function TimetablePanel() {
 
   const weekSwitcher = ready && (
     <div className="flex flex-wrap items-center justify-end gap-1.5">
-      <span className="tabular-num mr-1 text-body font-medium text-text-2">
-        第 {week} 周 / 共 {totalWeeks} 周
-      </span>
+      {/* 顶栏标题态机（批 7 蓝图小件 2，契约 §13.1）：unset → 点按开设置弹层；
+          before → 距开学天数；vacation → 假期；normal → 周次按钮（开选择弹层） */}
+      {weekState === "unset" ? (
+        <button
+          type="button"
+          onClick={() => {
+            setSettingsErr(null);
+            setSkippedErr(null);
+            setSettingsOpen(true);
+          }}
+          className="mr-1 rounded text-body font-medium text-alert underline decoration-dotted underline-offset-4 hover:text-text"
+          title="点击打开课表设置"
+        >
+          尚未设置开学日
+        </button>
+      ) : weekState === "before" ? (
+        <span className="tabular-num mr-1 text-body font-medium text-text-2">
+          {daysUntilStart != null ? `距离开学还有 ${Math.max(daysUntilStart, 0)} 天` : "尚未设置开学日"}
+        </span>
+      ) : weekState === "vacation" ? (
+        <span className="mr-1 text-body font-medium text-text-2">假期</span>
+      ) : (
+        <div className="relative mr-1" data-week-picker>
+          <button
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={weekPickerOpen}
+            onClick={() => setWeekPickerOpen((o) => !o)}
+            className="tabular-num rounded text-body font-medium text-text-2 hover:text-text"
+            title="点击选择周次"
+          >
+            第 {week} 周 / 共 {totalWeeks} 周
+          </button>
+          {weekPickerOpen && (
+            <div
+              role="dialog"
+              aria-label="选择周次"
+              className="absolute right-0 top-8 z-40 rounded-card border border-line bg-surface p-3 shadow-pop"
+            >
+              <div className="grid grid-cols-10 gap-1">
+                {Array.from({ length: totalWeeks }, (_, i) => i + 1).map((w) => (
+                  <button
+                    key={w}
+                    type="button"
+                    aria-label={`第 ${w} 周${w === currentWeek ? "（本周）" : ""}`}
+                    aria-current={w === currentWeek ? "date" : undefined}
+                    onClick={() => {
+                      setViewWeek(w);
+                      setWeekPickerOpen(false);
+                    }}
+                    className={cn(
+                      "tabular-num size-7 rounded-full text-caption leading-none text-text-2 hover:bg-sched/10",
+                      w === currentWeek && "bg-sched font-medium text-white hover:bg-sched",
+                      w === week && "ring-2 ring-sched ring-offset-1 ring-offset-surface",
+                    )}
+                  >
+                    {w}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       <Button
         variant="outline"
         size="icon-sm"
@@ -2076,8 +2255,9 @@ export function TimetablePanel() {
             </Surface>
           )}
 
-          {/* 未设置开学日提示（周次不可靠） */}
-          {currentWeek === null && (
+          {/* 未设置开学日提示（批 7 §13.1：仅 unset 态显示——vacation/before 由顶栏文案承载，
+              currentWeek 越界为 null 不再误报「未设置」） */}
+          {weekState === "unset" && (
             <Surface accent="sched" className="mb-3 px-4 py-3">
               <p className="text-body text-text-2">
                 尚未设置学期开学日，当前按第 {week} 周展示；完成一次「导入 / 同步」可自动设置。
@@ -2229,7 +2409,7 @@ export function TimetablePanel() {
                     )}
                     {col.map((b) => {
                       const pos = layout.get(b.key) ?? { lane: 0, lanes: 1 };
-                      const color = courseColor(b.course);
+                      const color = courseColor(b.course, customColors);
                       const top = (b.startBlock - 1) * ROW_H + 2;
                       const height = (b.endBlock - b.startBlock + 1) * ROW_H - 4;
                       const draggable = isDraggable(b);
@@ -2244,7 +2424,7 @@ export function TimetablePanel() {
                             if (el) blockRefs.current.set(b.key, el);
                             else blockRefs.current.delete(b.key);
                           }}
-                          aria-label={`${b.course.name}，${DAY_NAMES[b.day]}第${b.startBlock}至${b.endBlock}大节${b.ghost ? `（${b.ghost === "cancelled" ? "已停" : "已调出"}）` : ""}${draggable ? "，可拖拽调整位置" : ""}`}
+                          aria-label={`${b.course.name}，${DAY_NAMES[b.day]}第${b.startBlock}至${b.endBlock}大节${b.ghost ? `（${b.ghost === "cancelled" ? "已停" : "已调出"}）` : ""}${b.nonCurrent ? "（非本周）" : ""}${draggable ? "，可拖拽调整位置" : ""}`}
                           onClick={() => {
                             // 拖拽结束/取消后的 click 必须吃掉（pointer capture 后 click
                             // 仍触发，契约 §10.1）；未进入拖拽的纯点击照常开详情
@@ -2264,6 +2444,8 @@ export function TimetablePanel() {
                             b.ghost ? "border border-dashed" : "border",
                             draggable && "cursor-grab touch-none", // touch-none：拖拽不被触屏滚动吞掉
                             dragging && "opacity-40",
+                            // 非本周降级（批 7 §13.2）：只作用 solid 块，ghost 样式优先
+                            b.nonCurrent && !b.ghost && !dragging && "opacity-40",
                             dragInvalid && "cursor-not-allowed ring-2 ring-alert", // 不可放置反馈（契约 §10.3 复核采纳）
                           )}
                           style={{
@@ -2344,7 +2526,7 @@ export function TimetablePanel() {
               {(() => {
                 const c = detail.course;
                 const myOverrides = tt.overrides.filter((o) => o.courseId === c.id);
-                const color = courseColor(c);
+                const color = courseColor(c, customColors);
                 return (
                   <>
                     <div className="flex items-center gap-2">
@@ -2467,6 +2649,7 @@ export function TimetablePanel() {
                 semesterTotalWeeks: tt.config.semesterTotalWeeks,
                 firstDayOfWeek: tt.config.firstDayOfWeek,
                 showWeekends: tt.config.showWeekends,
+                showNonCurrentWeek: tt.config.showNonCurrentWeek,
               }}
               initialSkippedDates={tt.config.skippedDates}
               busy={settingsBusy}
@@ -2612,7 +2795,7 @@ export function TimetablePanel() {
                     <span
                       aria-hidden
                       className="size-2.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: courseColor(c) }}
+                      style={{ backgroundColor: courseColor(c, customColors) }}
                     />
                     <p className="min-w-0 truncate text-body font-medium text-text">{c.name}</p>
                     {c.disabled && (

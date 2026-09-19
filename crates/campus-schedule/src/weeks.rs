@@ -103,6 +103,7 @@ mod tests {
             slots: None,
             skipped_dates: vec![],
             slot_rules: vec![],
+            show_non_current_week: false,
         };
         assert_eq!(
             current_week(

@@ -238,6 +238,9 @@ export interface CourseTableConfig {
   /** 按日期生效的作息规则（2026-09-19 批 3 契约 §9.1）：区间含端点、重叠取先声明；
    *  无命中回落 slots → 内置 */
   slotRules: SlotRule[];
+  /** 非本周课程降级显示（2026-09-19 批 7 契约 §13.2）：true = 网格同时渲染非展示周
+   *  课程（40% 透明度、可点详情、不可拖）；false/旧数据缺省 = 隐藏 */
+  showNonCurrentWeek: boolean;
 }
 
 /** 按日期区间的作息规则（契约 §9.1）。slots 恒非空（保存时校验）。 */
@@ -288,6 +291,9 @@ export interface TimeSlot {
   alias: string | null;
 }
 
+/** 顶栏标题态（2026-09-19 批 7 契约 §13.1）：后端按 weeks.rs 对齐式周次口径判定。 */
+export type WeekState = "unset" | "before" | "vacation" | "normal";
+
 /** get_timetable → data（批次 4 修订契约 §2.3）。 */
 export interface TimetableView {
   timetable: Timetable;
@@ -295,6 +301,8 @@ export interface TimetableView {
   slots: TimeSlot[];
   /** 当前教学周；null = 未设置开学日或今天不在学期内 */
   currentWeek: number | null;
+  /** 顶栏标题态（批 7 §13.1）：细分 currentWeek 为 null 的原因 */
+  weekState: WeekState;
   /** 本机今天 "YYYY-MM-DD" */
   today: string;
 }
@@ -355,6 +363,8 @@ export interface SemesterConfigInput {
   showWeekends: boolean;
   /** 「今天是第 N 周」手动锚点：后端按此反推开学日（口径单点在后端） */
   currentWeekHint?: number | null;
+  /** 非本周课程降级显示（批 7 §13.2）：缺省 = 保留旧值（容忍旧调用方） */
+  showNonCurrentWeek?: boolean | null;
 }
 
 /** 调课通知候选（parse_notice → data，不入库）。
