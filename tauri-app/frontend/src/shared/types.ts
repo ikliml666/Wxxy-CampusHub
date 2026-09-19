@@ -551,6 +551,12 @@ export interface ElectricityView {
   fields: ElectricityField[];
   money: number | null;
   tip: string | null;
+  /**
+   * 充值 `third_party` 前缀（App 口径：末级 IEC 响应 `map.data` 的 JSON 序列化）。
+   * 该对象含户号等 PII（`charge.rs` 模块头注：crate 层刻意不透出明细），**只能整串由后端给出**，
+   * 前端不自行拼接（见 `components/RechargeFlow.tsx` 的注释）。旧后端不返回 ⇒ undefined。
+   */
+  thirdParty?: string | null;
 }
 
 /** `query_electricity` → data。`options` 为空且 `isFinal === false` ⇒ 该级无下拉（末级输入级）。 */
@@ -569,4 +575,79 @@ export interface SavedRoom {
   feeitemName: string;
   path: RoomStep[];
   label: string;
+}
+
+// ─────────── 电费充值（M3.1 批 D 前端；命令契约 = 计划 §2.2，后端 `commands/electricity.rs`） ───────────
+//
+// 全部命令出入参 camelCase（Tauri 自动转 snake_case）。**密码相关字段（passwordSeq/uuid）只在一次
+// 调用内存在**：不进 localStorage、不进日志、不回填输入框（计划 Global Constraints 1）。
+
+/** 一笔充值订单。`status`：0=待支付、1=已完成（计划 §1.3 状态机）。 */
+export interface RechargeOrder {
+  orderId: string;
+  status: number;
+  /** 订单过期时刻（服务端原文，可能带空格："YYYY-MM-DD HH:MM:SS"）；缺省 null */
+  payExpDate: string | null;
+  /** 订单金额（元）；缺省 null（前端不伪造，回落到用户输入值展示） */
+  tranamt: number | null;
+}
+
+/**
+ * 一种支付方式（`recharge_pay_methods` → methods 项）。
+ * `nopassword` 后端已按计划 §1.3 的**唯一判据**归一成布尔（原文 `=== 1` ⇒ true）；
+ * 其他真值是官方死分支，后端按「需密码」处理——前端只消费布尔，不重判原文。
+ */
+export interface RechargePayMethod {
+  /** 后端只透出 ACCOUNT / ACCOUNTTSM（校园卡、电子账户） */
+  code: string;
+  /** `paytypeid`，与 code 一起回传给后续所有支付请求 */
+  payid: string;
+  name: string;
+  nopassword: boolean;
+  remark: string | null;
+}
+
+/** `recharge_pay_methods` → data。`methods` 为空 ⇒ 无可用账户类渠道（不展示第三方渠道）。 */
+export interface RechargePayMethods {
+  order: RechargeOrder;
+  methods: RechargePayMethod[];
+}
+
+/**
+ * 安全键盘数据。**`keys` 只用于渲染**：提交的是「点击的键位下标序列」而非键上的字符
+ * （App 口径 `password = 下标数组.join("")` + `uuid`），见 `RechargeFlow.tsx` 红线注释。
+ */
+export interface PasswordPad {
+  uuid: string;
+  keys: string[];
+}
+
+/**
+ * 一个可扣款账户类型项。
+ * ⚠️ **批 C 的 crate 实际只回类型码字符串**（`recharge.rs::parse_ccctypes` → `Vec<String>`，
+ * 注释明说「balance 归官方 UI 展示用，本项目暂不需要」）；计划 §2.2 曾写 `{ccctype,balance}` 形态。
+ * 两种都容忍，取值一律走 `ccctypeCode()`（见 `components/RechargeFlow.tsx`）。
+ */
+export type RechargeCcctype = string | { ccctype: string; balance?: number | null };
+
+/**
+ * `recharge_query_account` → data。
+ *
+ * ⚠️ **协议是两步**（crate `query_account` 的 `accountno` 参数，官方 `getAccountno` → `getAccounttype`）：
+ * 不带 `accountno` ⇒ 回**账号列表**；带已选 `accountno` ⇒ 回该账号的**账户类型 + 安全键盘**。
+ * 故免密分支同样要跑完这两步（提交体必须带 accountno/ccctype）。
+ */
+export interface RechargeAccounts {
+  accounts: string[];
+  ccctypes: RechargeCcctype[];
+  /** 无安全键盘数据时为 null/缺省（免密分支本来就没有） */
+  pad?: PasswordPad | null;
+}
+
+/** `recharge_create` → data。crate 层返回裸 `orderid` 字符串，命令层可能包成对象——两种都容忍。 */
+export type RechargeCreated = { orderId: string } | string;
+
+/** `recharge_status` → data。 */
+export interface RechargeStatus {
+  order: RechargeOrder;
 }

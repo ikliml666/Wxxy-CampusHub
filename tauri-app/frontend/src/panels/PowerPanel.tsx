@@ -2,6 +2,7 @@ import { History, RefreshCw, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader } from "@/components/PanelHeader";
+import { RechargeFlow } from "@/components/RechargeFlow";
 import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -485,6 +486,16 @@ export function PowerPanel() {
           </>
         )}
       </Surface>
+
+      {/* 充值（M3.1 批 D）：房间选全且视图无 tip 才出现——金额 → 风险声明 → 支付方式 →
+          免密/安全键盘 → 轮询。thirdParty 只透传后端给的（见 RechargeFlow 头注：前端不拼）。 */}
+      {complete && area && view && !view.tip && (
+        <RechargeFlow
+          feeitem={area}
+          roomLabel={steps.map((s) => s.name || s.value).join(" · ")}
+          thirdParty={view.thirdParty ?? undefined}
+        />
+      )}
 
       {/* 常用房间：本地存（重启仍在），一键复查余额 */}
       <Surface className="mt-3 px-4 py-4">
