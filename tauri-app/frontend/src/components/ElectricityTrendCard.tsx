@@ -1,6 +1,5 @@
 import { RefreshCw, TrendingUp } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { EmptyState } from "@/components/EmptyState";
 import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { invokeCommand } from "@/shared/tauriApi";
@@ -156,30 +155,34 @@ export function ElectricityTrendCard({
           </Button>
         </div>
       ) : !roomId ? (
-        <EmptyState
-          compact
-          icon={TrendingUp}
-          domain="wallet"
-          title="还没有绑定宿舍"
-          hint="在左侧查到房间后点「绑定为我的宿舍」，之后每次打开应用会自动记录当日余额。"
-        />
+        /* 空态用矮提示条而非大空态卡：与绑定后「只有 1 个点」的空态高度接近，
+           避免右列在绑定前后大幅跳动（M4 点验布局反馈）。 */
+        <div className="mt-3 flex items-start gap-2.5 rounded-inner border border-line bg-surface-2 px-3 py-3">
+          <TrendingUp aria-hidden className="text-wallet mt-0.5 size-4 shrink-0" />
+          <div className="min-w-0">
+            <p className="text-body text-text">还没有绑定宿舍</p>
+            <p className="mt-0.5 text-caption text-text-2">
+              在左侧查到房间后点「绑定为我的宿舍」，之后每次打开应用会自动记录当日余额。
+            </p>
+          </div>
+        </div>
       ) : phase === "loading" ? (
         <div aria-hidden className="mt-3 space-y-2">
           <div className="h-24 animate-pulse rounded-inner bg-line" />
           <div className="h-4 w-2/3 animate-pulse rounded bg-line" />
         </div>
       ) : valid.length < 2 ? (
-        <EmptyState
-          compact
-          icon={TrendingUp}
-          domain="wallet"
-          title="还采不到趋势"
-          hint={
-            valid.length === 0
-              ? "最近 30 天没有有效的余额记录。应用启动时会自动补采当日余额，也可以查到房间后点「立即采集」。"
-              : "最近 30 天只有 1 个有效余额记录，再过几天就能画出变化。"
-          }
-        />
+        <div className="mt-3 flex items-start gap-2.5 rounded-inner border border-line bg-surface-2 px-3 py-3">
+          <TrendingUp aria-hidden className="text-wallet mt-0.5 size-4 shrink-0" />
+          <div className="min-w-0">
+            <p className="text-body text-text">还采不到趋势</p>
+            <p className="mt-0.5 text-caption text-text-2">
+              {valid.length === 0
+                ? "最近 30 天没有有效的余额记录。应用启动时会自动补采当日余额，也可以查到房间后点「立即采集」。"
+                : "最近 30 天只有 1 个有效余额记录，再过几天就能画出变化。"}
+            </p>
+          </div>
+        </div>
       ) : (
         <>
           {/* 折线：preserveAspectRatio=none 拉伸铺满；vector-effect 保住描边不随 y 拉伸变形 */}

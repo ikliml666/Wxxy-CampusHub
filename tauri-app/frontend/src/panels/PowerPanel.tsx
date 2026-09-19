@@ -486,13 +486,16 @@ export function PowerPanel() {
                 action={<Button onClick={openLoginDialog}>登录</Button>}
               />
             ) : !areaId ? (
-              <EmptyState
-                compact
-                icon={Zap}
-                domain="wallet"
-                title="先选择缴费片区"
-                hint="再逐级选择校区、楼栋并填写房间号。"
-              />
+              /* 未选片区：矮提示条代替大空态卡——左列初始高度收敛，两列高度差不至于拉满整屏 */
+              <div className="mt-3 flex items-start gap-2.5 rounded-inner border border-line bg-surface-2 px-3 py-3">
+                <Zap aria-hidden className="text-wallet mt-0.5 size-4 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-body text-text">选择缴费片区后开始查询</p>
+                  <p className="mt-0.5 text-caption text-text-2">
+                    选好片区会自动带出校区，再点楼栋卡片、填房间号。
+                  </p>
+                </div>
+              </div>
             ) : (
               <>
                 {/* 面包屑：手动选过的层可点回退；自动选定的层收成弱提示（不占交互位） */}

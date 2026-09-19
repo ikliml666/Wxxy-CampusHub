@@ -55,6 +55,8 @@ export function ElectricityPaymentsCard({
   const [billsPhase, setBillsPhase] = useState<Phase>("loading");
   const [billsError, setBillsError] = useState("");
   const [billsTick, setBillsTick] = useState(0);
+  /** 月度区默认只露「全年合计 + 有缴费的月份」，全年 12 个月按需展开（高度协调，M4 点验反馈）。 */
+  const [showAllMonths, setShowAllMonths] = useState(false);
 
   useEffect(() => {
     if (!authed) return;
@@ -156,6 +158,9 @@ export function ElectricityPaymentsCard({
   }
 
   const monthlyMax = Math.max(...monthly.map((m) => m.amountYuan), 0.01);
+  /** 有缴费的月份（>0）；空月 = 0 元是事实而非取数失败，默认收起、文案里点明。 */
+  const paidMonths = monthly.filter((m) => m.amountYuan > 0);
+  const yearTotal = monthly.reduce((s, m) => s + m.amountYuan, 0);
   const hasBillsMore = bills.length > 0 && bills.length < billsTotal;
 
   return (
@@ -209,7 +214,7 @@ export function ElectricityPaymentsCard({
         </div>
         {monthlyPhase === "loading" ? (
           <div aria-hidden className="mt-2 space-y-1.5">
-            {[0, 1, 2, 3].map((i) => (
+            {[0, 1].map((i) => (
               <div key={i} className="h-4 animate-pulse rounded bg-line" />
             ))}
           </div>
@@ -225,30 +230,79 @@ export function ElectricityPaymentsCard({
               重试
             </Button>
           </div>
-        ) : monthly.every((m) => m.amountYuan === 0) ? (
-          <p className="mt-2 text-caption text-text-2">
-            今年还没有缴费记录（学校侧逐月返回为空）。
-          </p>
         ) : (
-          <ul className="mt-2">
-            {monthly.map((m) => (
-              <li key={m.month} className="flex items-center gap-2 py-1">
-                <span className="tabular-num w-12 shrink-0 text-caption text-text-2">
-                  {m.month.slice(5)}月
-                </span>
-                <span className="h-3 min-w-0 flex-1 overflow-hidden rounded-inner bg-surface-2">
-                  <span
-                    aria-hidden
-                    className="bg-wallet block h-full rounded-inner"
-                    style={{ width: `${Math.max((m.amountYuan / monthlyMax) * 100, 2)}%` }}
-                  />
-                </span>
-                <span className="tabular-num w-16 shrink-0 text-right text-caption text-text">
-                  {m.amountYuan.toFixed(2)}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            {/* 紧凑形态：全年合计一眼可见，默认只列有缴费的月份；空月 = 0 元是事实，
+                在提示文案里点明「非取数失败」。全年 12 个月按需展开（2 列小格）。 */}
+            <div className="mt-2 flex items-baseline justify-between gap-3">
+              <span className="text-caption text-text-2">全年合计</span>
+              <span className="tabular-num text-body font-medium text-text">
+                ¥ {yearTotal.toFixed(2)}
+              </span>
+            </div>
+            {paidMonths.length === 0 ? (
+              <p className="mt-1.5 text-caption text-text-2">
+                12 个月均无缴费记录（学校侧空月返回为空，按 0 元计，不是取数失败）。
+              </p>
+            ) : (
+              <>
+                <ul className="mt-1 divide-y divide-line">
+                  {paidMonths.map((m) => (
+                    <li key={m.month} className="flex items-center gap-2 py-1.5">
+                      <span className="tabular-num w-10 shrink-0 text-caption text-text-2">
+                        {m.month.slice(5)}月
+                      </span>
+                      <span className="h-3 min-w-0 flex-1 overflow-hidden rounded-inner bg-surface-2">
+                        <span
+                          aria-hidden
+                          className="bg-wallet block h-full rounded-inner"
+                          style={{ width: `${Math.max((m.amountYuan / monthlyMax) * 100, 2)}%` }}
+                        />
+                      </span>
+                      <span className="tabular-num w-14 shrink-0 text-right text-caption text-text">
+                        {m.amountYuan.toFixed(2)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-caption text-text-2">
+                  其余 {12 - paidMonths.length} 个月无缴费（0 元）。
+                </p>
+              </>
+            )}
+            <div className="mt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-expanded={showAllMonths}
+                onClick={() => setShowAllMonths((v) => !v)}
+              >
+                {showAllMonths ? "收起" : "展开全年 12 个月"}
+              </Button>
+            </div>
+            {showAllMonths && (
+              <ul className="mt-1 grid grid-cols-2 gap-x-4">
+                {monthly.map((m) => (
+                  <li
+                    key={m.month}
+                    className="flex items-baseline justify-between gap-2 border-b border-line py-1"
+                  >
+                    <span className="tabular-num text-caption text-text-2">
+                      {m.month.slice(5)}月
+                    </span>
+                    <span
+                      className={cn(
+                        "tabular-num text-caption",
+                        m.amountYuan > 0 ? "font-medium text-text" : "text-text-2",
+                      )}
+                    >
+                      {m.amountYuan.toFixed(2)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
 
