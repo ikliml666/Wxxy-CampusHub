@@ -19,6 +19,9 @@
 //! - [`save_time_slots`]（2026-09-18 收尾轮）：保存/清空自定义作息；
 //!   [`effective_slots`] 是生效作息的单点取值（`config.slots` 优先、回落内置
 //!   校本大节表），`build_timetable_view` 与 `build_ics` 共用。
+//! - [`save_semester_config`]（2026-09-19 批 1，契约 §7.1）：开学日/总周数/周首日/
+//!   显示周末整块保存；`current_week_hint` 有值时由后端反推开学日（口径单点）；
+//!   显示约束联动收口在 [`apply_display_constraints`]。
 //!
 //! 统一口径：业务失败一律 `Ok(CommandResult::err(中文消息))`（`Err(String)` 仅限
 //! IPC 框架层）；敏感纪律——本模块不输出任何 cookie/TGT/凭据字段。
@@ -28,7 +31,10 @@ use crate::infra::state::AppState;
 use crate::infra::{state, timetable};
 use campus_portal::block_time_slots;
 use campus_schedule::model::{Course, CourseOverride, TimeSlot, Timetable};
-use campus_schedule::{current_week, diff_courses, parse_kb_response, parse_notice_text, Semester, NoticeConfidence};
+use campus_schedule::{
+    current_week, diff_courses, parse_kb_response, parse_notice_text,
+    previous_or_same_day_of_week, semester_start_from_week, NoticeConfidence, Semester,
+};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -354,6 +360,9 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
     let Some(start_date) = tt.config.semester_start_date else {
         return Err("尚未导入课表（缺少学期开学日期），请先完成一次导入".to_string());
     };
+    // 周首日对齐（契约 §7.3）：第 1 周首日 = 开学日按 first_day_of_week 回退对齐；
+    // firstDay=1 且开学日为周一时与旧公式逐字节等价（golden 保持）。
+    let week_first = previous_or_same_day_of_week(start_date, tt.config.first_day_of_week);
     // 作息单点取值（契约 §2.3）：自定义优先，回落内置——与 TimetableView.slots 同源
     let slots = effective_slots(&tt.config);
     let dtstamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
@@ -389,9 +398,11 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
             if week == 0 {
                 continue;
             }
-            // 教学周 → 日期：开学日（第 1 周周一）+ (周次-1)×7 + (星期-1) 天
-            let day_offset = (week - 1) * 7 + u32::from(course.day) - 1;
-            let date = start_date + chrono::Duration::days(i64::from(day_offset));
+            // 教学周 → 日期（契约 §7.3）：第 week 周首日 = week_first + (week-1)×7，
+            // 列偏移 col = (day - firstDay + 7) % 7（周首日旋转后 day 的显示列）
+            let col = (u32::from(course.day) + 7 - u32::from(tt.config.first_day_of_week)) % 7;
+            let date =
+                week_first + chrono::Duration::days(i64::from((week - 1) * 7 + col));
             let day_basic = date.format("%Y%m%d").to_string();
             let mut desc_parts: Vec<String> = Vec::new();
             if !course.teacher.is_empty() {
@@ -615,6 +626,87 @@ pub async fn save_time_slots(
     match mutate_timetable(&dir, |tt| {
         // Some(空数组) 按恢复内置处理（与「None/空 = 内置」口径一致），防御性归一
         tt.config.slots = slots.clone().filter(|v| !v.is_empty());
+        Ok(tt.clone())
+    }) {
+        Ok(tt) => Ok(CommandResult::ok(build_timetable_view(
+            tt,
+            chrono::Local::now().date_naive(),
+        ))),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+// ---------------- 学期设置与周首日（2026-09-19 批 1，契约 §7） ----------------
+
+/// save_semester_config 入参（契约 §7.1，camelCase；容器级 default 容忍缺省字段）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SemesterConfigInput {
+    /// `None` = 清空开学日（假期态）；被 `current_week_hint` 反推覆盖
+    pub semester_start_date: Option<NaiveDate>,
+    pub semester_total_weeks: u32,
+    /// 一周起始日：1=周一 … 7=周日
+    pub first_day_of_week: u8,
+    pub show_weekends: bool,
+    /// 「今天是第 N 周」手动锚点：有值时后端反推开学日（口径单点，契约 §7.1）
+    pub current_week_hint: Option<u32>,
+}
+
+/// 显示约束双向联动（契约 §7.2，上游语义）：周日开头必须显示周末；隐藏周末则
+/// 周首日回周一。收口在后端 save 单点——前端两处开关各自联动必漏。
+fn apply_display_constraints(cfg: &mut campus_schedule::model::CourseTableConfig) {
+    if cfg.first_day_of_week == 7 {
+        cfg.show_weekends = true;
+    }
+    if !cfg.show_weekends {
+        cfg.first_day_of_week = 1;
+    }
+}
+
+/// 入参校验（契约 §7.1）：周数 1..=30（上游滚轮范围）、firstDay 1..=7、
+/// hint 落在 1..=总周数。
+fn validate_semester_input(input: &SemesterConfigInput) -> Result<(), String> {
+    if !(1..=30).contains(&input.semester_total_weeks) {
+        return Err("学期总周数必须在 1 至 30 之间".to_string());
+    }
+    if !(1..=7).contains(&input.first_day_of_week) {
+        return Err("每周起始日无效（1=周一 … 7=周日）".to_string());
+    }
+    if let Some(h) = input.current_week_hint {
+        if h < 1 || h > input.semester_total_weeks {
+            return Err("「今天是第几周」必须在 1 至学期总周数之间".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// 学期设置落库纯函数（便于单测）：校验 → 反推/清空开学日 → 套显示约束联动。
+fn apply_semester_config(
+    tt: &mut Timetable,
+    input: &SemesterConfigInput,
+    today: NaiveDate,
+) -> Result<(), String> {
+    validate_semester_input(input)?;
+    tt.config.semester_start_date = match input.current_week_hint {
+        // 反推放后端（契约 §7.1）：用入参的周首日口径对齐「本周首日」再回退 hint-1 周
+        Some(h) => Some(semester_start_from_week(today, h, input.first_day_of_week)),
+        None => input.semester_start_date,
+    };
+    tt.config.semester_total_weeks = input.semester_total_weeks;
+    tt.config.first_day_of_week = input.first_day_of_week;
+    tt.config.show_weekends = input.show_weekends;
+    apply_display_constraints(&mut tt.config);
+    Ok(())
+}
+
+/// 保存学期设置（契约 §7.1）：返回刷新后的 [`TimetableView`]（前端免二次拉取）。
+#[tauri::command]
+pub async fn save_semester_config(
+    input: SemesterConfigInput,
+) -> Result<CommandResult<TimetableView>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        apply_semester_config(tt, &input, chrono::Local::now().date_naive())?;
         Ok(tt.clone())
     }) {
         Ok(tt) => Ok(CommandResult::ok(build_timetable_view(
@@ -1016,5 +1108,166 @@ mod tests {
         let view = build_timetable_view(tt, NaiveDate::from_ymd_opt(2026, 9, 17).unwrap());
         assert_eq!(view.slots.len(), 4);
         assert_eq!(view.slots[0].start_time, "08:30");
+    }
+
+    // ---------------- 批 1：学期设置、显示约束联动与 ICS 周首日对齐（契约 §7） ----------------
+
+    fn sem_input(
+        start: Option<NaiveDate>,
+        weeks: u32,
+        first_day: u8,
+        show_weekends: bool,
+        hint: Option<u32>,
+    ) -> SemesterConfigInput {
+        SemesterConfigInput {
+            semester_start_date: start,
+            semester_total_weeks: weeks,
+            first_day_of_week: first_day,
+            show_weekends,
+            current_week_hint: hint,
+        }
+    }
+
+    /// 约束联动双向（契约 §7.2）：firstDay=7 ⇒ 强制显示周末（即使入参 false）；
+    /// 隐藏周末 ⇒ firstDay 回周一；其余组合不动。
+    #[test]
+    fn display_constraints_link_both_directions() {
+        let mut cfg = timetable_with(None, vec![]).config;
+        cfg.first_day_of_week = 7;
+        cfg.show_weekends = false;
+        apply_display_constraints(&mut cfg);
+        assert!(cfg.show_weekends, "周日开头必须强制显示周末");
+        assert_eq!(cfg.first_day_of_week, 7);
+
+        let mut cfg = timetable_with(None, vec![]).config;
+        cfg.first_day_of_week = 3;
+        cfg.show_weekends = false;
+        apply_display_constraints(&mut cfg);
+        assert_eq!(cfg.first_day_of_week, 1, "隐藏周末把周首日拉回周一");
+
+        let mut cfg = timetable_with(None, vec![]).config;
+        cfg.first_day_of_week = 1;
+        cfg.show_weekends = true;
+        apply_display_constraints(&mut cfg);
+        assert_eq!((cfg.first_day_of_week, cfg.show_weekends), (1, true));
+    }
+
+    /// 入参校验（契约 §7.1）：周数与 firstDay 越界、hint 越界逐项拒绝。
+    #[test]
+    fn semester_input_validation_rejects_out_of_range() {
+        assert!(validate_semester_input(&sem_input(None, 0, 1, false, None))
+            .unwrap_err()
+            .contains("1 至 30"));
+        assert!(validate_semester_input(&sem_input(None, 31, 1, false, None))
+            .unwrap_err()
+            .contains("1 至 30"));
+        assert!(validate_semester_input(&sem_input(None, 20, 0, false, None))
+            .unwrap_err()
+            .contains("每周起始日"));
+        assert!(validate_semester_input(&sem_input(None, 20, 8, false, None))
+            .unwrap_err()
+            .contains("每周起始日"));
+        assert!(
+            validate_semester_input(&sem_input(None, 20, 1, false, Some(0)))
+                .unwrap_err()
+                .contains("今天是第几周"),
+            "hint=0 应拒绝"
+        );
+        assert!(
+            validate_semester_input(&sem_input(None, 20, 1, false, Some(21)))
+                .unwrap_err()
+                .contains("今天是第几周"),
+            "hint 超出总周数应拒绝"
+        );
+        assert!(validate_semester_input(&sem_input(None, 30, 7, true, Some(30))).is_ok());
+    }
+
+    /// current_week_hint 反推（契约 §7.1）：today=2026-09-17（周四），
+    /// hint=2 firstDay=1 → 本周周一 2026-09-07；firstDay=7 → 本周周日 2026-09-13
+    /// 回退 1 周 = 2026-09-06。hint 覆盖入参 start_date；hint 空 → 用入参/清空。
+    #[test]
+    fn apply_semester_config_hint_backfills_start_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 17).unwrap();
+
+        let mut tt = timetable_with(None, vec![]);
+        apply_semester_config(
+            &mut tt,
+            &sem_input(None, 20, 1, false, Some(2)),
+            today,
+        )
+        .unwrap();
+        assert_eq!(tt.config.semester_start_date, Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()));
+
+        let mut tt = timetable_with(None, vec![]);
+        apply_semester_config(
+            &mut tt,
+            &sem_input(None, 20, 7, true, Some(2)),
+            today,
+        )
+        .unwrap();
+        assert_eq!(tt.config.semester_start_date, Some(NaiveDate::from_ymd_opt(2026, 9, 6).unwrap()));
+
+        // hint 有值时覆盖入参 start_date
+        let mut tt = timetable_with(None, vec![]);
+        apply_semester_config(
+            &mut tt,
+            &sem_input(Some(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()), 20, 1, false, Some(2)),
+            today,
+        )
+        .unwrap();
+        assert_eq!(tt.config.semester_start_date, Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()));
+
+        // hint 空 + start None → 清空开学日（假期态）；联动照常生效
+        let mut tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![]);
+        apply_semester_config(&mut tt, &sem_input(None, 20, 7, false, None), today).unwrap();
+        assert_eq!(tt.config.semester_start_date, None);
+        assert!(tt.config.show_weekends, "firstDay=7 联动强制显示周末");
+        assert_eq!(tt.config.first_day_of_week, 7);
+    }
+
+    /// 入参缺省容错（契约 §7.1 容器级 serde default）：空 JSON 反序列化为默认值，
+    /// 校验层报中文错误而不是反序列化失败——旧调用方不因新增字段破坏。
+    #[test]
+    fn semester_input_deserializes_partial_json() {
+        let input: SemesterConfigInput = serde_json::from_str("{}").unwrap();
+        assert_eq!(input.semester_start_date, None);
+        assert_eq!(input.semester_total_weeks, 0);
+        assert_eq!(input.current_week_hint, None);
+        assert!(validate_semester_input(&input).is_err(), "缺省值应被校验层拒绝");
+    }
+
+    /// ICS 周首日对齐（契约 §7.3）：开学日非周一（2026-09-09 周三，firstDay=1）时
+    /// 第 1 周周一对齐到 2026-09-07；firstDay=7 时周日课落在周首（2026-09-06）。
+    /// firstDay=1 且开学日周一的 golden 由上方 ics_expands_events_with_correct_times 钉住。
+    #[test]
+    fn ics_aligns_dates_to_first_day_of_week() {
+        // 开学日非周一：start 2026-09-09（周三），firstDay=1 → 第 1 周周一 = 09-07
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 9).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![1])],
+        );
+        tt.config.first_day_of_week = 1;
+        let ics = build_ics(&tt).unwrap();
+        assert!(ics.contains("DTSTART:20260907T080000"), "非周一开学日应回退对齐到周首");
+
+        // firstDay=7：start 2026-09-07（周一），day=7（周日）→ 列 0 = 本周周日 09-06
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-b", "密码学", 7, 1, 2, vec![1])],
+        );
+        tt.config.first_day_of_week = 7;
+        tt.config.show_weekends = true;
+        let ics = build_ics(&tt).unwrap();
+        assert!(ics.contains("DTSTART:20260906T080000"), "firstDay=7 时周日 = 周首日");
+
+        // 同一配置下周三（day=3）：col=(3-7+7)%7=3 → 09-06+3 = 09-09
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-c", "数据结构", 3, 1, 2, vec![1])],
+        );
+        tt.config.first_day_of_week = 7;
+        tt.config.show_weekends = true;
+        let ics = build_ics(&tt).unwrap();
+        assert!(ics.contains("DTSTART:20260909T080000"));
     }
 }

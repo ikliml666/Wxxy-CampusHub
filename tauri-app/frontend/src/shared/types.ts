@@ -313,6 +313,20 @@ export interface ManualCourseInput {
 /** 解析置信度。high = 要素齐全且课程名唯一精确匹配（自动应用）；low = 待确认。 */
 export type NoticeConfidence = "high" | "low";
 
+/** save_semester_config 入参（2026-09-19 批 1 修订 §7.1）。
+ *  Rust 侧容器级 serde default：前端可省略 currentWeekHint。 */
+export interface SemesterConfigInput {
+  /** "YYYY-MM-DD" | null（null = 清空开学日即假期态）；被 currentWeekHint 反推覆盖 */
+  semesterStartDate: string | null;
+  /** 1..=30 */
+  semesterTotalWeeks: number;
+  /** 一周起始日：1=周一 … 7=周日 */
+  firstDayOfWeek: number;
+  showWeekends: boolean;
+  /** 「今天是第 N 周」手动锚点：后端按此反推开学日（口径单点在后端） */
+  currentWeekHint?: number | null;
+}
+
 /** 调课通知候选（parse_notice → data，不入库）。
  *  ⚠️ Rust 侧 Option 字段 skip_serializing_if 缺省省略 → TS 用可选属性（非 null）。 */
 export interface NoticeCandidate {

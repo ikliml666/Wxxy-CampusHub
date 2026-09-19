@@ -11,7 +11,9 @@ use chrono::{Datelike, NaiveDate};
 
 /// 把日期对齐到「本周（按 `first_day_of_week` 划分）的首日」，不足则回退。
 /// Kotlin 原文：getPreviousOrSameDayOfWeek。
-fn previous_or_same_day_of_week(date: NaiveDate, first_day_of_week: u8) -> NaiveDate {
+/// 前端 `TimetablePanel.tsx::previousOrSame` 是本函数的 JS 镜像，两处注释互锚，
+/// 改一处必须同步另一处（契约 §7.4）。
+pub fn previous_or_same_day_of_week(date: NaiveDate, first_day_of_week: u8) -> NaiveDate {
     // chrono: weekday().number_from_monday() 1=周一…7=周日
     let current = date.weekday().number_from_monday() as i64;
     let target = first_day_of_week as i64;

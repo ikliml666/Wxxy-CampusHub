@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-09-19 · 全量补齐批 1（P1）：课表设置弹层 + showWeekends/firstDayOfWeek 接线 + ICS 周首日对齐
+
+- **模块**：`campus-schedule/weeks.rs`（`previous_or_same_day_of_week` 转正导出）、`commands/timetable.rs`（新命令 `save_semester_config` + `apply_display_constraints` 后端单点联动 + ICS 对齐式日期 + 5 个单测）、`TimetablePanel.tsx`（列头旋转/5 列裁剪/weekDates 重写/SettingsEditor 弹层）、`types.ts`、契约文档 §7
+- **蓝图**：`docs/superpowers/plans/2026-09-19-timetable-p1-p5.md`（glm5.3 规划轮，11 批）· 本批 = 批 1，glm5-3-flash 执行、主智能体复跑验证
+- **要点**：开学日/总周数/当前周（hint 反推后端单点）手动设置整块补齐（复核并入项 2，`semester_start_from_week` 死代码激活）；firstDay=7 ⇒ showWeekends 强制开、关周末 ⇒ firstDay 回周一（双向联动收口后端）；ICS 日期改 `previous_or_same` 对齐式（firstDay=1 且周一开学输出不变，golden 保；新增非周一开学/firstDay=7 测试）；前端网格按 firstDay 旋转、隐藏周末列、`todayCol` 按显示列口径（规避 R1 陷阱）
+- **偏离**：hint 校验加严 `1..=totalWeeks`（防反推出学期外日期）；`DAY_HEADERS` 常量删除改 `DAY_NAMES[displayDayOf(i)]` 等价映射
+- **验证**：`cargo test --workspace` 全绿（41+49+37）、`tsc --noEmit` 零错、`npm run build` ✓；深色模式与真机视觉待用户验收
+
 ## 2026-09-19 · 课表对账复核轮：glm5-3-flash 双向交叉复核，P1-P5 补 3 实质漏网 + 行号修正（无代码改动）
 
 - **模块**：`docs/HANDOFF-timetable-parity.md`（新增 §六复核轮补记）、`CHANGELOG.md`；**无代码改动**

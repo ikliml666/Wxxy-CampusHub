@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Settings,
 } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader } from "@/components/PanelHeader";
@@ -25,11 +26,10 @@ import type {
   ImportResult,
   NoticeCandidate,
   OverrideKind,
+  SemesterConfigInput,
   TimeSlot,
   TimetableView,
 } from "@/shared/types";
-
-const DAY_HEADERS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"] as const;
 
 /** 课程色板（8 档，域色系 token：6 个既有域色 + index.css 新增的 2 档扩展）。
  *  ⚠️ 导入课程的 colorIndex 是课名哈希大数（zhengfang::stable_color），
@@ -72,6 +72,17 @@ const fmtDay = (d: Date) => `${d.getMonth() + 1}.${d.getDate()}`;
 
 const dayKeyOf = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** 把日期对齐到「本周（按 firstDayOfWeek 划分）的首日」，不足则回退。
+ *  JS 镜像 crates/campus-schedule/src/weeks.rs::previous_or_same_day_of_week——
+ *  两处注释互锚，改一处必须同步另一处（契约 §7.4）。 */
+function previousOrSame(d: Date, firstDay: number): Date {
+  // JS getDay(): 0=周日 … 6=周六，折算为 1=周一 … 7=周日（与 chrono number_from_monday 同口径）
+  const cur = ((d.getDay() + 6) % 7) + 1;
+  const out = new Date(d);
+  out.setDate(out.getDate() - ((cur - firstDay + 7) % 7));
+  return out;
+}
 
 /** 周次列表 → 紧凑文案："1-16" / "1,3,5" / "1-8,10"。 */
 function fmtWeeks(weeks: number[]): string {
@@ -660,6 +671,184 @@ function SlotsEditor({
   );
 }
 
+// ---------------- 课表设置弹层（契约 §7.1 save_semester_config，2026-09-19 批 1） ----------------
+
+function SettingsEditor({
+  initial,
+  busy,
+  error,
+  onSave,
+  onClose,
+}: {
+  initial: {
+    semesterStartDate: string | null;
+    semesterTotalWeeks: number;
+    firstDayOfWeek: number;
+    showWeekends: boolean;
+  };
+  busy: boolean;
+  error: string | null;
+  onSave: (input: SemesterConfigInput) => void;
+  onClose: () => void;
+}) {
+  const [startDate, setStartDate] = useState(initial.semesterStartDate ?? "");
+  const [totalWeeks, setTotalWeeks] = useState(String(initial.semesterTotalWeeks));
+  /** 空 = 不设置；保存时后端按此反推开学日（覆盖上方开学日） */
+  const [weekHint, setWeekHint] = useState("");
+  const [firstDay, setFirstDay] = useState(initial.firstDayOfWeek);
+  const [showWeekends, setShowWeekends] = useState(initial.showWeekends);
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  // Esc 关闭（busy 时忽略）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const submit = () => {
+    if (totalWeeks.trim() === "" || !Number.isInteger(Number(totalWeeks)))
+      return setLocalErr("请填写学期总周数（1-30）");
+    const hint = weekHint.trim() === "" ? null : Number(weekHint);
+    if (hint !== null && !Number.isInteger(hint))
+      return setLocalErr("「今天是第几周」需为正整数");
+    setLocalErr(null);
+    onSave({
+      semesterStartDate: startDate || null, // 清空开学日 = 假期态（契约 §7.1）
+      semesterTotalWeeks: Number(totalWeeks),
+      firstDayOfWeek: firstDay,
+      showWeekends,
+      currentWeekHint: hint,
+    });
+  };
+
+  const field = "grid gap-1.5";
+  const label = "text-caption text-text-2";
+  const inputCls =
+    "tabular-num h-9 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-label="课表设置"
+        className="w-full max-w-md rounded-card border border-line bg-surface p-4 shadow-pop"
+      >
+        <p className="text-body font-semibold text-text">课表设置</p>
+        <p className="mt-1 text-caption text-text-2">
+          学期锚点决定周次与日期列；周首日与周末列的联动由后端保存时统一处理。
+        </p>
+
+        <div className="mt-3 grid gap-3">
+          <div className={field}>
+            <label className={label} htmlFor="ts-start">学期开学日</label>
+            <div className="flex items-center gap-2">
+              <input
+                id="ts-start"
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                disabled={busy}
+                className={cn(inputCls, "flex-1")}
+              />
+              {startDate && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setStartDate("")}
+                  className="shrink-0 text-caption text-alert hover:underline disabled:opacity-50"
+                >
+                  清空
+                </button>
+              )}
+            </div>
+            <p className="text-caption text-text-2">清空开学日即回到假期态（不显示周次）。</p>
+          </div>
+          <div className={field}>
+            <label className={label} htmlFor="ts-weeks">学期总周数（1-30）</label>
+            <input
+              id="ts-weeks"
+              type="number"
+              min={1}
+              max={30}
+              value={totalWeeks}
+              onChange={(e) => setTotalWeeks(e.target.value)}
+              disabled={busy}
+              className={inputCls}
+            />
+          </div>
+          <div className={field}>
+            <label className={label} htmlFor="ts-hint">今天是第几周（选填）</label>
+            <input
+              id="ts-hint"
+              type="number"
+              min={1}
+              max={30}
+              value={weekHint}
+              placeholder="填写后保存时自动反推开学日"
+              onChange={(e) => setWeekHint(e.target.value)}
+              disabled={busy}
+              className={inputCls}
+            />
+          </div>
+          <div className={field}>
+            <label className={label} htmlFor="ts-firstday">每周起始日</label>
+            <select
+              id="ts-firstday"
+              value={firstDay}
+              onChange={(e) => setFirstDay(Number(e.target.value))}
+              disabled={busy}
+              className={inputCls}
+            >
+              <option value={1}>周一</option>
+              <option value={7}>周日</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showWeekends}
+              onChange={(e) => setShowWeekends(e.target.checked)}
+              disabled={busy}
+              className="size-4 accent-sched"
+            />
+            <span className="text-body text-text">显示周末列</span>
+          </label>
+          {/* 联动提示（契约 §7.2：前端只提示、不禁用，实际联动由后端保存时收口） */}
+          {firstDay === 7 && (
+            <p className="text-caption text-text-2">每周起始日为周日时，将始终显示周末列。</p>
+          )}
+          {!showWeekends && firstDay !== 1 && firstDay !== 7 && (
+            <p className="text-caption text-text-2">隐藏周末后，每周起始日将被重置为周一。</p>
+          )}
+        </div>
+
+        {(localErr ?? error) && (
+          <p className="mt-2 text-caption text-alert" role="alert">
+            {localErr ?? error}
+          </p>
+        )}
+
+        <div className="mt-3 flex items-center justify-end gap-2 border-t border-line pt-3">
+          <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>
+            取消
+          </Button>
+          <Button size="sm" disabled={busy} onClick={submit}>
+            {busy ? "保存中…" : "保存"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------- 主面板 ----------------
 
 /** 面板四态。 */
@@ -707,6 +896,10 @@ export function TimetablePanel() {
   const [slotsBusy, setSlotsBusy] = useState(false);
   const [slotsErr, setSlotsErr] = useState<string | null>(null);
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsErr, setSettingsErr] = useState<string | null>(null);
+
   const [detail, setDetail] = useState<DetailPos | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
 
@@ -752,6 +945,14 @@ export function TimetablePanel() {
   const week = viewWeek ?? currentWeek ?? 1;
   const totalWeeks = Math.max(tt?.config.semesterTotalWeeks ?? 20, currentWeek ?? 1);
 
+  // 周首日与显示列（契约 §7）：列头从 firstDay 起旋转；不显示周末时裁成 5 列。
+  // buildWeekBlocks 内部恒按 7 天计算，裁剪只发生在渲染层。
+  const firstDay = tt?.config.firstDayOfWeek ?? 1;
+  const showWeekends = tt?.config.showWeekends ?? false;
+  const displayDays = showWeekends ? 7 : 5;
+  /** 显示列下标（0-based）→ 实际星期（1=周一 … 7=周日）。 */
+  const displayDayOf = (i: number) => ((firstDay - 1 + i) % 7) + 1;
+
   const weekBlocks = useMemo(
     () => (ready ? buildWeekBlocks(ready, week) : { blocks: [], columns: Array.from({ length: 7 }, () => []) }),
     [ready, week],
@@ -761,16 +962,19 @@ export function TimetablePanel() {
     [weekBlocks],
   );
 
-  /** 视图周各列日期（开学日锚定；未设置开学日为 null，列头只显示星期）。 */
+  /** 视图周各显示列日期（契约 §7）：周首 = previousOrSame(开学日, firstDay)，
+   *  第 i 列 = 周首 + (week-1)×7 + i；未设置开学日为 null，列头只显示星期。
+   *  ⚠️ todayCol 必须对「显示列的 weekDates」findIndex——旋转后按 day 数学映射必错。 */
   const weekDates: (Date | null)[] = useMemo(() => {
     const start = tt?.config.semesterStartDate ? parseDay(tt.config.semesterStartDate) : null;
-    if (!start) return Array.from({ length: 7 }, () => null);
-    return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(start);
+    if (!start) return Array.from({ length: displayDays }, () => null);
+    const weekFirst = previousOrSame(start, firstDay);
+    return Array.from({ length: displayDays }, (_, i) => {
+      const d = new Date(weekFirst);
       d.setDate(d.getDate() + (week - 1) * 7 + i);
       return d;
     });
-  }, [tt?.config.semesterStartDate, week]);
+  }, [tt?.config.semesterStartDate, week, firstDay, displayDays]);
   const todayCol = weekDates.findIndex((d) => d && dayKeyOf(d) === ready?.today);
 
   const openBlockDetail = (block: PlacedBlock) => {
@@ -956,6 +1160,21 @@ export function TimetablePanel() {
     }
   };
 
+  // ---------------- 学期设置保存（契约 §7.1：命令返回刷新后的 TimetableView） ----------------
+
+  const saveSemesterConfig = async (input: SemesterConfigInput) => {
+    setSettingsBusy(true);
+    setSettingsErr(null);
+    const r = await invokeCommand<TimetableView>("save_semester_config", { input });
+    setSettingsBusy(false);
+    if (r.success && r.data) {
+      setView({ phase: "ready", data: r.data });
+      setSettingsOpen(false);
+    } else {
+      setSettingsErr(r.message ?? "保存失败");
+    }
+  };
+
   // ---------------- 渲染 ----------------
 
   const weekSwitcher = ready && (
@@ -1002,6 +1221,10 @@ export function TimetablePanel() {
       <Button variant="outline" size="sm" onClick={() => { setSlotsErr(null); setSlotsOpen(true); }}>
         <Clock aria-hidden="true" className="size-3.5" />
         作息
+      </Button>
+      <Button variant="outline" size="sm" onClick={() => { setSettingsErr(null); setSettingsOpen(true); }}>
+        <Settings aria-hidden="true" className="size-3.5" />
+        设置
       </Button>
     </div>
   );
@@ -1116,25 +1339,28 @@ export function TimetablePanel() {
           <Surface className="overflow-x-auto">
             <div
               className="grid min-w-[640px]"
-              style={{ gridTemplateColumns: "56px repeat(7, minmax(0, 1fr))" }}
+              style={{ gridTemplateColumns: `56px repeat(${displayDays}, minmax(0, 1fr))` }}
             >
-              {/* 表头行 */}
+              {/* 表头行：列头从 firstDay 起旋转（firstDay=7 → 周日起） */}
               <div className="border-b border-line" />
-              {DAY_HEADERS.map((d, i) => (
-                <div
-                  key={d}
-                  className={cn(
-                    "border-b border-line py-2 text-center",
-                    i === todayCol ? "bg-sched/5 font-medium text-sched" : "text-text-2",
-                    i > 0 && "border-l border-line",
-                  )}
-                >
-                  <p className="text-caption">{d}</p>
-                  {weekDates[i] && (
-                    <p className="tabular-num text-caption opacity-70">{fmtDay(weekDates[i]!)}</p>
-                  )}
-                </div>
-              ))}
+              {Array.from({ length: displayDays }, (_, i) => {
+                const day = displayDayOf(i);
+                return (
+                  <div
+                    key={day}
+                    className={cn(
+                      "border-b border-line py-2 text-center",
+                      i === todayCol ? "bg-sched/5 font-medium text-sched" : "text-text-2",
+                      i > 0 && "border-l border-line",
+                    )}
+                  >
+                    <p className="text-caption">{DAY_NAMES[day]}</p>
+                    {weekDates[i] && (
+                      <p className="tabular-num text-caption opacity-70">{fmtDay(weekDates[i]!)}</p>
+                    )}
+                  </div>
+                );
+              })}
               {/* 时间列：一律取后端 slots（校本大节作息），前端不硬编码时间 */}
               <div>
                 {slots.map((s) => (
@@ -1155,16 +1381,19 @@ export function TimetablePanel() {
                   </div>
                 ))}
               </div>
-              {/* 7 天列 */}
-              {weekBlocks.columns.map((col, dayIdx) => {
-                const layout = layouts[dayIdx];
+              {/* 课程列：按显示列渲染（buildWeekBlocks 恒按 7 天计算，这里只取
+                  displayDays 列；colIdx ≥ displayDays 的星期六/日课静默不渲染） */}
+              {Array.from({ length: displayDays }, (_, i) => {
+                const day = displayDayOf(i);
+                const col = weekBlocks.columns[day - 1];
+                const layout = layouts[day - 1];
                 return (
                   <div
-                    key={dayIdx}
+                    key={day}
                     className={cn(
                       "relative border-line",
-                      dayIdx > 0 && "border-l",
-                      dayIdx === todayCol && "bg-sched/5",
+                      i > 0 && "border-l",
+                      i === todayCol && "bg-sched/5",
                     )}
                     style={{ height: ROW_H * slots.length }}
                   >
@@ -1173,7 +1402,7 @@ export function TimetablePanel() {
                       <button
                         key={`slot-${s.number}`}
                         type="button"
-                        aria-label={`${DAY_NAMES[dayIdx + 1]}第${s.number}大节空位，点击添加课程`}
+                        aria-label={`${DAY_NAMES[day]}第${s.number}大节空位，点击添加课程`}
                         onClick={() => {
                           if (currentWeek === null) {
                             setNoticeMsg({ ok: false, text: "请在学期内添加课程" });
@@ -1181,7 +1410,7 @@ export function TimetablePanel() {
                           }
                           openForm(
                             {
-                              day: dayIdx + 1,
+                              day,
                               startSection: s.number * 2 - 1,
                               endSection: s.number * 2,
                               weeks: [week],
@@ -1396,6 +1625,22 @@ export function TimetablePanel() {
               onSave={(slots) => void saveSlots(slots)}
               onReset={() => void resetSlots()}
               onClose={() => setSlotsOpen(false)}
+            />
+          )}
+
+          {/* 课表设置弹层（契约 §7.1） */}
+          {settingsOpen && ready && tt && (
+            <SettingsEditor
+              initial={{
+                semesterStartDate: tt.config.semesterStartDate,
+                semesterTotalWeeks: tt.config.semesterTotalWeeks,
+                firstDayOfWeek: tt.config.firstDayOfWeek,
+                showWeekends: tt.config.showWeekends,
+              }}
+              busy={settingsBusy}
+              error={settingsErr}
+              onSave={(input) => void saveSemesterConfig(input)}
+              onClose={() => setSettingsOpen(false)}
             />
           )}
 

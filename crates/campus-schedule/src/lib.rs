@@ -33,5 +33,7 @@ pub use model::{
 };
 pub use notice::{notice_id_for, parse_notice_text, NoticeCandidate, NoticeConfidence};
 pub use timeslots::default_time_slots;
-pub use weeks::{current_week, semester_start_from_week, week_index_at_date};
+pub use weeks::{
+    current_week, previous_or_same_day_of_week, semester_start_from_week, week_index_at_date,
+};
 pub use zhengfang::{parse_kb_response, query_body, Semester, ZhengfangError};
