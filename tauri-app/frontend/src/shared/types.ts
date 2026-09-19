@@ -232,6 +232,9 @@ export interface CourseTableConfig {
   firstDayOfWeek: number;
   /** 自定义作息（M2.5 收尾轮追加）：null/空 = 内置校本大节表；有值 = 用户编辑过的作息（唯一事实源） */
   slots: TimeSlot[] | null;
+  /** 跳过日期（2026-09-19 批 2 契约 §8.1）：全校性停课日 "YYYY-MM-DD" 列表；
+   *  网格该列不渲染课程 +「休」徽标，ICS 剔除该日 VEVENT */
+  skippedDates: string[];
 }
 
 /** 调整类型：调课 / 停课 / 补课（Rust OverrideKind snake_case）。 */

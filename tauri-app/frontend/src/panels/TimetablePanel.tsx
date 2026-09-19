@@ -225,10 +225,13 @@ function buildWeekBlocks(
     ) {
       blocks.push(mk(course.day, startBlock, endBlock, course.position, resched, "moved-out"));
       const newStart = blockOf(resched.newStartSection);
+      // 单节补调：结束 = 起始（复核 P2 修复：缺省必须用已折算的大节 newStart，
+      // 误用 raw 小节号会把块拉高数倍并挤压同列分列——与 Rust
+      // occurrence.rs `unwrap_or(start)` 同语义，两处注释互锚）
       const newEnd =
         resched.newEndSection != null
           ? blockOf(resched.newEndSection)
-          : resched.newStartSection; // 单节补调：结束=起始
+          : newStart;
       blocks.push(mk(resched.newDay, newStart, newEnd, resched.newPosition ?? course.position, resched, null));
       continue;
     }
@@ -238,7 +241,10 @@ function buildWeekBlocks(
     );
   }
 
-  // 补课叠加：新时段新增实体块（课程删除时后端级联清理 override，正常必命中）
+  // 补课叠加：新时段新增实体块（独立于上方课程实体块分支——停课/调课周的补课
+  // 照常渲染，且不看出 course.weeks；⚠️ 语义互锚 crates/campus-schedule/src/
+  // occurrence.rs::expand_occurrences 的 extra 循环，改一处必须同步另一处。
+  // 课程删除时后端级联清理 override，正常必命中）
   for (const ov of overrides) {
     if (ov.changeType !== "extra" || !ov.weeks.includes(week)) continue;
     const course = byId.get(ov.courseId);
@@ -675,9 +681,13 @@ function SlotsEditor({
 
 function SettingsEditor({
   initial,
+  initialSkippedDates,
   busy,
+  skippedBusy,
   error,
+  skippedError,
   onSave,
+  onSaveSkippedDates,
   onClose,
 }: {
   initial: {
@@ -686,9 +696,15 @@ function SettingsEditor({
     firstDayOfWeek: number;
     showWeekends: boolean;
   };
+  /** 跳过日期快照（契约 §8.1，批 2） */
+  initialSkippedDates: string[];
   busy: boolean;
+  skippedBusy: boolean;
   error: string | null;
+  skippedError: string | null;
   onSave: (input: SemesterConfigInput) => void;
+  /** 跳过日期独立保存（save_skipped_dates，整体替换），与学期设置分开提交 */
+  onSaveSkippedDates: (dates: string[]) => void;
   onClose: () => void;
 }) {
   const [startDate, setStartDate] = useState(initial.semesterStartDate ?? "");
@@ -698,15 +714,27 @@ function SettingsEditor({
   const [firstDay, setFirstDay] = useState(initial.firstDayOfWeek);
   const [showWeekends, setShowWeekends] = useState(initial.showWeekends);
   const [localErr, setLocalErr] = useState<string | null>(null);
+  // 跳过日期：本地列表增删，一次整体替换保存（YAGNI：不做日历面板）
+  const [skipped, setSkipped] = useState<string[]>(initialSkippedDates);
+  const [skipInput, setSkipInput] = useState("");
+  const [skipLocalErr, setSkipLocalErr] = useState<string | null>(null);
 
   // Esc 关闭（busy 时忽略）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key === "Escape" && !busy && !skippedBusy) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  }, [busy, skippedBusy, onClose]);
+
+  const addSkipped = () => {
+    if (!skipInput) return;
+    if (skipped.includes(skipInput)) return setSkipLocalErr("该日期已在列表中");
+    setSkipLocalErr(null);
+    setSkipped((ds) => [...ds, skipInput].sort());
+    setSkipInput("");
+  };
 
   const submit = () => {
     if (totalWeeks.trim() === "" || !Number.isInteger(Number(totalWeeks)))
@@ -828,6 +856,72 @@ function SettingsEditor({
           {!showWeekends && firstDay !== 1 && firstDay !== 7 && (
             <p className="text-caption text-text-2">隐藏周末后，每周起始日将被重置为周一。</p>
           )}
+
+          {/* 跳过日期区块（契约 §8.1，批 2）：独立保存，整体替换 */}
+          <div className={cn(field, "border-t border-line pt-3")}>
+            <span className={label}>跳过日期（全校停课日）</span>
+            <p className="text-caption text-text-2">
+              标记后网格该列不显示课程并加「休」标，ICS 导出剔除当天事件。
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={skipInput}
+                onChange={(e) => setSkipInput(e.target.value)}
+                disabled={skippedBusy}
+                aria-label="选择要跳过的日期"
+                className={cn(inputCls, "flex-1")}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={skippedBusy || !skipInput}
+                onClick={addSkipped}
+              >
+                <Plus aria-hidden="true" className="size-3.5" />
+                添加
+              </Button>
+            </div>
+            {skipped.length > 0 ? (
+              <ul className="flex flex-wrap gap-1.5">
+                {skipped.map((d) => (
+                  <li key={d}>
+                    <span className="tabular-num inline-flex items-center gap-1 rounded bg-line px-1.5 py-0.5 text-caption text-text-2">
+                      {d}
+                      <button
+                        type="button"
+                        aria-label={`移除 ${d}`}
+                        disabled={skippedBusy}
+                        onClick={() => setSkipped((ds) => ds.filter((x) => x !== d))}
+                        className="text-alert hover:underline disabled:opacity-50"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-caption text-text-2/70">暂无跳过日期。</p>
+            )}
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={skippedBusy}
+                onClick={() => onSaveSkippedDates(skipped)}
+              >
+                {skippedBusy ? "保存中…" : "保存跳过日期"}
+              </Button>
+              {(skipLocalErr ?? skippedError) && (
+                <p className="text-caption text-alert" role="alert">
+                  {skipLocalErr ?? skippedError}
+                </p>
+              )}
+            </div>
+          </div>
         </div>
 
         {(localErr ?? error) && (
@@ -899,6 +993,8 @@ export function TimetablePanel() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
+  const [skippedBusy, setSkippedBusy] = useState(false);
+  const [skippedErr, setSkippedErr] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<DetailPos | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -976,6 +1072,15 @@ export function TimetablePanel() {
     });
   }, [tt?.config.semesterStartDate, week, firstDay, displayDays]);
   const todayCol = weekDates.findIndex((d) => d && dayKeyOf(d) === ready?.today);
+
+  /** 跳过日期集合（契约 §8.1）：命中的显示列课程不渲染 +「休」徽标 + 日期置灰
+   *  （与周末裁剪同层——只在渲染层过滤，buildWeekBlocks 保持自有实现不动）。 */
+  const skippedSet = useMemo(
+    () => new Set(tt?.config.skippedDates ?? []),
+    [tt?.config.skippedDates],
+  );
+  const isSkippedCol = (i: number) =>
+    weekDates[i] != null && skippedSet.has(dayKeyOf(weekDates[i]!));
 
   const openBlockDetail = (block: PlacedBlock) => {
     const el = blockRefs.current.get(block.key);
@@ -1175,6 +1280,20 @@ export function TimetablePanel() {
     }
   };
 
+  // ---------------- 跳过日期保存（契约 §8.2：整体替换，命令返回刷新后的 TimetableView） ----------------
+
+  const saveSkippedDates = async (dates: string[]) => {
+    setSkippedBusy(true);
+    setSkippedErr(null);
+    const r = await invokeCommand<TimetableView>("save_skipped_dates", { dates });
+    setSkippedBusy(false);
+    if (r.success && r.data) {
+      setView({ phase: "ready", data: r.data });
+    } else {
+      setSkippedErr(r.message ?? "保存失败");
+    }
+  };
+
   // ---------------- 渲染 ----------------
 
   const weekSwitcher = ready && (
@@ -1222,7 +1341,7 @@ export function TimetablePanel() {
         <Clock aria-hidden="true" className="size-3.5" />
         作息
       </Button>
-      <Button variant="outline" size="sm" onClick={() => { setSettingsErr(null); setSettingsOpen(true); }}>
+      <Button variant="outline" size="sm" onClick={() => { setSettingsErr(null); setSkippedErr(null); setSettingsOpen(true); }}>
         <Settings aria-hidden="true" className="size-3.5" />
         设置
       </Button>
@@ -1345,6 +1464,7 @@ export function TimetablePanel() {
               <div className="border-b border-line" />
               {Array.from({ length: displayDays }, (_, i) => {
                 const day = displayDayOf(i);
+                const skipped = isSkippedCol(i);
                 return (
                   <div
                     key={day}
@@ -1356,7 +1476,19 @@ export function TimetablePanel() {
                   >
                     <p className="text-caption">{DAY_NAMES[day]}</p>
                     {weekDates[i] && (
-                      <p className="tabular-num text-caption opacity-70">{fmtDay(weekDates[i]!)}</p>
+                      <p
+                        className={cn(
+                          "tabular-num text-caption",
+                          skipped ? "text-text-2/40 line-through" : "opacity-70",
+                        )}
+                      >
+                        {fmtDay(weekDates[i]!)}
+                      </p>
+                    )}
+                    {skipped && (
+                      <p className="mt-0.5 inline-block rounded bg-line px-1 text-caption font-medium text-text-2">
+                        休
+                      </p>
                     )}
                   </div>
                 );
@@ -1385,7 +1517,8 @@ export function TimetablePanel() {
                   displayDays 列；colIdx ≥ displayDays 的星期六/日课静默不渲染） */}
               {Array.from({ length: displayDays }, (_, i) => {
                 const day = displayDayOf(i);
-                const col = weekBlocks.columns[day - 1];
+                const skipped = isSkippedCol(i);
+                const col = skipped ? [] : weekBlocks.columns[day - 1];
                 const layout = layouts[day - 1];
                 return (
                   <div
@@ -1397,8 +1530,15 @@ export function TimetablePanel() {
                     )}
                     style={{ height: ROW_H * slots.length }}
                   >
-                    {/* 空位按钮：点击空白格新建课程（预填星期/大节/展示周），渲染在课程块之下 */}
-                    {slots.map((s) => (
+                    {/* 跳过日期列（契约 §8.1）：课程与空位按钮都不渲染，居中「休」标 */}
+                    {skipped ? (
+                      <p className="absolute inset-0 flex items-center justify-center text-caption text-text-2/50">
+                        休
+                      </p>
+                    ) : (
+                      <>
+                        {/* 空位按钮：点击空白格新建课程（预填星期/大节/展示周），渲染在课程块之下 */}
+                        {slots.map((s) => (
                       <button
                         key={`slot-${s.number}`}
                         type="button"
@@ -1422,6 +1562,8 @@ export function TimetablePanel() {
                         style={{ top: (s.number - 1) * ROW_H, height: ROW_H }}
                       />
                     ))}
+                      </>
+                    )}
                     {col.map((b) => {
                       const pos = layout.get(b.key) ?? { lane: 0, lanes: 1 };
                       const color = courseColor(b.course);
@@ -1628,7 +1770,7 @@ export function TimetablePanel() {
             />
           )}
 
-          {/* 课表设置弹层（契约 §7.1） */}
+          {/* 课表设置弹层（契约 §7.1 + §8 跳过日期区块） */}
           {settingsOpen && ready && tt && (
             <SettingsEditor
               initial={{
@@ -1637,9 +1779,13 @@ export function TimetablePanel() {
                 firstDayOfWeek: tt.config.firstDayOfWeek,
                 showWeekends: tt.config.showWeekends,
               }}
+              initialSkippedDates={tt.config.skippedDates}
               busy={settingsBusy}
+              skippedBusy={skippedBusy}
               error={settingsErr}
+              skippedError={skippedErr}
               onSave={(input) => void saveSemesterConfig(input)}
+              onSaveSkippedDates={(dates) => void saveSkippedDates(dates)}
               onClose={() => setSettingsOpen(false)}
             />
           )}

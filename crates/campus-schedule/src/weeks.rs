@@ -101,6 +101,7 @@ mod tests {
             semester_total_weeks: 20,
             first_day_of_week: 1,
             slots: None,
+            skipped_dates: vec![],
         };
         assert_eq!(
             current_week(

@@ -30,6 +30,7 @@ pub fn empty_timetable() -> Timetable {
             semester_total_weeks: 20,
             first_day_of_week: 1,
             slots: None,
+            skipped_dates: Vec::new(),
         },
         courses: Vec::new(),
         overrides: Vec::new(),

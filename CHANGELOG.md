@@ -1,5 +1,21 @@
 # 更新日志
 
+## 2026-09-19 · 批 2 交叉复核修复：extra 覆盖面两处数据丢失 + 前端补调块单位 bug + UID 防撞（deepseek-flash 复核、glm5-3-flash 修复）
+
+- **模块**：`campus-schedule/occurrence.rs`（extra 循环独立化 + P3-c 登记 + 5 个新单测）、`commands/timetable.rs`（ICS 周次并集 + UID 后缀 + 溯源映射 + 4 个新单测）、`TimetablePanel.tsx`（P2 补调块单位修复 + 互锚注释）、契约 §8.4/§8.5 增量、CodeWiki 三篇
+- **必修**：① **P1-a** cancel/resched 分支提前 `return` 吞掉 extra 循环（停课+补课 → 网格有补课块、展开结果丢失）→ extra 移出短路路径恒执行；② **P1-b** `build_ics` 只迭代 `course.weeks` 漏补课周 → 改 `course.weeks ∪ 各 override.weeks` 去重排序；③ **P2（M2.5 既有 bug）** `buildWeekBlocks` 调课新位 `newEnd` 缺省误用 raw 小节号当大节下标（块虚高数倍挤压同列分列）→ 改用已折算 `newStart`
+- **轻量采纳**：④ **P3-a** 调课新位/补课 UID 追加 `-o{override 前 8 位}`（原位含仅换教室不变，golden 保）；⑤ **P3-b** DESCRIPTION 溯源改预建 id→类型映射
+- **登记**：⑥ **P3-c** custom 课 override 语义（不进网格；被 resched 走大节表）写入 occurrence.rs 模块注释与契约 §8.4，两处互锚
+- **验证**：`cargo test --workspace` 全绿（campus-schedule 54 + campus-hub lib 52 + portal 49，新增 9 测试含复核 7 条）；`tsc --noEmit` 零错；`npm run build` ✓
+
+## 2026-09-19 · 全量补齐批 2（P2）：skippedDates + ICS 按生效结果展开（override/跳过日/自定义时间）
+
+- **模块**：`campus-schedule/model.rs`（`CourseTableConfig.skipped_dates` 字段）、`campus-schedule/occurrence.rs`（**新建**：`expand_occurrences` 生效实例展开纯函数 + `OccurrenceKind`/`CourseOccurrence` + 11 个单测）、`campus-schedule/lib.rs`（导出）、`commands/timetable.rs`（`effective_slots` → `effective_slots_at(config, date)` 签名迁移、`build_ics` 重写为按生效结果展开、新命令 `save_skipped_dates` + 7 个单测）、`infra/timetable.rs`/`weeks.rs`（fixture 补新字段）、`lib.rs`（注册）、`TimetablePanel.tsx`（跳过日列「休」徽标/日期置灰/课程与空位不渲染 + 设置弹层「跳过日期」区块）、`types.ts`、契约文档 §8
+- **蓝图**：批 2（P2），glm5-3-flash 执行；ICS 消费 override（复核并入项 1）+ custom 时间课接入（附注 5）
+- **要点**：停课不生成 VEVENT（决策 5：否决 STATUS:CANCELLED）；调课原时段消失、新时段新 UID（`{id}-w{week}d{newDay}s{newStart}@campushub`，与原 UID 不同防日历端去重错乱）；补课新增 VEVENT；DESCRIPTION 追加「调课/补课」；跳过日 VEVENT 剔除；custom 课 DTSTART/DTEND 直取 `custom_*_time`（替掉旧版对无节次课程的 continue）；`expand_occurrences` 逐分支对照前端 `buildWeekBlocks`（停课两档/仅换教室原位/逆序取最后/停课优先调课，受控双写 + 注释互锚）；`effective_slots_at` 的 date 参数本批只迁移签名不消费（P3 扩展点，决策 2）
+- **偏离**：`CourseOccurrence` 在决策 5 结构规格外加 `source_override_id: Option<String>`（Solid 实例无法仅凭几何字段区分原位/调课新位/补课，ICS 的 DESCRIPTION 标注需要 override 溯源；已冻结进契约 §8.4）
+- **验证**：`cargo test --workspace` 全绿（campus-schedule 48 + campus-hub 49 等 0 失败；新增：expand 六分支/ICS 停课消失/调课新 UID/补课新增/跳过日剔除/custom 时刻/旧 JSON 无 skippedDates 键无损）、`tsc --noEmit` 零错、`npm run build` ✓（chunk 警告既有）
+
 ## 2026-09-19 · 全量补齐批 1（P1）：课表设置弹层 + showWeekends/firstDayOfWeek 接线 + ICS 周首日对齐
 
 - **模块**：`campus-schedule/weeks.rs`（`previous_or_same_day_of_week` 转正导出）、`commands/timetable.rs`（新命令 `save_semester_config` + `apply_display_constraints` 后端单点联动 + ICS 对齐式日期 + 5 个单测）、`TimetablePanel.tsx`（列头旋转/5 列裁剪/weekDates 重写/SettingsEditor 弹层）、`types.ts`、契约文档 §7

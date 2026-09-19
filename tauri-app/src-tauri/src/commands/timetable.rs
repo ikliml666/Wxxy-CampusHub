@@ -22,6 +22,9 @@
 //! - [`save_semester_config`]（2026-09-19 批 1，契约 §7.1）：开学日/总周数/周首日/
 //!   显示周末整块保存；`current_week_hint` 有值时由后端反推开学日（口径单点）；
 //!   显示约束联动收口在 [`apply_display_constraints`]。
+//! - [`save_skipped_dates`]（2026-09-19 批 2，契约 §8.2）：跳过日期整体替换；
+//!   [`build_ics`] 经 [`campus_schedule::expand_occurrences`] 按**生效结果**展开
+//!   （停课不生成、调课换 UID、补课新增、跳过日剔除、custom 课取自定义时刻）。
 //!
 //! 统一口径：业务失败一律 `Ok(CommandResult::err(中文消息))`（`Err(String)` 仅限
 //! IPC 框架层）；敏感纪律——本模块不输出任何 cookie/TGT/凭据字段。
@@ -32,8 +35,9 @@ use crate::infra::{state, timetable};
 use campus_portal::block_time_slots;
 use campus_schedule::model::{Course, CourseOverride, TimeSlot, Timetable};
 use campus_schedule::{
-    current_week, diff_courses, parse_kb_response, parse_notice_text,
-    previous_or_same_day_of_week, semester_start_from_week, NoticeConfidence, Semester,
+    current_week, diff_courses, expand_occurrences, parse_kb_response, parse_notice_text,
+    previous_or_same_day_of_week, semester_start_from_week, OccurrenceKind, NoticeConfidence,
+    OverrideKind, Semester,
 };
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -62,7 +66,15 @@ pub struct TimetableView {
 /// 内置校本大节表 [`campus_portal::block_time_slots`]。
 /// 网格行（[`TimetableView::slots`]）、ICS 展开、大节号→时间查找必须全部经本函数
 /// 取值，不得一处分发一处硬编码。
-fn effective_slots(config: &campus_schedule::model::CourseTableConfig) -> Vec<TimeSlot> {
+///
+/// `date` 参数为批 3（P3 slot_rules 区间命中）预留的扩展点（契约 §8.3）：批 2
+/// 仅完成签名迁移、暂不消费；批 3 在此实现 rules → config.slots → 内置的三段
+/// 回落链，调用点无需再动。
+fn effective_slots_at(
+    config: &campus_schedule::model::CourseTableConfig,
+    date: NaiveDate,
+) -> Vec<TimeSlot> {
+    let _ = date; // P3 扩展点：slot_rules 区间命中（决策 2）
     match config.slots.as_deref() {
         Some(custom) if !custom.is_empty() => custom.to_vec(),
         _ => block_time_slots(),
@@ -70,10 +82,12 @@ fn effective_slots(config: &campus_schedule::model::CourseTableConfig) -> Vec<Ti
 }
 
 /// 纯函数组装（便于单测）：周次口径与 [`parse_notice`] 一致
-/// （`campus_schedule::current_week`）。
+/// （`campus_schedule::current_week`）。`slots` 取「今天」的生效作息（契约 §8.3：
+/// 跨作息区间的换季周无法逐天变行，与上游周视图同口径的已知取舍，ICS 逐事件
+/// 日期精确取值）。
 fn build_timetable_view(tt: Timetable, today: chrono::NaiveDate) -> TimetableView {
     TimetableView {
-        slots: effective_slots(&tt.config),
+        slots: effective_slots_at(&tt.config, today),
         current_week: current_week(today, &tt.config),
         today: today.format("%Y-%m-%d").to_string(),
         timetable: tt,
@@ -347,8 +361,10 @@ fn ics_escape(s: &str) -> String {
     out
 }
 
-/// 展开式 VEVENT 日历文本（不依赖 RRULE：每门未停开课程 × 其每个教学周各一个
-/// VEVENT，主流日历客户端直接识别）。
+/// 展开式 VEVENT 日历文本（不依赖 RRULE：每门未停开课程经
+/// [`campus_schedule::expand_occurrences`] 展开其每个教学周的**生效实例**，
+/// 只消费 `Solid`——停课不生成、调课原时段不生成而新时段生成、补课新增，
+/// 主流日历客户端直接识别。决策 5，契约 §8.5）。
 ///
 /// 时区取舍：使用 RFC 5545 的 **floating local time**（`DTSTART:20260907T080000`，
 /// 无 `Z`/`TZID`）——作息表时刻是「本地墙钟」语义，floating 形态合法且被
@@ -363,8 +379,6 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
     // 周首日对齐（契约 §7.3）：第 1 周首日 = 开学日按 first_day_of_week 回退对齐；
     // firstDay=1 且开学日为周一时与旧公式逐字节等价（golden 保持）。
     let week_first = previous_or_same_day_of_week(start_date, tt.config.first_day_of_week);
-    // 作息单点取值（契约 §2.3）：自定义优先，回落内置——与 TimetableView.slots 同源
-    let slots = effective_slots(&tt.config);
     let dtstamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let mut lines: Vec<String> = vec![
         "BEGIN:VCALENDAR".into(),
@@ -373,64 +387,132 @@ fn build_ics(tt: &Timetable) -> Result<String, String> {
         "CALSCALE:GREGORIAN".into(),
         "METHOD:PUBLISH".into(),
     ];
+    // override 溯源映射（复核 P3-b）：id → 类型，预建一次，防逐事件全局 find
+    // 在 id 异常时张冠李戴
+    let ov_kind: std::collections::HashMap<&str, OverrideKind> = tt
+        .overrides
+        .iter()
+        .map(|o| (o.id.as_str(), o.change_type))
+        .collect();
     for course in &tt.courses {
         if course.disabled {
             continue; // 停开课程不进日历
         }
-        // 大节号 = ceil(起始小节 / 2)；起始/结束大节任一超出校本 5 大节表
-        //（无作息时刻可展开）→ 跳过该课程
-        let (Some(start_sec), Some(end_sec)) = (course.start_section, course.end_section) else {
-            continue;
-        };
-        let (block_start, block_end) = (
-            (u32::from(start_sec) + 1) / 2,
-            (u32::from(end_sec) + 1) / 2,
-        );
-        let Some(s) = slots.iter().find(|t| t.number as u32 == block_start) else {
-            continue;
-        };
-        let Some(e) = slots.iter().find(|t| t.number as u32 == block_end) else {
-            continue;
-        };
-        let start_hm = s.start_time.replace(':', "");
-        let end_hm = e.end_time.replace(':', "");
-        for &week in &course.weeks {
+        // 迭代周次 = course.weeks ∪ 该课各 override.weeks（复核 P1-b）：补课周
+        // 可不属于 course.weeks——与前端覆盖面对齐（前端 extra 循环不看出周次）
+        let mut weeks: Vec<u32> = course.weeks.clone();
+        for ov in tt.overrides.iter().filter(|o| o.course_id == course.id) {
+            weeks.extend_from_slice(&ov.weeks);
+        }
+        weeks.sort();
+        weeks.dedup();
+        for week in weeks {
             if week == 0 {
                 continue;
             }
-            // 教学周 → 日期（契约 §7.3）：第 week 周首日 = week_first + (week-1)×7，
-            // 列偏移 col = (day - firstDay + 7) % 7（周首日旋转后 day 的显示列）
-            let col = (u32::from(course.day) + 7 - u32::from(tt.config.first_day_of_week)) % 7;
-            let date =
-                week_first + chrono::Duration::days(i64::from((week - 1) * 7 + col));
-            let day_basic = date.format("%Y%m%d").to_string();
-            let mut desc_parts: Vec<String> = Vec::new();
-            if !course.teacher.is_empty() {
-                desc_parts.push(format!("教师 {}", course.teacher));
-            }
-            desc_parts.push(format!("第 {week} 周"));
-            if let Some(r) = &course.remark {
-                if !r.is_empty() {
-                    desc_parts.push(r.clone());
+            // 教学周 → 日期基准列（契约 §7.3）：第 week 周首日 = week_first + (week-1)×7
+            let week_start = week_first + chrono::Duration::days(i64::from((week - 1) * 7));
+            // override 生效展开（决策 5）：只消费 Solid（停课/调出 ghost 不生成 VEVENT）
+            for occ in expand_occurrences(course, &tt.overrides, week) {
+                if occ.kind != OccurrenceKind::Solid {
+                    continue;
                 }
+                // 该实例的实际日期：列偏移 col = (day - firstDay + 7) % 7（周首日旋转）
+                let col =
+                    (u32::from(occ.day) + 7 - u32::from(tt.config.first_day_of_week)) % 7;
+                let date = week_start + chrono::Duration::days(i64::from(col));
+                // 跳过日期（契约 §8.1）：全校停课日不生成 VEVENT
+                if tt.config.skipped_dates.contains(&date) {
+                    continue;
+                }
+                // 时刻取值（契约 §8.5）：节次课查**该日**生效作息（大节 = (s+1)/2
+                // 不变，起/止大节任一查不到 → 无时刻可展开，跳过该实例）；
+                // custom 课直接取 custom_start_time/custom_end_time（缺失 → 跳过）。
+                let (start_hm, end_hm) = match (occ.start_section, occ.end_section) {
+                    (Some(s), Some(e)) => {
+                        let slots = effective_slots_at(&tt.config, date);
+                        let (bs, be) = ((u32::from(s) + 1) / 2, (u32::from(e) + 1) / 2);
+                        let (Some(s_slot), Some(e_slot)) = (
+                            slots.iter().find(|t| u32::from(t.number) == bs),
+                            slots.iter().find(|t| u32::from(t.number) == be),
+                        ) else {
+                            continue;
+                        };
+                        (s_slot.start_time.clone(), e_slot.end_time.clone())
+                    }
+                    _ => {
+                        let (Some(cs), Some(ce)) =
+                            (&course.custom_start_time, &course.custom_end_time)
+                        else {
+                            continue;
+                        };
+                        (cs.clone(), ce.clone())
+                    }
+                };
+                let start_hm = start_hm.replace(':', "");
+                let end_hm = end_hm.replace(':', "");
+                let day_basic = date.format("%Y%m%d").to_string();
+                // override 溯源（P3-b：经预建映射，None = 无 override）
+                let kind_of = occ
+                    .source_override_id
+                    .as_deref()
+                    .and_then(|id| ov_kind.get(id).copied());
+                let mut desc_parts: Vec<String> = Vec::new();
+                if !course.teacher.is_empty() {
+                    desc_parts.push(format!("教师 {}", course.teacher));
+                }
+                desc_parts.push(format!("第 {week} 周"));
+                // 调课/补课标注（决策 5）：经 override 溯源判定，普通原位实例不加
+                match kind_of {
+                    Some(OverrideKind::Rescheduled) => desc_parts.push("调课".into()),
+                    Some(OverrideKind::Extra) => desc_parts.push("补课".into()),
+                    _ => {}
+                }
+                if let Some(r) = &course.remark {
+                    if !r.is_empty() {
+                        desc_parts.push(r.clone());
+                    }
+                }
+                // UID（契约 §8.5 + 复核 P3-a）：`{id}-w{week}d{day}s{start}@campushub`
+                // ——原位实例与旧版逐字节一致（golden 保）；**调课新位与补课实例追加
+                // `-o{override 短 id}`**，防同周同日同起始小节与原位 UID 逐字节相撞；
+                // custom 课（无节次）用 `scustom` 段。
+                let sec_tag = occ
+                    .start_section
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "custom".into());
+                let new_slot =
+                    occ.day != course.day || occ.start_section != course.start_section;
+                let uid_suffix = occ
+                    .source_override_id
+                    .as_deref()
+                    .filter(|_| match kind_of {
+                        // 补课恒加后缀；调课仅新位加（仅换教室的原位 = 同一事件，UID 不变）
+                        Some(OverrideKind::Extra) => true,
+                        Some(OverrideKind::Rescheduled) => new_slot,
+                        _ => false,
+                    })
+                    .map(|oid| format!("-o{}", oid.chars().take(8).collect::<String>()))
+                    .unwrap_or_default();
+                lines.extend([
+                    "BEGIN:VEVENT".into(),
+                    format!(
+                        "UID:{}-w{}d{}s{}{}@campushub",
+                        ics_escape(&course.id),
+                        week,
+                        occ.day,
+                        sec_tag,
+                        uid_suffix
+                    ),
+                    format!("DTSTAMP:{dtstamp}"),
+                    format!("DTSTART:{day_basic}T{start_hm}00"),
+                    format!("DTEND:{day_basic}T{end_hm}00"),
+                    format!("SUMMARY:{}", ics_escape(&course.name)),
+                    format!("LOCATION:{}", ics_escape(&occ.position)),
+                    format!("DESCRIPTION:{}", ics_escape(&desc_parts.join("，"))),
+                    "END:VEVENT".into(),
+                ]);
             }
-            lines.extend([
-                "BEGIN:VEVENT".into(),
-                format!(
-                    "UID:{}-w{}d{}s{}@campushub",
-                    ics_escape(&course.id),
-                    week,
-                    course.day,
-                    start_sec
-                ),
-                format!("DTSTAMP:{dtstamp}"),
-                format!("DTSTART:{day_basic}T{start_hm}00"),
-                format!("DTEND:{day_basic}T{end_hm}00"),
-                format!("SUMMARY:{}", ics_escape(&course.name)),
-                format!("LOCATION:{}", ics_escape(&course.position)),
-                format!("DESCRIPTION:{}", ics_escape(&desc_parts.join("，"))),
-                "END:VEVENT".into(),
-            ]);
         }
     }
     lines.push("END:VCALENDAR".into());
@@ -717,6 +799,32 @@ pub async fn save_semester_config(
     }
 }
 
+// ---------------- 跳过日期（2026-09-19 批 2，契约 §8.1/§8.2） ----------------
+
+/// 保存跳过日期（契约 §8.2 `save_skipped_dates`）：**整体替换**语义（非增量，
+/// 前端以完整列表提交）；返回刷新后的 [`TimetableView`]（前端免二次拉取）。
+/// 日期合法性由 `NaiveDate` 反序列化保证（非法日期在 IPC 层报错，不落库）；
+/// 落库前归一：升序排序 + 去重。
+#[tauri::command]
+pub async fn save_skipped_dates(
+    dates: Vec<NaiveDate>,
+) -> Result<CommandResult<TimetableView>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| {
+        let mut ds = dates.clone();
+        ds.sort();
+        ds.dedup();
+        tt.config.skipped_dates = ds;
+        Ok(tt.clone())
+    }) {
+        Ok(tt) => Ok(CommandResult::ok(build_timetable_view(
+            tt,
+            chrono::Local::now().date_naive(),
+        ))),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +861,7 @@ mod tests {
                 semester_total_weeks: 20,
                 first_day_of_week: 1,
                 slots: None,
+                skipped_dates: vec![],
             },
             courses,
             overrides: vec![],
@@ -1078,20 +1187,24 @@ mod tests {
         assert_eq!(parse_hm("08-00"), None);
     }
 
-    /// 生效作息单点取值（契约 §2.3 口径）：`config.slots` 有值且非空 → 自定义；
-    /// `None` 或空 → 回落内置校本 5 大节表。
+    /// 生效作息单点取值（契约 §2.3 口径 + §8.3 签名迁移）：`config.slots` 有值且
+    /// 非空 → 自定义；`None` 或空 → 回落内置校本 5 大节表。`date` 参数批 2 暂不
+    /// 消费（P3 扩展点），不同日期取值一致由本断言钉住。
     #[test]
-    fn effective_slots_prefers_custom_and_falls_back_to_builtin() {
+    fn effective_slots_at_prefers_custom_and_falls_back_to_builtin() {
         let custom = vec![slot(1, "08:30", "10:00"), slot(2, "10:20", "11:50"), slot(3, "14:00", "15:30")];
         let mut tt = timetable_with(None, vec![]);
         tt.config.slots = Some(custom.clone());
-        assert_eq!(effective_slots(&tt.config), custom);
+        let d1 = NaiveDate::from_ymd_opt(2026, 9, 17).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
+        assert_eq!(effective_slots_at(&tt.config, d1), custom);
+        assert_eq!(effective_slots_at(&tt.config, d2), custom, "P3 前不同日期同值");
 
         tt.config.slots = None;
-        assert_eq!(effective_slots(&tt.config), block_time_slots());
+        assert_eq!(effective_slots_at(&tt.config, d1), block_time_slots());
 
         tt.config.slots = Some(vec![]);
-        assert_eq!(effective_slots(&tt.config), block_time_slots(), "空自定义回落内置");
+        assert_eq!(effective_slots_at(&tt.config, d1), block_time_slots(), "空自定义回落内置");
     }
 
     /// `TimetableView` 组装：带自定义 slots 时行数 = 自定义条数（前端网格按
@@ -1269,5 +1382,334 @@ mod tests {
         tt.config.show_weekends = true;
         let ics = build_ics(&tt).unwrap();
         assert!(ics.contains("DTSTART:20260909T080000"));
+    }
+
+    // ---------------- 批 2：ICS 按生效结果展开（契约 §8.5，决策 5） ----------------
+
+    fn push_override(tt: &mut Timetable, mut o: CourseOverride) {
+        o.id = fresh_id("ov");
+        tt.overrides.push(o);
+    }
+
+    fn cancelled(course_id: &str, week: u32, new_day: Option<u8>) -> CourseOverride {
+        CourseOverride {
+            id: String::new(),
+            course_id: course_id.into(),
+            weeks: vec![week],
+            change_type: OverrideKind::Cancelled,
+            new_day,
+            new_start_section: None,
+            new_end_section: None,
+            new_position: None,
+            source_notice_id: "notice-cancel".into(),
+            auto_applied: false,
+        }
+    }
+
+    /// 停课（new_day = None 整周全停）→ 该周 VEVENT 消失，其他周保留。
+    #[test]
+    fn ics_drops_cancelled_week_events() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![1, 5])],
+        );
+        push_override(&mut tt, cancelled("default-a", 5, None));
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 1, "第 5 周停课 → 只剩第 1 周");
+        assert!(ics.contains("UID:default-a-w1d1s1@campushub"));
+        assert!(!ics.contains("default-a-w5"));
+    }
+
+    /// 调课 → 原时段 VEVENT 消失、新时段出现（新 UID/新日期/新教室，DESCRIPTION 追加「调课」）。
+    #[test]
+    fn ics_rescheduled_event_moves_to_new_uid() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![5])],
+        );
+        push_override(&mut tt, CourseOverride {
+            id: String::new(),
+            course_id: "default-a".into(),
+            weeks: vec![5],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(4),
+            new_start_section: Some(3),
+            new_end_section: Some(4),
+            new_position: Some("D4-305".into()),
+            source_notice_id: "notice-move".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 1);
+        // 原 UID（w5d1s1）消失；新 UID 按契约 §8.5（复核 P3-a）= w{week}d{newDay}s{newStart}-o{短id}
+        assert!(!ics.contains("UID:default-a-w5d1s1@campushub"));
+        assert!(!ics.contains("UID:default-a-w5d1s1@"));
+        assert!(ics.contains("UID:default-a-w5d4s3-o"), "调课新位 UID 带 override 短 id 后缀");
+        // 第 5 周周四 = 2026-10-08，大节 2（3-4 节）10:10-11:50
+        assert!(ics.contains("DTSTART:20261008T101000"));
+        assert!(ics.contains("DTEND:20261008T115000"));
+        assert!(ics.contains("LOCATION:D4-305"));
+        assert!(ics.contains("DESCRIPTION:教师 张老师，第 5 周，调课"));
+    }
+
+    /// 补课 → 新增 VEVENT（DESCRIPTION 追加「补课」），原时段照常。
+    #[test]
+    fn ics_extra_appends_new_event() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![5])],
+        );
+        push_override(&mut tt, CourseOverride {
+            id: String::new(),
+            course_id: "default-a".into(),
+            weeks: vec![5],
+            change_type: OverrideKind::Extra,
+            new_day: Some(6),
+            new_start_section: Some(5),
+            new_end_section: Some(6),
+            new_position: None,
+            source_notice_id: "notice-extra".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 2);
+        // 第 5 周周六 = 2026-10-10，大节 3（5-6 节）13:45-15:25；教室缺省沿用原教室；
+        // 补课 UID 带 override 短 id 后缀（复核 P3-a）
+        assert!(ics.contains("UID:default-a-w5d6s5-o"));
+        assert!(ics.contains("DTSTART:20261010T134500"));
+        assert!(ics.contains("DESCRIPTION:教师 张老师，第 5 周，补课"));
+        assert!(ics.contains("UID:default-a-w5d1s1@campushub"));
+    }
+
+    /// ③ 补课周 ∉ course.weeks → ICS 仍有该事件（复核 P1-b：迭代周次取
+    ///    course.weeks ∪ override.weeks，与前端覆盖面对齐）。
+    #[test]
+    fn ics_extra_week_outside_course_weeks_emits_event() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![5])],
+        );
+        push_override(&mut tt, CourseOverride {
+            id: String::new(),
+            course_id: "default-a".into(),
+            weeks: vec![6],
+            change_type: OverrideKind::Extra,
+            new_day: Some(3),
+            new_start_section: Some(3),
+            new_end_section: Some(4),
+            new_position: None,
+            source_notice_id: "notice-extra".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 2, "第 5 周原课 + 第 6 周补课");
+        // 第 6 周周三 = 开学日 09-07 + 35 天 + 2 = 2026-10-14，大节 2 10:10 起
+        assert!(ics.contains("UID:default-a-w6d3s3-o"));
+        assert!(ics.contains("DTSTART:20261014T101000"));
+        assert!(ics.contains("DESCRIPTION:教师 张老师，第 6 周，补课"));
+    }
+
+    /// ⑥ 补课与原位实例同日同起始节次 → UID 不重复（补课带 -o 后缀）。
+    #[test]
+    fn ics_extra_same_slot_uids_distinct() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![5])],
+        );
+        push_override(&mut tt, CourseOverride {
+            id: String::new(),
+            course_id: "default-a".into(),
+            weeks: vec![5],
+            change_type: OverrideKind::Extra,
+            new_day: Some(1),
+            new_start_section: Some(1),
+            new_end_section: Some(2),
+            new_position: None,
+            source_notice_id: "notice-extra".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 2, "原位 + 同位补课并存");
+        assert!(ics.contains("UID:default-a-w5d1s1@campushub"), "原位 UID 不变");
+        assert!(ics.contains("UID:default-a-w5d1s1-o"), "补课 UID 加后缀不撞原位");
+    }
+
+    /// ④⑤ 调课结束节次缺省 = 起始大节高（start=5 → 大节 3，13:45-15:25）；
+    ///    firstDay=7 时调课新位的日期按周首日旋转落列（第 1 周周四 = 周日周首
+    ///    2026-09-06 + 4 列 = 2026-09-10）。
+    #[test]
+    fn ics_resched_end_default_and_first_day_7_placement() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![1])],
+        );
+        tt.config.first_day_of_week = 7;
+        tt.config.show_weekends = true;
+        push_override(&mut tt, CourseOverride {
+            id: String::new(),
+            course_id: "default-a".into(),
+            weeks: vec![1],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(4),
+            new_start_section: Some(5),
+            new_end_section: None, // 单节补调：结束 = 起始 → 大节 3
+            new_position: None,
+            source_notice_id: "notice-move".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 1);
+        assert!(ics.contains("UID:default-a-w1d4s5-o"));
+        assert!(ics.contains("DTSTART:20260910T134500"), "firstDay=7 旋转后周四 = 09-10");
+        assert!(ics.contains("DTEND:20260910T152500"), "结束缺省 = 起始大节高（大节 3）");
+    }
+
+    /// ⑦ custom 课被 resched → 新位走大节表取时刻（P3-c 口径），UID 带 scustom 之外
+    ///    的节次段 + 后缀；skipped_dates 恰为调课新日期 → 该 VEVENT 剔除；
+    ///    course.weeks 空数组 + extra → 补课事件照常生成。
+    #[test]
+    fn ics_custom_resched_skipped_new_date_and_empty_weeks() {
+        // custom + resched：新位 day 2 节次 7-8 → 大节 4 15:35-17:15
+        let mut c = course("default-c", "科研例会", 3, 1, 2, vec![1]);
+        c.is_custom_time = true;
+        c.start_section = None;
+        c.end_section = None;
+        c.custom_start_time = Some("18:00".into());
+        c.custom_end_time = Some("19:30".into());
+        let mut tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![c]);
+        push_override(&mut tt, CourseOverride {
+            id: String::new(),
+            course_id: "default-c".into(),
+            weeks: vec![1],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(2),
+            new_start_section: Some(7),
+            new_end_section: Some(8),
+            new_position: None,
+            source_notice_id: "notice-move".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 1);
+        assert!(ics.contains("UID:default-c-w1d2s7-o"));
+        assert!(ics.contains("DTSTART:20260908T153500"), "resched 后走大节表而非 custom 时刻");
+        assert!(!ics.contains("T180000"), "原 custom 时段不生成");
+
+        // skipped_dates 恰为调课新日期（2026-10-08 = 第 5 周周四）→ VEVENT 剔除
+        let mut tt2 = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![5])],
+        );
+        push_override(&mut tt2, CourseOverride {
+            id: String::new(),
+            course_id: "default-a".into(),
+            weeks: vec![5],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(4),
+            new_start_section: Some(3),
+            new_end_section: Some(4),
+            new_position: None,
+            source_notice_id: "notice-move".into(),
+            auto_applied: false,
+        });
+        tt2.config.skipped_dates = vec![NaiveDate::from_ymd_opt(2026, 10, 8).unwrap()];
+        let ics = build_ics(&tt2).unwrap();
+        assert_eq!(vevent_count(&ics), 0, "调课新位命中跳过日 → 无事件");
+
+        // course.weeks 为空数组 + extra override → 补课事件照常
+        let mut tt3 = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-d", "讲座", 5, 1, 2, vec![])],
+        );
+        push_override(&mut tt3, CourseOverride {
+            id: String::new(),
+            course_id: "default-d".into(),
+            weeks: vec![2],
+            change_type: OverrideKind::Extra,
+            new_day: Some(5),
+            new_start_section: Some(9),
+            new_end_section: Some(10),
+            new_position: None,
+            source_notice_id: "notice-extra".into(),
+            auto_applied: false,
+        });
+        let ics = build_ics(&tt3).unwrap();
+        assert_eq!(vevent_count(&ics), 1);
+        assert!(ics.contains("UID:default-d-w2d5s9-o"));
+        assert!(ics.contains("DTSTART:20260918T183000"), "第 2 周周五 = 09-18，大节 5 18:30 起");
+    }
+
+    /// 跳过日期 → 命中日期的 VEVENT 剔除（该实例），其他日期不受影响。
+    #[test]
+    fn ics_skips_events_on_skipped_dates() {
+        let mut tt = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![1, 3])],
+        );
+        // 第 3 周周一 = 2026-09-21 标记为跳过
+        tt.config.skipped_dates = vec![NaiveDate::from_ymd_opt(2026, 9, 21).unwrap()];
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 1, "10-01 类停课日 → 该日 VEVENT 剔除");
+        assert!(ics.contains("DTSTART:20260907T080000"));
+        assert!(!ics.contains("20260921"));
+    }
+
+    /// custom 课（is_custom_time，节次 None）→ DTSTART/DTEND 直接取 custom 时刻，
+    /// UID 用 `scustom` 段（决策 5：替掉旧版对无节次课程的整体 continue）。
+    #[test]
+    fn ics_custom_course_uses_custom_times() {
+        let mut c = course("default-c", "科研例会", 3, 1, 2, vec![1]);
+        c.is_custom_time = true;
+        c.start_section = None;
+        c.end_section = None;
+        c.custom_start_time = Some("18:00".into());
+        c.custom_end_time = Some("19:30".into());
+        let tt = timetable_with(Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()), vec![c]);
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 1);
+        assert!(ics.contains("UID:default-c-w1d3scustom@campushub"));
+        assert!(ics.contains("DTSTART:20260909T180000"));
+        assert!(ics.contains("DTEND:20260909T193000"));
+    }
+
+    /// 旧 JSON（无 skippedDates 键）反序列化无损 → 空列表，ICS 行为与旧版一致。
+    #[test]
+    fn legacy_timetable_json_without_skipped_dates_opens_clean() {
+        let json = r#"{
+            "config": { "courseTableId": "default", "semesterStartDate": "2026-09-07",
+                        "semesterTotalWeeks": 20, "firstDayOfWeek": 1 },
+            "courses": [], "overrides": [], "updatedAt": ""
+        }"#;
+        let tt: Timetable = serde_json::from_str(json).unwrap();
+        assert!(tt.config.skipped_dates.is_empty());
+        assert!(tt.config.slots.is_none());
+        // 反序列化后 ICS 链路照常工作（空课程 → 0 VEVENT，不因缺键失败）
+        let ics = build_ics(&tt).unwrap();
+        assert_eq!(vevent_count(&ics), 0);
+        let tt_ok = timetable_with(
+            Some(NaiveDate::from_ymd_opt(2026, 9, 7).unwrap()),
+            vec![course("default-a", "信息安全", 1, 1, 2, vec![1])],
+        );
+        let ics = build_ics(&tt_ok).unwrap();
+        assert!(ics.contains("UID:default-a-w1d1s1@campushub"), "旧数据 UID/时刻 golden 不变");
+    }
+
+    /// save_skipped_dates 落库归一：升序 + 去重（mutate 骨架内联逻辑的单测等价验证）。
+    #[test]
+    fn skipped_dates_normalization_sorts_and_dedups() {
+        let mut dates = vec![
+            NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+        ];
+        dates.sort();
+        dates.dedup();
+        assert_eq!(
+            dates,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(),
+            ]
+        );
     }
 }

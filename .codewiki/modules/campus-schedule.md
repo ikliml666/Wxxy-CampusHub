@@ -9,6 +9,7 @@ source_files:
   - crates/campus-schedule/src/zhengfang.rs
   - crates/campus-schedule/src/diff.rs
   - crates/campus-schedule/src/notice.rs
+  - crates/campus-schedule/src/occurrence.rs
   - crates/campus-schedule/src/lib.rs
   - crates/campus-schedule/Cargo.toml
   - crates/campus-schedule/NOTICE.md
@@ -32,7 +33,7 @@ tags:
   - **source 来源隔离**（`model.rs:19-26,57`）：`CourseSource::{Import, Manual}`——自动更新与调课解析只作用于 `Import` 课程，手动添加的课程永不触碰，为「自动更新只作用于导入课程」提供数据基础。`class_id`（正方 `jxb_id`）是自动更新 diff 的匹配键之一（`model.rs:61-63`）。
   - **disabled 停开标记**（`model.rs:64-68`，M2.5 批次 1 新增，`#[serde(default)]`）：自动更新发现课程在教务最新课表中消失时置 `true`（**不删记录**，保留其挂载的调课 override 可回滚）；`Manual` 课程**永不置位**（冻结契约 §2.4）。旧 JSON 无该字段缺省 false（serde 单测 `model.rs` `course_disabled_defaults_false_and_roundtrips`）。
   - 自定义时间：`is_custom_time = true` 时忽略节次、用 `custom_start_time/custom_end_time`（`model.rs:46-50`）。
-- **CourseTableConfig**（`model.rs:66-96`）：`semester_start_date` 是周次计算锚点；默认 20 总周、一周从周一起（`model.rs:83-88`）；`slots: Option<Vec<TimeSlot>>`（`model.rs:89-95`，M2.5 收尾轮新增，`#[serde(default)]` 旧文件缺省 None）——自定义作息，None/空 = 内置校本大节表，有值 = 唯一事实源（取值单点与校验见 [[decisions/timetable-editable-slots|作息时间表可编辑]]）。
+- **CourseTableConfig**（`model.rs:66-96`）：`semester_start_date` 是周次计算锚点；默认 20 总周、一周从周一起（`model.rs:83-88`）；`slots: Option<Vec<TimeSlot>>`（`model.rs:89-95`，M2.5 收尾轮新增，`#[serde(default)]` 旧文件缺省 None）——自定义作息，None/空 = 内置校本大节表，有值 = 唯一事实源（取值单点与校验见 [[decisions/timetable-editable-slots|作息时间表可编辑]]）；`skipped_dates: Vec<NaiveDate>`（批 2 2026-09-19 新增，serde default 空列表）——全校性停课日（契约 §8.1），网格该列「休」、ICS 剔除、今日页（批 9）`skipped` 态。
 - **TimeSlot**（`model.rs:91-101`）：节次 → "HH:MM" 时间段。
 - **CourseOverride 调课叠加**（`model.rs:114-139`，自建模型、上游无）：叠加在导入课程之上、原数据保留可回滚；`OverrideKind::{Rescheduled, Cancelled, Extra}`（调课/停课/补课）；`source_notice_id` 是撤销与去重键（撤销某条通知 = 删除其匹配的全部 override）；`auto_applied` 区分高置信自动应用与低置信待确认。
 - **Timetable 本地课表**（`model.rs:142-162`，M2.5 批次 1 新增）：`{ config: CourseTableConfig, courses, overrides, updated_at }`，即 `%APPDATA%/campushub/timetable.json` 的顶层结构（持久化与 IPC 透出见 [[modules/campus-hub-tauri|接线层]]）；序列化 camelCase（`updatedAt`），`courses`/`overrides`/`updated_at` 带 serde 缺省（旧文件/手工删节可读，单测 `timetable_serde_defaults_and_camel_case`）。
@@ -96,6 +97,10 @@ tags:
 - **箭头消歧**（`after_adjust_arrow`）：「由 A 调整到 B」的新值在 12 个箭头词之后——周次/星期/节次/教室四提取器 **tail 优先、全文回退**；旧值在前是调课通知的结构性特征（首个单测样例即暴露）。
 - **L2 置信**：reasons 空集 ⇔ High——课程唯一命中 && 周次/星期/节次齐全；降级原因逐项中文写入 `reason`（缺要素 / 同名多门 / 多名 / 0 命中 / 「本周」无锚点）。
 - **noticeId**：`notice_id_for` = `manual:<16 位十六进制>`（`DefaultHasher` 正文哈希，非密码学，去重与撤销键；M5 改公告 id）。
+
+## 生效实例展开（occurrence.rs，批 2 2026-09-19，本项目原创）
+
+`expand_occurrences(course, overrides, week) -> Vec<CourseOccurrence>`（契约 §8.4，取舍见 [[decisions/timetable-occurrence-expansion|课表生效实例展开]]）把一门课程 × 一个周次展开为经 override 叠加后的全部实例：`OccurrenceKind::{Solid, MovedOut, Cancelled}` 对齐前端 `buildWeekBlocks` 的三态（solid 实块 / moved-out 已调出 / cancelled 已停）。**受控双写**：语义基准是前端 `buildWeekBlocks`（Rust 单测钉住语义，两处注释互锚）；ICS 导出与今日页（批 9）只消费 `Solid`。展开规则：停课两档（契约 §2.5.1，`new_day` None = 整周全停 / Some(d) = 仅该次）、停课优先于调课、调课跨天/换节 = 原时段 MovedOut + 新时段 Solid、仅换教室 = 原位 Solid 新教室、extra 补课追加 Solid 新实体、多条 override 逆序取最后；**extra 循环独立于停课/调课分支且不看出 `course.weeks`**（复核 P1-a/P1-b 修订：停课+补课并存、补课周 ∉ course.weeks 都要与前端覆盖面一致）；custom 课（节次 None）实例节次为 None，被 resched 时产出带节次的 Solid 走大节表（P3-c 登记，见 [[modules/campus-schedule|课表核心]] occurrence 节注释互锚）。
 
 ## Apache-2.0 合规三件套
 

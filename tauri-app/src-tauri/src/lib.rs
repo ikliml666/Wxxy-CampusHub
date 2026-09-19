@@ -53,6 +53,7 @@ pub fn run() {
             commands::timetable::revoke_notice,
             commands::timetable::save_time_slots,
             commands::timetable::save_semester_config,
+            commands::timetable::save_skipped_dates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

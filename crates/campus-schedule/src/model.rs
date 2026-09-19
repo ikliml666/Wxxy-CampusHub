@@ -90,6 +90,11 @@ pub struct CourseTableConfig {
     /// ceil 映射三处必须共用同一份）。`TimeSlot.alias` 可作大节别名。
     #[serde(default)]
     pub slots: Option<Vec<TimeSlot>>,
+    /// 跳过日期（契约 §8.1，2026-09-19 批 2 追加）：全校性停课日（手动维护）。
+    /// 网格该列课程不渲染 +「休」徽标；ICS 该日期 VEVENT 剔除；今日页（批 9）
+    /// 显 `skipped` 态。旧文件无该键 → 空列表（serde default）。
+    #[serde(default)]
+    pub skipped_dates: Vec<NaiveDate>,
 }
 
 fn default_total_weeks() -> u32 {
@@ -213,6 +218,8 @@ mod tests {
         assert_eq!(tt.updated_at, "");
         // slots serde 缺省（冻结契约 §2.1 收尾轮追加）：旧文件无该字段 → None（内置作息）
         assert!(tt.config.slots.is_none());
+        // skipped_dates serde 缺省（契约 §8.1）：旧文件无该键 → 空列表
+        assert!(tt.config.skipped_dates.is_empty());
 
         let full = Timetable {
             config: CourseTableConfig {
@@ -222,6 +229,7 @@ mod tests {
                 semester_total_weeks: 20,
                 first_day_of_week: 1,
                 slots: None,
+                skipped_dates: vec![NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()],
             },
             courses: vec![],
             overrides: vec![],
@@ -229,6 +237,7 @@ mod tests {
         };
         let json = serde_json::to_string(&full).unwrap();
         assert!(json.contains("\"updatedAt\""));
+        assert!(json.contains("\"skippedDates\":[\"2026-10-01\"]"));
         let back: Timetable = serde_json::from_str(&json).unwrap();
         assert_eq!(back, full);
     }
