@@ -25,6 +25,9 @@
 //! - [`save_skipped_dates`]（2026-09-19 批 2，契约 §8.2）：跳过日期整体替换；
 //!   [`build_ics`] 经 [`campus_schedule::expand_occurrences`] 按**生效结果**展开
 //!   （停课不生成、调课换 UID、补课新增、跳过日剔除、custom 课取自定义时刻）。
+//! - [`move_day_courses`] / [`quick_delete`]（2026-09-19 批 8，契约 §14）：
+//!   批量操作纯函数 + 命令接线——搬迁统一走 Rescheduled override（同批一个
+//!   noticeId，整批可撤销）、快删按周次×星期裁剪 weeks（删空删整条并级联）。
 //!
 //! 统一口径：业务失败一律 `Ok(CommandResult::err(中文消息))`（`Err(String)` 仅限
 //! IPC 框架层）；敏感纪律——本模块不输出任何 cookie/TGT/凭据字段。
@@ -39,7 +42,7 @@ use campus_schedule::{
     previous_or_same_day_of_week, semester_start_from_week, week_index_at_date, OccurrenceKind,
     NoticeConfidence, OverrideKind, Semester,
 };
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -911,6 +914,148 @@ pub async fn apply_override(
 pub async fn revoke_notice(notice_id: String) -> Result<CommandResult<u32>, String> {
     let dir = state::data_dir()?;
     match mutate_timetable(&dir, |tt| Ok(revoke_by_notice(tt, &notice_id))) {
+        Ok(n) => Ok(CommandResult::ok(n)),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+// ---------------- 批量操作：调课搬迁 / 快速删除（契约 §14，2026-09-19 批 8） ----------------
+
+/// move_day_courses → data（契约 §14.1）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveResult {
+    /// 本次生成/覆盖的搬迁 override 数（= 移动的课程数）
+    pub moved: u32,
+    /// 整批撤销句柄：`revoke_notice(notice_id)` 一次撤销本批全部搬迁
+    pub notice_id: String,
+}
+
+/// 日期 →（教学周，星期）。周次经 [`week_index_at_date`] **对齐周首日**计算
+/// （风险 R8：禁用 epoch 直除——上游三处口径不一致的坑）；星期 = ISO 星期号
+/// （1=周一…7=周日）。任一日期周次越界（< 1 或 > 总周数）中文报错。
+fn week_day_of(
+    date: NaiveDate,
+    start: NaiveDate,
+    first_day: u8,
+    total_weeks: u32,
+) -> Result<(u32, u8), String> {
+    let w = week_index_at_date(date, start, first_day);
+    if w < 1 || w > total_weeks as i64 {
+        return Err(format!(
+            "{} 不在学期周次范围内（第 1-{} 周）",
+            date.format("%Y-%m-%d"),
+            total_weeks
+        ));
+    }
+    Ok((w as u32, date.weekday().number_from_monday() as u8))
+}
+
+/// 调课搬迁纯函数（可脱离 Tauri 单测）：把源日期（教学周·星期）当天的全部
+/// 未停开课程整批搬到目标日期。**统一走 Rescheduled override（含手动课）**：
+/// 同批统一 `source_notice_id = "move:<from>:<to>"` → 整批经 `revoke_notice`
+/// 一次撤销；重跑经 [`upsert_override`]（幂等键 = noticeId + courseId）覆盖为
+/// 最后状态，与 drag 同链路（契约 §10.4 参考语义）；已存在的其他 override
+/// （如 drag）不清理——叠加渲染按「逆序取最后」语义，后写入的搬迁记录自然生效。
+/// 教室简化取舍（契约 §14.1 冻结）：取 `course.position` 原值，不解析「源周
+/// 源日生效时刻的调课教室」（需展开 override 链，复杂度不成比例）。
+fn move_day_courses_impl(
+    tt: &mut Timetable,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<MoveResult, String> {
+    let Some(start) = tt.config.semester_start_date else {
+        return Err("尚未设置学期开学日，无法调课搬迁".to_string());
+    };
+    if from == to {
+        return Err("源日期与目标日期不能相同".to_string());
+    }
+    let total = tt.config.semester_total_weeks;
+    let first_day = tt.config.first_day_of_week;
+    let (from_week, from_day) = week_day_of(from, start, first_day, total)?;
+    let (to_week, to_day) = week_day_of(to, start, first_day, total)?;
+    let notice_id = format!("move:{}:{}", from.format("%Y-%m-%d"), to.format("%Y-%m-%d"));
+
+    // 先收集再写（借用分离：courses 只读快照，overrides 可变）
+    let moving: Vec<(String, Option<u8>, Option<u8>, String)> = tt
+        .courses
+        .iter()
+        .filter(|c| !c.disabled && c.day == from_day && c.weeks.contains(&from_week))
+        .map(|c| (c.id.clone(), c.start_section, c.end_section, c.position.clone()))
+        .collect();
+    let mut moved = 0u32;
+    for (course_id, start_section, end_section, position) in moving {
+        let ov = CourseOverride {
+            id: fresh_id("ov"),
+            course_id,
+            weeks: vec![to_week],
+            change_type: OverrideKind::Rescheduled,
+            new_day: Some(to_day),
+            new_start_section: start_section,
+            new_end_section: end_section,
+            new_position: if position.is_empty() { None } else { Some(position) },
+            source_notice_id: notice_id.clone(),
+            auto_applied: false,
+        };
+        upsert_override(tt, ov);
+        moved += 1;
+    }
+    Ok(MoveResult { moved, notice_id })
+}
+
+/// 调课搬迁命令（契约 §14.1）。
+#[tauri::command]
+pub async fn move_day_courses(
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> Result<CommandResult<MoveResult>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| move_day_courses_impl(tt, from_date, to_date)) {
+        Ok(r) => Ok(CommandResult::ok(r)),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+/// 快速删除纯函数（可脱离 Tauri 单测）：对每门课（导入 / 手动 / disabled
+/// 都可清，无 disabled 过滤），`course.day ∈ days` 时从 `course.weeks` 移除
+/// 选中周次的命中项；**weeks 删空 → 删除整条课程**并级联清理其挂载的全部
+/// override（同 `delete_course` 链路）。仅删部分周次时残留 override 不清理——
+/// 其 `weeks` 不含被删周即不生效（渲染与 ICS 均按周次交集判定），无害。
+/// 返回受影响课程数（删空整删与部分移除均计 1 门）。越界周次（> 总周数）
+/// 不报错、自然忽略（无课程周次命中即空操作）。
+fn quick_delete_impl(tt: &mut Timetable, weeks: &[u32], days: &[u8]) -> Result<u32, String> {
+    if weeks.is_empty() || days.is_empty() {
+        return Err("请先选择要删除的周次与星期".to_string());
+    }
+    if days.iter().any(|d| !(1..=7).contains(d)) {
+        return Err("星期必须在周一至周日之间".to_string());
+    }
+    let mut affected = 0u32;
+    let mut keep: Vec<Course> = Vec::with_capacity(tt.courses.len());
+    for mut c in std::mem::take(&mut tt.courses) {
+        if days.contains(&c.day) {
+            let before = c.weeks.len();
+            c.weeks.retain(|w| !weeks.contains(w));
+            if c.weeks.len() != before {
+                affected += 1;
+                if c.weeks.is_empty() {
+                    // 删空 = 整条删除：级联清 override（delete_course 同语义）
+                    tt.overrides.retain(|o| o.course_id != c.id);
+                    continue;
+                }
+            }
+        }
+        keep.push(c);
+    }
+    tt.courses = keep;
+    Ok(affected)
+}
+
+/// 快速删除命令（契约 §14.2）：返回受影响课程数。
+#[tauri::command]
+pub async fn quick_delete(weeks: Vec<u32>, days: Vec<u8>) -> Result<CommandResult<u32>, String> {
+    let dir = state::data_dir()?;
+    match mutate_timetable(&dir, |tt| quick_delete_impl(tt, &weeks, &days)) {
         Ok(n) => Ok(CommandResult::ok(n)),
         Err(e) => Ok(CommandResult::err(&e)),
     }
@@ -2544,5 +2689,135 @@ mod tests {
         );
         assert_eq!(merged.skipped_dates, old.config.skipped_dates, "未提供的字段仍保留");
         assert!(merged.show_weekends, "firstDay=7 联动强制显示周末（§7.2）");
+    }
+
+    // ---------------- 批 8：调课搬迁 + 快速删除（契约 §14） ----------------
+
+    /// 周次对齐口径（风险 R8）：firstDay=7 时，开学日 2026-09-07（周一）的第 2 周
+    /// 是 09-13（周日）起——epoch 直除会算出不同周次。搬迁必须命中第 2 周的周日课。
+    #[test]
+    fn move_day_uses_week_index_aligned_with_first_day() {
+        let mut tt = fixture();
+        tt.config.first_day_of_week = 7;
+        tt.config.show_weekends = true;
+        // 09-13 是 firstDay=7 口径下的第 2 周周日；09-14 是同周周一
+        let from = NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+        tt.courses.push(course("default-sun", "周日课", 7, 1, 2, vec![2]));
+        // 同是周日但属第 1 周（09-06）→ 不受影响
+        tt.courses.push(course("default-sun-w1", "周日课一", 7, 1, 2, vec![1]));
+
+        let r = move_day_courses_impl(&mut tt, from, to).unwrap();
+        assert_eq!(r.moved, 1);
+        assert_eq!(r.notice_id, "move:2026-09-13:2026-09-14");
+        assert_eq!(tt.overrides.len(), 1);
+        let ov = &tt.overrides[0];
+        assert_eq!(ov.course_id, "default-sun");
+        assert_eq!(ov.weeks, vec![2], "override 生效周 = 目标周");
+        assert_eq!(ov.change_type, OverrideKind::Rescheduled);
+        assert_eq!(ov.new_day, Some(1), "目标星期 = 09-14 的周一");
+        assert_eq!(ov.new_start_section, Some(1));
+        assert_eq!(ov.new_end_section, Some(2));
+        assert_eq!(ov.new_position.as_deref(), Some("D4-207"), "教室取 course.position 原值");
+        assert!(!ov.auto_applied);
+        // 第 1 周的周日课不动
+        assert!(!tt.overrides.iter().any(|o| o.course_id == "default-sun-w1"));
+    }
+
+    /// 校验三连（契约 §14.1）：同日报错、未设开学日报错、任一日期越界报错。
+    #[test]
+    fn move_day_rejects_same_day_missing_start_and_out_of_range() {
+        let mut tt = fixture();
+        let from = NaiveDate::from_ymd_opt(2026, 9, 17).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+
+        let err = move_day_courses_impl(&mut tt, from, from).unwrap_err();
+        assert!(err.contains("不能相同"), "同日报错：{err}");
+
+        let mut no_start = timetable_with(None, vec![]);
+        let err = move_day_courses_impl(&mut no_start, from, to).unwrap_err();
+        assert!(err.contains("开学日"), "未设开学日报错：{err}");
+
+        // 2027-04-01 远超 20 周（fixture total = 20）
+        let far = NaiveDate::from_ymd_opt(2027, 4, 1).unwrap();
+        let err = move_day_courses_impl(&mut tt, from, far).unwrap_err();
+        assert!(err.contains("不在学期周次范围内"), "目标越界报错：{err}");
+        let err = move_day_courses_impl(&mut tt, far, from).unwrap_err();
+        assert!(err.contains("不在学期周次范围内"), "源越界同样报错：{err}");
+        assert!(tt.overrides.is_empty(), "报错路径不产生 override");
+    }
+
+    /// 手动课 + 导入课统一走 override（含手动课，契约 §14.1 冻结语义）；
+    /// disabled 课跳过；整批经 revoke_by_notice 一次撤销复原。
+    #[test]
+    fn move_day_covers_manual_and_import_and_revokes_as_batch() {
+        let mut tt = fixture();
+        tt.courses[0].weeks = vec![2]; // 导入课：第 2 周周一（09-14）
+        let mut manual = course("manual-x", "手动课", 1, 3, 4, vec![2]);
+        manual.source = CourseSource::Manual;
+        manual.class_id = None;
+        tt.courses.push(manual);
+        tt.courses.push(course("dead-x", "停开课", 1, 1, 2, vec![2]));
+        tt.courses[1].disabled = true; // 密码学（周三）停开，与周一无关
+        tt.courses[3].disabled = true; // 停开的周一课：搬迁跳过
+
+        let from = NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(); // 第 2 周周一
+        let to = NaiveDate::from_ymd_opt(2026, 9, 15).unwrap(); // 第 2 周周二
+        let r = move_day_courses_impl(&mut tt, from, to).unwrap();
+        assert_eq!(r.moved, 2, "导入 + 手动都搬迁，停开跳过");
+        assert_eq!(tt.overrides.len(), 2);
+
+        // 整批撤销恢复
+        let revoked = revoke_by_notice(&mut tt, &r.notice_id);
+        assert_eq!(revoked, 2);
+        assert!(tt.overrides.is_empty());
+        // 撤销不删课程（override 模型原数据保留）
+        assert_eq!(tt.courses.len(), 4);
+    }
+
+    /// 重跑幂等（upsert 覆盖语义，与 drag 一致）：同批 noticeId 不堆叠。
+    #[test]
+    fn move_day_rerun_is_idempotent() {
+        let mut tt = fixture();
+        tt.courses[0].weeks = vec![2];
+        let from = NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
+        let r1 = move_day_courses_impl(&mut tt, from, to).unwrap();
+        let r2 = move_day_courses_impl(&mut tt, from, to).unwrap();
+        assert_eq!(r1.moved, r2.moved);
+        assert_eq!(r1.notice_id, r2.notice_id);
+        assert_eq!(tt.overrides.len(), 1, "同 noticeId + courseId 覆盖而非堆叠");
+    }
+
+    /// 快删主语义：仅删「选中周 × 选中星期」命中的周次；多周课其余周保留；
+    /// 单周课删空 → 整条删除并级联清 override；disabled 课同样可清。
+    #[test]
+    fn quick_delete_removes_only_selected_week_day_combination() {
+        let mut tt = fixture();
+        tt.courses[0].weeks = (1..=16).collect(); // 信息安全：周一 1-16 周
+        tt.courses.push(course("single-x", "单周课", 1, 1, 2, vec![10])); // 周一仅第 10 周
+        tt.courses.push(course("disabled-x", "停开课", 1, 1, 2, vec![10]));
+        tt.courses[3].disabled = true;
+        push_override(&mut tt, cancelled("single-x", 9, Some(1))); // 单周课的 override，随整删级联
+
+        let affected = quick_delete_impl(&mut tt, &[10], &[1]).unwrap();
+        assert_eq!(affected, 3, "多周课 + 单周课 + 停开课都受影响；密码学（周三）不动");
+        assert_eq!(tt.courses.len(), 2, "单周课与停开课删空 → 整条删除");
+        assert_eq!(tt.courses[0].weeks.len(), 15, "第 10 周被移除，其余 15 周保留");
+        assert!(!tt.courses[0].weeks.contains(&10));
+        assert!(!tt.overrides.iter().any(|o| o.course_id == "single-x"), "整删级联清 override");
+    }
+
+    /// 快删校验（契约 §14.2）：空选择报错；非法星期报错；越界周次自然忽略。
+    #[test]
+    fn quick_delete_ignores_out_of_range_weeks_and_validates_empty_input() {
+        let mut tt = fixture();
+        assert_eq!(quick_delete_impl(&mut tt, &[], &[1]).unwrap_err(), "请先选择要删除的周次与星期");
+        assert_eq!(quick_delete_impl(&mut tt, &[10], &[]).unwrap_err(), "请先选择要删除的周次与星期");
+        assert!(quick_delete_impl(&mut tt, &[10], &[8]).unwrap_err().contains("星期"));
+
+        assert_eq!(quick_delete_impl(&mut tt, &[25, 30], &[1]).unwrap(), 0, "越界周次忽略");
+        assert_eq!(tt.courses[0].weeks.len(), 2, "课程未被改动");
+        assert!(tt.overrides.is_empty());
     }
 }

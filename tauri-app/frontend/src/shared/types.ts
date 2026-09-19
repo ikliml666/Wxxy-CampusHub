@@ -325,6 +325,14 @@ export interface JsonImportResult {
   overrides: number;
 }
 
+/** move_day_courses → data（2026-09-19 批 8 契约 §14.1：调课搬迁，统一走 override）。 */
+export interface MoveResult {
+  /** 本次搬迁的课程数（= 生成/覆盖的 override 数） */
+  moved: number;
+  /** 整批撤销句柄：revoke_notice(noticeId) 一次撤销本批全部搬迁 */
+  noticeId: string;
+}
+
 /** add_course_manual 入参（冻结契约 §2.3 + 批 5 §11.1）。
  *  ⚠️ Rust 侧新增字段 serde default：旧调用方可省略 isCustomTime/customStartTime/customEndTime。 */
 export interface ManualCourseInput {

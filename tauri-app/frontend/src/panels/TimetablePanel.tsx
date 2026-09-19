@@ -26,6 +26,7 @@ import type {
   CourseOverride,
   ImportResult,
   JsonImportResult,
+  MoveResult,
   NoticeCandidate,
   OverrideKind,
   SemesterConfigInput,
@@ -1099,12 +1100,18 @@ function SlotsEditor({
 function SettingsEditor({
   initial,
   initialSkippedDates,
+  courses,
   busy,
   skippedBusy,
+  bulkBusy,
   error,
   skippedError,
+  bulkMsg,
+  bulkError,
   onSave,
   onSaveSkippedDates,
+  onMoveDayCourses,
+  onQuickDelete,
   onClose,
 }: {
   initial: {
@@ -1117,13 +1124,21 @@ function SettingsEditor({
   };
   /** 跳过日期快照（契约 §8.1，批 2） */
   initialSkippedDates: string[];
+  /** 课程快照（批 8 §14.3：快速删除的受影响课程数前端本地预览） */
+  courses: Course[];
   busy: boolean;
   skippedBusy: boolean;
+  bulkBusy: boolean;
   error: string | null;
   skippedError: string | null;
+  bulkMsg: string | null;
+  bulkError: string | null;
   onSave: (input: SemesterConfigInput) => void;
   /** 跳过日期独立保存（save_skipped_dates，整体替换），与学期设置分开提交 */
   onSaveSkippedDates: (dates: string[]) => void;
+  /** 批量调整（批 8 §14.3）：confirm 确认在弹层内完成（搬迁列日期、快删列预览数） */
+  onMoveDayCourses: (fromDate: string, toDate: string) => void;
+  onQuickDelete: (weeks: number[], days: number[]) => void;
   onClose: () => void;
 }) {
   const [startDate, setStartDate] = useState(initial.semesterStartDate ?? "");
@@ -1138,15 +1153,21 @@ function SettingsEditor({
   const [skipped, setSkipped] = useState<string[]>(initialSkippedDates);
   const [skipInput, setSkipInput] = useState("");
   const [skipLocalErr, setSkipLocalErr] = useState<string | null>(null);
+  // 批量调整（批 8 契约 §14.3）：搬迁两日期 + 快删周次×星期多选
+  const [moveFrom, setMoveFrom] = useState("");
+  const [moveTo, setMoveTo] = useState("");
+  const [delWeeks, setDelWeeks] = useState<number[]>([]);
+  const [delDays, setDelDays] = useState<number[]>([]);
+  const [bulkLocalErr, setBulkLocalErr] = useState<string | null>(null);
 
   // Esc 关闭（busy 时忽略）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy && !skippedBusy) onClose();
+      if (e.key === "Escape" && !busy && !skippedBusy && !bulkBusy) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [busy, skippedBusy, onClose]);
+  }, [busy, skippedBusy, bulkBusy, onClose]);
 
   const addSkipped = () => {
     if (!skipInput) return;
@@ -1155,6 +1176,50 @@ function SettingsEditor({
     setSkipped((ds) => [...ds, skipInput].sort());
     setSkipInput("");
   };
+
+  // ---------------- 批量调整（契约 §14.3）：confirm 确认在本弹层内完成 ----------------
+
+  const toggleIn = (list: number[], v: number) =>
+    list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
+
+  /** 快删预览：受影响课程数 = day 命中且 weeks 与选中周有交集（与后端口径一致） */
+  const affectedPreview = courses.filter(
+    (c) => delDays.includes(c.day) && c.weeks.some((w) => delWeeks.includes(w)),
+  ).length;
+
+  const doMove = () => {
+    if (!moveFrom || !moveTo) return setBulkLocalErr("请选择源日期与目标日期");
+    if (moveFrom === moveTo) return setBulkLocalErr("源日期与目标日期不能相同");
+    if (
+      !window.confirm(
+        `将把 ${moveFrom} 的全部课程移动到 ${moveTo}（原位置显示「已调出」，可整批撤销）。确认执行？`,
+      )
+    )
+      return;
+    setBulkLocalErr(null);
+    onMoveDayCourses(moveFrom, moveTo);
+  };
+
+  const doQuickDelete = () => {
+    if (delWeeks.length === 0 || delDays.length === 0)
+      return setBulkLocalErr("请先选择要删除的周次与星期");
+    if (
+      !window.confirm(
+        `将从选中周次×星期的组合中移除 ${affectedPreview} 门课程（周次删空的课程将整条删除）。确认执行？`,
+      )
+    )
+      return;
+    setBulkLocalErr(null);
+    onQuickDelete(delWeeks, delDays);
+  };
+
+  const chip = (selected: boolean) =>
+    cn(
+      "tabular-num size-7 rounded-full text-caption leading-none",
+      selected
+        ? "bg-sched font-medium text-white hover:bg-sched"
+        : "border border-line text-text-2 hover:bg-sched/10",
+    );
 
   const submit = () => {
     if (totalWeeks.trim() === "" || !Number.isInteger(Number(totalWeeks)))
@@ -1355,6 +1420,97 @@ function SettingsEditor({
               )}
             </div>
           </div>
+
+          {/* 批量调整区块（批 8 契约 §14.3）：搬迁走 override 整批可撤销；快删按周次×星期 */}
+          <div className={cn(field, "border-t border-line pt-3")}>
+            <span className={label}>批量调整</span>
+            <p className="text-caption text-text-2">
+              调课搬迁：把某一天的全部课程整批移动到另一天（原位置留「已调出」痕迹，可整批撤销）。
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                aria-label="搬迁源日期"
+                value={moveFrom}
+                onChange={(e) => setMoveFrom(e.target.value)}
+                disabled={bulkBusy}
+                className={cn(inputCls, "flex-1")}
+              />
+              <span aria-hidden className="text-caption text-text-2">
+                →
+              </span>
+              <input
+                type="date"
+                aria-label="搬迁目标日期"
+                value={moveTo}
+                onChange={(e) => setMoveTo(e.target.value)}
+                disabled={bulkBusy}
+                className={cn(inputCls, "flex-1")}
+              />
+              <Button type="button" variant="outline" size="sm" disabled={bulkBusy} onClick={doMove}>
+                搬迁
+              </Button>
+            </div>
+            <p className="text-caption text-text-2">
+              快速删除：移除选中周次 × 星期的课程；周次被删空的课程整条删除（含其调整记录）。
+            </p>
+            <div className="flex flex-wrap gap-1" role="group" aria-label="选择要删除的周次">
+              {Array.from({ length: initial.semesterTotalWeeks }, (_, i) => i + 1).map((w) => (
+                <button
+                  key={w}
+                  type="button"
+                  aria-pressed={delWeeks.includes(w)}
+                  aria-label={`第 ${w} 周`}
+                  disabled={bulkBusy}
+                  onClick={() => setDelWeeks((ws) => toggleIn(ws, w))}
+                  className={chip(delWeeks.includes(w))}
+                >
+                  {w}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-1" role="group" aria-label="选择要删除的星期">
+              {DAY_OPTIONS.map((name, i) => {
+                const d = i + 1;
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    aria-pressed={delDays.includes(d)}
+                    disabled={bulkBusy}
+                    onClick={() => setDelDays((ds) => toggleIn(ds, d))}
+                    className={chip(delDays.includes(d))}
+                  >
+                    {name}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={bulkBusy || (delWeeks.length > 0 && delDays.length > 0 && affectedPreview === 0)}
+                onClick={doQuickDelete}
+              >
+                {bulkBusy ? "执行中…" : "删除选中组合"}
+              </Button>
+              {delWeeks.length > 0 && delDays.length > 0 && (
+                <span className="text-caption text-text-2">将影响 {affectedPreview} 门课程</span>
+              )}
+            </div>
+            {(bulkLocalErr ?? bulkError) && (
+              <p className="text-caption text-alert" role="alert">
+                {bulkLocalErr ?? bulkError}
+              </p>
+            )}
+            {bulkMsg && (
+              <p className="text-caption text-sched" role="status">
+                {bulkMsg}
+              </p>
+            )}
+          </div>
         </div>
 
         {(localErr ?? error) && (
@@ -1437,6 +1593,10 @@ export function TimetablePanel() {
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
   const [skippedBusy, setSkippedBusy] = useState(false);
   const [skippedErr, setSkippedErr] = useState<string | null>(null);
+  /** 批量调整（批 8 契约 §14.3）：设置弹层内的搬迁 / 快速删除 */
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState<string | null>(null);
+  const [bulkErr, setBulkErr] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<DetailPos | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -2012,6 +2172,39 @@ export function TimetablePanel() {
     }
   };
 
+  // ---------------- 批量调整（批 8 契约 §14：搬迁走 override 整批可撤销；快删删空删整条） ----------------
+
+  const moveDayCourses = async (fromDate: string, toDate: string) => {
+    setBulkBusy(true);
+    setBulkMsg(null);
+    setBulkErr(null);
+    const r = await invokeCommand<MoveResult>("move_day_courses", { fromDate, toDate });
+    setBulkBusy(false);
+    if (r.success && r.data) {
+      setBulkMsg(
+        `已把 ${r.data.moved} 门课程搬到 ${toDate}（原位置显示「已调出」）；` +
+          `在下方「已生效调整」中按「搬迁」来源可一键撤销整批。`,
+      );
+      setReloadTick((t) => t + 1);
+    } else {
+      setBulkErr(r.message ?? "搬迁失败");
+    }
+  };
+
+  const quickDelete = async (weeks: number[], days: number[]) => {
+    setBulkBusy(true);
+    setBulkMsg(null);
+    setBulkErr(null);
+    const r = await invokeCommand<number>("quick_delete", { weeks, days });
+    setBulkBusy(false);
+    if (r.success) {
+      setBulkMsg(`已处理 ${r.data ?? 0} 门课程（周次删空的整条删除）。`);
+      setReloadTick((t) => t + 1);
+    } else {
+      setBulkErr(r.message ?? "删除失败");
+    }
+  };
+
   // ---------------- 渲染 ----------------
 
   const weekSwitcher = ready && (
@@ -2024,6 +2217,8 @@ export function TimetablePanel() {
           onClick={() => {
             setSettingsErr(null);
             setSkippedErr(null);
+            setBulkMsg(null);
+            setBulkErr(null);
             setSettingsOpen(true);
           }}
           className="mr-1 rounded text-body font-medium text-alert underline decoration-dotted underline-offset-4 hover:text-text"
@@ -2156,7 +2351,7 @@ export function TimetablePanel() {
         <Clock aria-hidden="true" className="size-3.5" />
         作息
       </Button>
-      <Button variant="outline" size="sm" onClick={() => { setSettingsErr(null); setSkippedErr(null); setSettingsOpen(true); }}>
+      <Button variant="outline" size="sm" onClick={() => { setSettingsErr(null); setSkippedErr(null); setBulkMsg(null); setBulkErr(null); setSettingsOpen(true); }}>
         <Settings aria-hidden="true" className="size-3.5" />
         设置
       </Button>
@@ -2571,6 +2766,9 @@ export function TimetablePanel() {
                                 {o.sourceNoticeId.startsWith("drag:") && (
                                   <span className="rounded bg-line px-1 text-caption text-text-2">拖拽</span>
                                 )}{" "}
+                                {o.sourceNoticeId.startsWith("move:") && (
+                                  <span className="rounded bg-line px-1 text-caption text-text-2">搬迁</span>
+                                )}{" "}
                                 {overrideSummary(o)}
                                 {o.autoApplied && <span className="ml-1 opacity-70">（自动）</span>}
                               </span>
@@ -2641,7 +2839,7 @@ export function TimetablePanel() {
             />
           )}
 
-          {/* 课表设置弹层（契约 §7.1 + §8 跳过日期区块） */}
+          {/* 课表设置弹层（契约 §7.1 + §8 跳过日期区块 + §14 批量调整区块） */}
           {settingsOpen && ready && tt && (
             <SettingsEditor
               initial={{
@@ -2652,12 +2850,18 @@ export function TimetablePanel() {
                 showNonCurrentWeek: tt.config.showNonCurrentWeek,
               }}
               initialSkippedDates={tt.config.skippedDates}
+              courses={tt.courses}
               busy={settingsBusy}
               skippedBusy={skippedBusy}
+              bulkBusy={bulkBusy}
               error={settingsErr}
               skippedError={skippedErr}
+              bulkMsg={bulkMsg}
+              bulkError={bulkErr}
               onSave={(input) => void saveSemesterConfig(input)}
               onSaveSkippedDates={(dates) => void saveSkippedDates(dates)}
+              onMoveDayCourses={(fromDate, toDate) => void moveDayCourses(fromDate, toDate)}
+              onQuickDelete={(weeks, days) => void quickDelete(weeks, days)}
               onClose={() => setSettingsOpen(false)}
             />
           )}
@@ -2755,6 +2959,9 @@ export function TimetablePanel() {
                             </span>{" "}
                             {o.sourceNoticeId.startsWith("drag:") && (
                               <span className="rounded bg-line px-1 text-caption text-text-2">拖拽</span>
+                            )}{" "}
+                            {o.sourceNoticeId.startsWith("move:") && (
+                              <span className="rounded bg-line px-1 text-caption text-text-2">搬迁</span>
                             )}{" "}
                             {course?.name ?? "（课程已删除）"} · {overrideSummary(o)}
                             {o.autoApplied && <span className="ml-1 opacity-70">（自动）</span>}
