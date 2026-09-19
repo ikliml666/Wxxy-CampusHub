@@ -3,14 +3,13 @@ import {
   CalendarRange,
   ChevronLeft,
   ChevronRight,
-  ClipboardPaste,
   Clock,
   Download,
   Pencil,
   Plus,
   RefreshCw,
+  Rss,
   Settings,
-  Upload,
 } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader } from "@/components/PanelHeader";
@@ -28,6 +27,7 @@ import type {
   JsonImportResult,
   MoveResult,
   NoticeCandidate,
+  ScheduleNoticeBrief,
   OverrideKind,
   SemesterConfigInput,
   SlotRule,
@@ -70,13 +70,15 @@ const KIND_LABEL: Record<OverrideKind, string> = {
   extra: "补课",
 };
 
-/** 单大节行高（px）；网格行数 = slots.length（作息可编辑后行数不固定为 5）。 */
-const ROW_H = 72;
+/** 公告发现区强关键词着色表（批 B 契约 §19）：与
+ *  crates/campus-portal/src/parse.rs NOTICE_KEYWORDS_STRONG 互锚，命中判定
+ *  在后端，前端只用于 tag 着色（强 = 红、弱 = 灰），改词表两处同步。 */
+const NOTICE_STRONG_WORDS = new Set(["调课", "停课", "补课"]);
+
+/** 单小节行高（px）；网格行数 = view.slots.length（契约 §18：生效小节表，默认 11 行）。 */
+const ROW_H_S = 60;
 
 const DAY_NAMES = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-
-/** 小节号（教务 1-based 小节）→ 大节号：ceil(小节/2)，与后端 ICS 展开口径一致。 */
-const blockOf = (section: number) => Math.ceil(section / 2);
 
 /** "YYYY-MM-DD" → 本地 Date（避免时区漂移，解析即当日 00:00）。 */
 function parseDay(s: string): Date | null {
@@ -184,8 +186,9 @@ interface PlacedBlock {
   /** 该块关联的 override（显示【调】与详情信息）；普通块/占位为 null */
   override: CourseOverride | null;
   day: number;
-  startBlock: number;
-  endBlock: number;
+  /** 小节坐标（契约 §17，1-11）：块的 top/height/跨度直接用小节号 */
+  startSection: number;
+  endSection: number;
   room: string;
   /** ghost = 非实体块：moved-out（已调走）/ cancelled（已停） */
   ghost: null | "moved-out" | "cancelled";
@@ -213,30 +216,31 @@ function parseHmMinutes(hm: string): number | null {
   return h * 60 + min;
 }
 
-/** custom 课（按时刻，无节次）→ 网格落块（批 5 §11.2）：取与各大节区间
- *  **闭区间相交**（端点相触算相交：`start <= slot.endTime && slot.startTime <= end`）
- *  的大节号的 min..max（中间空档一并覆盖）。无相交大节（如整段落在课间空隙）
- *  或时间非法（非 HH:MM / end <= start）→ null：网格不渲染，仅详情/列表可见。 */
+/** custom 课（按时刻，无节次）→ 网格落块（批 5 §11.2 + 修复轮 §17 小节坐标）：
+ *  取与各**小节**区间**闭区间相交**（端点相触算相交：
+ *  `start <= slot.endTime && slot.startTime <= end`）的小节号的 min..max（中间
+ *  空档一并覆盖）。无相交小节（如整段落在课间空隙）或时间非法（非 HH:MM /
+ *  end <= start）→ null：网格不渲染，仅详情/列表可见。 */
 function customBlockRange(
   startHm: string,
   endHm: string,
-  slots: TimeSlot[],
-): { startBlock: number; endBlock: number } | null {
+  sectionSlots: TimeSlot[],
+): { startSection: number; endSection: number } | null {
   const start = parseHmMinutes(startHm);
   const end = parseHmMinutes(endHm);
   if (start == null || end == null || end <= start) return null;
-  let startBlock: number | null = null;
-  let endBlock: number | null = null;
-  for (const s of slots) {
+  let startSection: number | null = null;
+  let endSection: number | null = null;
+  for (const s of sectionSlots) {
     const ss = parseHmMinutes(s.startTime);
     const se = parseHmMinutes(s.endTime);
     if (ss == null || se == null) continue;
     if (start <= se && ss <= end) {
-      if (startBlock == null || s.number < startBlock) startBlock = s.number;
-      if (endBlock == null || s.number > endBlock) endBlock = s.number;
+      if (startSection == null || s.number < startSection) startSection = s.number;
+      if (endSection == null || s.number > endSection) endSection = s.number;
     }
   }
-  return startBlock != null && endBlock != null ? { startBlock, endBlock } : null;
+  return startSection != null && endSection != null ? { startSection, endSection } : null;
 }
 
 function buildWeekBlocks(
@@ -244,6 +248,10 @@ function buildWeekBlocks(
   week: number,
 ): { blocks: PlacedBlock[]; columns: PlacedBlock[][] } {
   const { courses, overrides } = view.timetable;
+  const sectionSlots = view.slots; // 契约 §18 小节化：生效作息即小节表
+  const maxSection = sectionSlots.length || 11;
+  /** 小节坐标合法域（契约 §17）：1 ≤ s ≤ e ≤ 11（越界块/超界 override 防御性跳过） */
+  const inRange = (s: number, e: number) => s >= 1 && e >= s && e <= maxSection;
   const blocks: PlacedBlock[] = [];
   const byId = new Map(courses.map((c) => [c.id, c]));
   // 非本周降级开关（批 7 契约 §13.2）：关闭 = 现状隐藏；开启 = 非本周课照常
@@ -274,33 +282,33 @@ function buildWeekBlocks(
       course,
       override,
       day,
-      startBlock: s,
-      endBlock: e,
+      startSection: s,
+      endSection: e,
       room,
       ghost,
       nonCurrent: !inWeek,
     });
 
-    /** 原时段落块（批 5 §11.2）：custom 课按 custom 时刻与各大节相交取 min..max
-     *  大节，节次课按小节折算大节；null = 无可渲染时段（custom 无相交/时间非法，
-     *  或无节次）→ 不渲染仅详情/列表可见。 */
-    const origRange: { startBlock: number; endBlock: number } | null = course.isCustomTime
+    /** 原时段落块（修复轮 §17 小节坐标）：custom 课按 custom 时刻与各小节相交取
+     *  min..max 小节；节次课直接用小节号（不再折算大节）。null = 无可渲染时段
+     * （custom 无相交/时间非法，或无节次/小节超界）→ 不渲染仅详情/列表可见。 */
+    const origRange: { startSection: number; endSection: number } | null = course.isCustomTime
       ? course.customStartTime && course.customEndTime
-        ? customBlockRange(course.customStartTime, course.customEndTime, view.slots)
+        ? customBlockRange(course.customStartTime, course.customEndTime, sectionSlots)
         : null
-      : course.startSection != null && course.endSection != null
-        ? { startBlock: blockOf(course.startSection), endBlock: blockOf(course.endSection) }
+      : course.startSection != null && course.endSection != null && inRange(course.startSection, course.endSection)
+        ? { startSection: course.startSection, endSection: course.endSection }
         : null;
 
     // 停课优先（冻结契约 §2.5.1 两档）：newDay 有值 = 只停「该周 · 星期 newDay」
     // 那一次——该课当天有排课才渲染虚线「已停」占位，本周其他星期的同课不受影响
     // （同课另一天的记录由挂在其 courseId 上的 override 单独处理）；
     // newDay = null = 通知未提星期 → 该课在 weeks 列出的周次内整周全停，
-    // 该周该课所有原时段渲染虚线「已停」。custom 课按相交大节出占位。
+    // 该周该课所有原时段渲染虚线「已停」。custom 课按相交小节出占位。
     if (cancel && (cancel.newDay == null || cancel.newDay === course.day)) {
       if (origRange)
         blocks.push(
-          mk(course.day, origRange.startBlock, origRange.endBlock, course.position, cancel, "cancelled"),
+          mk(course.day, origRange.startSection, origRange.endSection, course.position, cancel, "cancelled"),
         );
       continue;
     }
@@ -312,27 +320,24 @@ function buildWeekBlocks(
       resched.newStartSection != null &&
       (resched.newDay !== course.day ||
         !origRange ||
-        blockOf(resched.newStartSection) !== origRange.startBlock)
+        resched.newStartSection !== origRange.startSection)
     ) {
       if (origRange)
         blocks.push(
-          mk(course.day, origRange.startBlock, origRange.endBlock, course.position, resched, "moved-out"),
+          mk(course.day, origRange.startSection, origRange.endSection, course.position, resched, "moved-out"),
         );
-      const newStart = blockOf(resched.newStartSection);
-      // 单节补调：结束 = 起始（复核 P2 修复：缺省必须用已折算的大节 newStart，
-      // 误用 raw 小节号会把块拉高数倍并挤压同列分列——与 Rust
-      // occurrence.rs `unwrap_or(start)` 同语义，两处注释互锚）
-      const newEnd =
-        resched.newEndSection != null
-          ? blockOf(resched.newEndSection)
-          : newStart;
-      blocks.push(mk(resched.newDay, newStart, newEnd, resched.newPosition ?? course.position, resched, null));
+      const newStart = resched.newStartSection;
+      // 单节补调：结束 = 起始（复核 P2 修复口径不变——缺省必须用 newStart
+      // 本身，与 Rust occurrence.rs `unwrap_or(start)` 同语义，两处注释互锚）
+      const newEnd = resched.newEndSection != null ? resched.newEndSection : newStart;
+      if (inRange(newStart, newEnd))
+        blocks.push(mk(resched.newDay, newStart, newEnd, resched.newPosition ?? course.position, resched, null));
       continue;
     }
-    // 原地（可能仅换教室）；custom 课无相交大节 → origRange 为 null，仅列表可见
+    // 原地（可能仅换教室）；custom 课无相交小节 → origRange 为 null，仅列表可见
     if (origRange)
       blocks.push(
-        mk(course.day, origRange.startBlock, origRange.endBlock, resched?.newPosition ?? course.position, resched, null),
+        mk(course.day, origRange.startSection, origRange.endSection, resched?.newPosition ?? course.position, resched, null),
       );
   }
 
@@ -345,31 +350,28 @@ function buildWeekBlocks(
     const course = byId.get(ov.courseId);
     if (!course || course.disabled) continue;
     const day = ov.newDay ?? course.day;
-    const s = ov.newStartSection != null ? blockOf(ov.newStartSection) : 1;
-    const e =
-      ov.newEndSection != null
-        ? blockOf(ov.newEndSection)
-        : ov.newStartSection != null
-          ? blockOf(ov.newStartSection)
-          : 1;
+    const s = ov.newStartSection ?? 1;
+    const e = ov.newEndSection ?? (ov.newStartSection ?? 1);
+    if (!inRange(s, e)) continue;
     blocks.push({
       key: `${ov.id}-${week}`,
       course,
       override: ov,
       day,
-      startBlock: s,
-      endBlock: e,
+      startSection: s,
+      endSection: e,
       room: ov.newPosition ?? course.position,
       ghost: null,
       nonCurrent: false,
     });
   }
 
-  // 同日重叠分列：按开始大节排序 → 连通簇 → 簇内贪心占道
+  // 同日重叠分列：按开始小节排序 → 连通簇 → 簇内贪心占道（小节坐标下不同小节
+  // 的块不再虚假重叠，语义比大节折算更准）
   const columns: PlacedBlock[][] = Array.from({ length: 7 }, () => []);
   for (const b of blocks) columns[b.day - 1].push(b);
   for (const col of columns) {
-    col.sort((a, b) => a.startBlock - b.startBlock || a.endBlock - b.endBlock);
+    col.sort((a, b) => a.startSection - b.startSection || a.endSection - b.endSection);
   }
   return { blocks, columns };
 }
@@ -379,23 +381,23 @@ function layoutColumn(col: PlacedBlock[]): Map<string, { lane: number; lanes: nu
   const out = new Map<string, { lane: number; lanes: number }>();
   let i = 0;
   while (i < col.length) {
-    // 连通簇：下一个块开始于当前簇最晚结束之前（同一大节内相邻视为重叠）
-    let endMax = col[i].endBlock;
+    // 连通簇：下一个块开始于当前簇最晚结束之前（同一小节内相邻视为重叠）
+    let endMax = col[i].endSection;
     let j = i + 1;
-    while (j < col.length && col[j].startBlock <= endMax) {
-      endMax = Math.max(endMax, col[j].endBlock);
+    while (j < col.length && col[j].startSection <= endMax) {
+      endMax = Math.max(endMax, col[j].endSection);
       j++;
     }
     const cluster = col.slice(i, j);
     const laneEnds: number[] = [];
     const laneOf = new Map<string, number>();
     for (const b of cluster) {
-      let lane = laneEnds.findIndex((e) => e < b.startBlock);
+      let lane = laneEnds.findIndex((e) => e < b.startSection);
       if (lane === -1) {
-        laneEnds.push(b.endBlock);
+        laneEnds.push(b.endSection);
         lane = laneEnds.length - 1;
       } else {
-        laneEnds[lane] = b.endBlock;
+        laneEnds[lane] = b.endSection;
       }
       laneOf.set(b.key, lane);
     }
@@ -410,7 +412,7 @@ function layoutColumn(col: PlacedBlock[]): Map<string, { lane: number; lanes: nu
 /** 点击/拖拽阈值：曼哈顿距离超过该值才算拖拽（契约 §10.1）。 */
 const DRAG_THRESHOLD = 4;
 
-/** 一次拖拽会话。col/startBlock = 落点；-1 = 无效落点（跳过日期列/网格外）。 */
+/** 一次拖拽会话。col/startSection = 落点；-1 = 无效落点（跳过日期列/网格外）。 */
 interface DragState {
   block: PlacedBlock;
   /** 发起拖拽的 pointerId（move/up/cancel 校验，防多指覆盖会话） */
@@ -422,8 +424,8 @@ interface DragState {
   active: boolean;
   /** 落点显示列下标（0-based，经 displayDayOf 反映射回星期） */
   col: number;
-  /** 落点起始大节（1-based，末位对齐 clamp） */
-  startBlock: number;
+  /** 落点起始小节（1-based，末位对齐 clamp；契约 §17 小节坐标） */
+  startSection: number;
 }
 
 // ---------------- 手动添加 / 编辑表单 ----------------
@@ -537,6 +539,34 @@ function CourseForm({
     setWeeksText(fmtWeeks(ws));
   };
 
+  // 弹窗化（批 B 契约 §19）：Esc / 遮罩关闭统一走 requestCancel 的 dirty confirm
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) requestCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [busy, requestCancel]);
+  // 打开自动聚焦课程名（批 B §19 引导性）：表单由 key 重挂，effect 只跑一次
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    nameRef.current?.focus();
+  }, []);
+
+  // 上下文徽标（批 B §19 引导性）：由 initial 推导打开来源（点空白格预填的
+  // 星期/小节/展示周），编辑态显示课名——让用户一眼知道在填哪个格子
+  const contextBadge = editing
+    ? `编辑：${initial.name ?? ""}`
+    : initial.day
+      ? [
+          DAY_NAMES[initial.day],
+          `第 ${initial.startSection ?? "?"}${initial.endSection != null && initial.endSection !== initial.startSection ? `-${initial.endSection}` : ""} 小节`,
+          initial.weeks?.length ? `第 ${fmtWeeks(initial.weeks)} 周` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : null;
+
   const submit = () => {
     const weeks = parseWeeksInput(weeksText);
     if (!name.trim()) return setLocalErr("课程名不能为空");
@@ -563,23 +593,42 @@ function CourseForm({
   const field = "grid gap-1.5";
   const label = "text-caption text-text-2";
 
+  // 居中模态弹层（批 B 契约 §19）：LoginDialog/SettingsEditor 同款遮罩模式，
+  // 不再挂在页面下方——点空白格后视野不离开网格
   return (
-    <Surface accent="sched" className="mt-4 px-4 py-4">
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-body font-semibold text-text">
-          {editing ? "编辑课程" : "手动添加课程"}
-        </p>
-        {editing && (
-          <p className="text-caption text-text-2">
-            导入课程的修改会在下次导入时被教务数据覆盖
-          </p>
-        )}
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <div className={field}>
-          <label className={label} htmlFor="tf-name">课程名 *</label>
-          <Input id="tf-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="如：信息安全" />
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) requestCancel();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-label={editing ? "编辑课程" : "手动添加课程"}
+        className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-card border border-line bg-surface p-4 shadow-pop"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-body font-semibold text-text">
+              {editing ? "编辑课程" : "手动添加课程"}
+            </p>
+            {contextBadge && (
+              <p className="mt-1 inline-flex rounded bg-sched/10 px-1.5 py-0.5 text-caption font-medium text-sched">
+                {contextBadge}
+              </p>
+            )}
+          </div>
+          {editing && (
+            <p className="shrink-0 text-caption text-text-2">
+              导入课程的修改会在下次导入时被教务数据覆盖
+            </p>
+          )}
         </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className={field}>
+            <label className={label} htmlFor="tf-name">课程名 *</label>
+            <Input id="tf-name" ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：信息安全" />
+          </div>
         <div className={field}>
           <label className={label} htmlFor="tf-teacher">教师</label>
           <Input id="tf-teacher" value={teacher} onChange={(e) => setTeacher(e.target.value)} />
@@ -761,7 +810,8 @@ function CourseForm({
           取消
         </Button>
       </div>
-    </Surface>
+      </div>
+    </div>
   );
 }
 
@@ -774,14 +824,15 @@ function addMinutes(hm: string, minutes: number): string {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-/** 编辑态作息行：大节号由保存时的行序生成（1..n，天然严格递增），不手填。 */
+/** 编辑态作息行：小节号由保存时的行序生成（1..n，天然严格递增），不手填。 */
 interface SlotRow {
   startTime: string;
   endTime: string;
   alias: string | null;
 }
 
-/** 作息行编辑器（主作息与每条日期规则复用；大节号 = 行序，保存时生成）。 */
+/** 作息行编辑器（主作息与每条日期规则复用；小节号 = 行序，保存时生成；批 B
+ *  契约 §19 小节口径文案——config.slots 即小节表，契约 §18）。 */
 function SlotRowsEditor({
   rows,
   onChange,
@@ -803,13 +854,13 @@ function SlotRowsEditor({
       {rows.map((r, i) => (
         <div key={i} className="flex items-center gap-2">
           <span className="tabular-num w-14 shrink-0 text-caption font-medium text-text-2">
-            第 {i + 1} 大节
+            第 {i + 1} 节
           </span>
           <input
             type="time"
             value={r.startTime}
             onChange={(e) => update(i, { startTime: e.target.value })}
-            aria-label={`第 ${i + 1} 大节开始时间`}
+            aria-label={`第 ${i + 1} 节开始时间`}
             disabled={disabled}
             className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
           />
@@ -818,7 +869,7 @@ function SlotRowsEditor({
             type="time"
             value={r.endTime}
             onChange={(e) => update(i, { endTime: e.target.value })}
-            aria-label={`第 ${i + 1} 大节结束时间`}
+            aria-label={`第 ${i + 1} 节结束时间`}
             disabled={disabled}
             className="tabular-num h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
           />
@@ -828,14 +879,14 @@ function SlotRowsEditor({
             value={r.alias ?? ""}
             maxLength={5}
             placeholder="别名"
-            aria-label={`第 ${i + 1} 大节别名（选填）`}
+            aria-label={`第 ${i + 1} 节别名（选填）`}
             onChange={(e) => update(i, { alias: e.target.value || null })}
             disabled={disabled}
             className="h-9 w-20 shrink-0 rounded-control border border-line bg-surface px-2 text-caption text-text placeholder:text-text-2/60 disabled:opacity-50"
           />
           <button
             type="button"
-            aria-label={`删除第 ${i + 1} 大节`}
+            aria-label={`删除第 ${i + 1} 节`}
             disabled={disabled}
             onClick={() => onChange(rows.filter((_, j) => j !== i))}
             className="shrink-0 rounded px-1.5 text-caption text-alert hover:underline disabled:opacity-50"
@@ -854,7 +905,7 @@ function SlotRowsEditor({
         className="mt-2 flex items-center gap-1 text-caption text-sched hover:underline disabled:opacity-50"
       >
         <Plus aria-hidden="true" className="size-3.5" />
-        新增大节
+        新增一节
       </button>
     </>
   );
@@ -994,7 +1045,7 @@ function SlotsEditor({
           </span>
         </div>
         <p className="mt-1 text-caption text-text-2">
-          按行即大节（第 1 行 = 第 1 大节），课表网格与 ICS 导出都会按此展开。
+          按节（第 1 行 = 第 1 节）编辑，课表网格与 ICS 导出都会按此展开。
         </p>
 
         <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
@@ -1079,7 +1130,7 @@ function SlotsEditor({
         )}
 
         <div className="mt-3 flex items-center gap-2 border-t border-line pt-3">
-          <Button variant="ghost" size="sm" disabled={busy || !usingCustom} onClick={onReset} title={usingCustom ? "清空自定义作息，恢复内置校本大节表" : "当前已是内置默认"}>
+          <Button variant="ghost" size="sm" disabled={busy || !usingCustom} onClick={onReset} title={usingCustom ? "清空自定义作息，恢复内置校本 11 节表" : "当前已是内置默认"}>
             恢复本校默认
           </Button>
           <span className="flex-1" />
@@ -1141,22 +1192,18 @@ function SettingsEditor({
   onQuickDelete: (weeks: number[], days: number[]) => void;
   onClose: () => void;
 }) {
-  const [startDate, setStartDate] = useState(initial.semesterStartDate ?? "");
-  const [totalWeeks, setTotalWeeks] = useState(String(initial.semesterTotalWeeks));
-  /** 空 = 不设置；保存时后端按此反推开学日（覆盖上方开学日） */
-  const [weekHint, setWeekHint] = useState("");
   const [firstDay, setFirstDay] = useState(initial.firstDayOfWeek);
   const [showWeekends, setShowWeekends] = useState(initial.showWeekends);
   const [showNonCurrentWeek, setShowNonCurrentWeek] = useState(initial.showNonCurrentWeek);
-  const [localErr, setLocalErr] = useState<string | null>(null);
   // 跳过日期：本地列表增删，一次整体替换保存（YAGNI：不做日历面板）
   const [skipped, setSkipped] = useState<string[]>(initialSkippedDates);
   const [skipInput, setSkipInput] = useState("");
   const [skipLocalErr, setSkipLocalErr] = useState<string | null>(null);
-  // 批量调整（批 8 契约 §14.3）：搬迁两日期 + 快删周次×星期多选
+  // 批量调整（批 8 契约 §14.3 → 批 B §19 排版修订）：搬迁两日期 +
+  // 快删周次改文本输入（parseWeeksInput）+ 星期紧凑 chips
   const [moveFrom, setMoveFrom] = useState("");
   const [moveTo, setMoveTo] = useState("");
-  const [delWeeks, setDelWeeks] = useState<number[]>([]);
+  const [delWeeksText, setDelWeeksText] = useState("");
   const [delDays, setDelDays] = useState<number[]>([]);
   const [bulkLocalErr, setBulkLocalErr] = useState<string | null>(null);
 
@@ -1182,6 +1229,9 @@ function SettingsEditor({
   const toggleIn = (list: number[], v: number) =>
     list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
 
+  // 快删周次（批 B §19）：文本输入解析（"1-8,10"），非空但格式非法时 doQuickDelete 内报错
+  const delWeeks = parseWeeksInput(delWeeksText) ?? [];
+
   /** 快删预览：受影响课程数 = day 命中且 weeks 与选中周有交集（与后端口径一致） */
   const affectedPreview = courses.filter(
     (c) => delDays.includes(c.day) && c.weeks.some((w) => delWeeks.includes(w)),
@@ -1201,8 +1251,10 @@ function SettingsEditor({
   };
 
   const doQuickDelete = () => {
-    if (delWeeks.length === 0 || delDays.length === 0)
-      return setBulkLocalErr("请先选择要删除的周次与星期");
+    if (!delWeeksText.trim())
+      return setBulkLocalErr("请先填写要删除的周次（如 1-8,10）并选择星期");
+    if (delWeeks.length === 0) return setBulkLocalErr("周次格式无法识别，示例：1-8,10");
+    if (delDays.length === 0) return setBulkLocalErr("请选择要删除的星期");
     if (
       !window.confirm(
         `将从选中周次×星期的组合中移除 ${affectedPreview} 门课程（周次删空的课程将整条删除）。确认执行？`,
@@ -1213,28 +1265,16 @@ function SettingsEditor({
     onQuickDelete(delWeeks, delDays);
   };
 
-  const chip = (selected: boolean) =>
-    cn(
-      "tabular-num size-7 rounded-full text-caption leading-none",
-      selected
-        ? "bg-sched font-medium text-white hover:bg-sched"
-        : "border border-line text-text-2 hover:bg-sched/10",
-    );
-
   const submit = () => {
-    if (totalWeeks.trim() === "" || !Number.isInteger(Number(totalWeeks)))
-      return setLocalErr("请填写学期总周数（1-30）");
-    const hint = weekHint.trim() === "" ? null : Number(weekHint);
-    if (hint !== null && !Number.isInteger(hint))
-      return setLocalErr("「今天是第几周」需为正整数");
-    setLocalErr(null);
+    // 契约 §17：开学日/总周数随教务导入自动维护——保存设置时原样回传当前值、
+    // 不再传 currentWeekHint（后端 None = 不反推），前端不再提供编辑入口
     onSave({
-      semesterStartDate: startDate || null, // 清空开学日 = 假期态（契约 §7.1）
-      semesterTotalWeeks: Number(totalWeeks),
+      semesterStartDate: initial.semesterStartDate,
+      semesterTotalWeeks: initial.semesterTotalWeeks,
       firstDayOfWeek: firstDay,
       showWeekends,
-      currentWeekHint: hint,
-      showNonCurrentWeek, // 批 7 §13.2：随学期设置一并落库
+      currentWeekHint: null,
+      showNonCurrentWeek,
     });
   };
 
@@ -1257,60 +1297,19 @@ function SettingsEditor({
       >
         <p className="text-body font-semibold text-text">课表设置</p>
         <p className="mt-1 text-caption text-text-2">
-          学期锚点决定周次与日期列；周首日与周末列的联动由后端保存时统一处理。
+          周首日、周末列与显示选项；学期开学日与总周数随教务导入自动维护（契约 §17）。
         </p>
 
         <div className="mt-3 grid gap-3">
-          <div className={field}>
-            <label className={label} htmlFor="ts-start">学期开学日</label>
-            <div className="flex items-center gap-2">
-              <input
-                id="ts-start"
-                type="date"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
-                disabled={busy}
-                className={cn(inputCls, "flex-1")}
-              />
-              {startDate && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => setStartDate("")}
-                  className="shrink-0 text-caption text-alert hover:underline disabled:opacity-50"
-                >
-                  清空
-                </button>
-              )}
-            </div>
-            <p className="text-caption text-text-2">清空开学日即回到假期态（不显示周次）。</p>
-          </div>
-          <div className={field}>
-            <label className={label} htmlFor="ts-weeks">学期总周数（1-30）</label>
-            <input
-              id="ts-weeks"
-              type="number"
-              min={1}
-              max={30}
-              value={totalWeeks}
-              onChange={(e) => setTotalWeeks(e.target.value)}
-              disabled={busy}
-              className={inputCls}
-            />
-          </div>
-          <div className={field}>
-            <label className={label} htmlFor="ts-hint">今天是第几周（选填）</label>
-            <input
-              id="ts-hint"
-              type="number"
-              min={1}
-              max={30}
-              value={weekHint}
-              placeholder="填写后保存时自动反推开学日"
-              onChange={(e) => setWeekHint(e.target.value)}
-              disabled={busy}
-              className={inputCls}
-            />
+          {/* 学期锚点只读信息行（契约 §17：随教务导入自动维护，前端不再提供编辑入口） */}
+          <div className={cn(field, "rounded-control bg-surface-2 px-3 py-2")}>
+            <span className={label}>学期</span>
+            <p className="tabular-num text-body text-text">
+              {initial.semesterStartDate
+                ? `${initial.semesterStartDate} 起 · 共 ${initial.semesterTotalWeeks} 周`
+                : "未获取（完成导入 / 同步后自动写入）"}
+            </p>
+            <p className="text-caption text-text-2">随教务同步，无需手动设置。</p>
           </div>
           <div className={field}>
             <label className={label} htmlFor="ts-firstday">每周起始日</label>
@@ -1411,7 +1410,7 @@ function SettingsEditor({
                 disabled={skippedBusy}
                 onClick={() => onSaveSkippedDates(skipped)}
               >
-                {skippedBusy ? "保存中…" : "保存跳过日期"}
+                {skippedBusy ? "保存中…" : "保存"}
               </Button>
               {(skipLocalErr ?? skippedError) && (
                 <p className="text-caption text-alert" role="alert">
@@ -1421,12 +1420,10 @@ function SettingsEditor({
             </div>
           </div>
 
-          {/* 批量调整区块（批 8 契约 §14.3）：搬迁走 override 整批可撤销；快删按周次×星期 */}
+          {/* 批量调整区块（批 8 契约 §14.3；批 B §19 排版修订——周次改文本输入）：
+              搬迁走 override 整批可撤销；快删按周次×星期 */}
           <div className={cn(field, "border-t border-line pt-3")}>
             <span className={label}>批量调整</span>
-            <p className="text-caption text-text-2">
-              调课搬迁：把某一天的全部课程整批移动到另一天（原位置留「已调出」痕迹，可整批撤销）。
-            </p>
             <div className="flex items-center gap-2">
               <input
                 type="date"
@@ -1452,34 +1449,35 @@ function SettingsEditor({
               </Button>
             </div>
             <p className="text-caption text-text-2">
-              快速删除：移除选中周次 × 星期的课程；周次被删空的课程整条删除（含其调整记录）。
+              搬迁把某一天全部课程整批移到另一天（可整批撤销）；快速删除移除选中周次×星期的课程，周次删空的整条删除。
             </p>
-            <div className="flex flex-wrap gap-1" role="group" aria-label="选择要删除的周次">
-              {Array.from({ length: initial.semesterTotalWeeks }, (_, i) => i + 1).map((w) => (
-                <button
-                  key={w}
-                  type="button"
-                  aria-pressed={delWeeks.includes(w)}
-                  aria-label={`第 ${w} 周`}
-                  disabled={bulkBusy}
-                  onClick={() => setDelWeeks((ws) => toggleIn(ws, w))}
-                  className={chip(delWeeks.includes(w))}
-                >
-                  {w}
-                </button>
-              ))}
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="要删除的周次"
+                value={delWeeksText}
+                onChange={(e) => setDelWeeksText(e.target.value)}
+                disabled={bulkBusy}
+                placeholder="周次，如 1-8,10"
+                className="tabular-num flex-1"
+              />
             </div>
             <div className="flex flex-wrap gap-1" role="group" aria-label="选择要删除的星期">
               {DAY_OPTIONS.map((name, i) => {
                 const d = i + 1;
+                const on = delDays.includes(d);
                 return (
                   <button
                     key={d}
                     type="button"
-                    aria-pressed={delDays.includes(d)}
+                    aria-pressed={on}
                     disabled={bulkBusy}
                     onClick={() => setDelDays((ds) => toggleIn(ds, d))}
-                    className={chip(delDays.includes(d))}
+                    className={cn(
+                      "h-7 rounded-control px-2 text-caption leading-none",
+                      on
+                        ? "bg-sched font-medium text-white hover:bg-sched"
+                        : "border border-line text-text-2 hover:bg-sched/10",
+                    )}
                   >
                     {name}
                   </button>
@@ -1513,9 +1511,9 @@ function SettingsEditor({
           </div>
         </div>
 
-        {(localErr ?? error) && (
+        {error && (
           <p className="mt-2 text-caption text-alert" role="alert">
-            {localErr ?? error}
+            {error}
           </p>
         )}
 
@@ -1565,12 +1563,17 @@ export function TimetablePanel() {
 
   const [icsBusy, setIcsBusy] = useState(false);
   const [icsMsg, setIcsMsg] = useState<string | null>(null);
-  /** ICS 课前提醒（契约 §12.3）：null = 不加 VALARM */
+  /** ICS 课前提醒（契约 §12.3）：null = 不加 VALARM（§17 起内嵌在导入/导出弹层内） */
   const [remindMinutes, setRemindMinutes] = useState<number | null>(null);
   const importJsonRef = useRef<HTMLInputElement>(null);
+  /** 导入 / 导出聚合弹层（契约 §17）：顶栏单入口，ICS/JSON 导出与 JSON 导入收拢 */
+  const [ioOpen, setIoOpen] = useState(false);
 
-  const [noticeText, setNoticeText] = useState("");
-  const [parsing, setParsing] = useState(false);
+  /** 公告发现（批 B 契约 §19）：null = 尚未检查过；noticeMsg/candidates 与
+   *  候选确认流共用（粘贴解析卡片已删，后端 parse_notice 命令保留） */
+  const [scanning, setScanning] = useState(false);
+  const [noticeBriefs, setNoticeBriefs] = useState<ScheduleNoticeBrief[] | null>(null);
+  const [parsingUrl, setParsingUrl] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<NoticeCandidate[] | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -1637,7 +1640,8 @@ export function TimetablePanel() {
 
   const ready = view.phase === "ready" ? view.data : null;
   const tt = ready?.timetable ?? null;
-  const slots = ready?.slots ?? [];
+  /** 生效小节作息表（契约 §18 小节化）：时间列与网格小节坐标唯一事实源 */
+  const sectionSlots = ready?.slots ?? [];
   const currentWeek = ready?.currentWeek ?? null;
   /** 顶栏标题态（批 7 契约 §13.1）：后端按 weeks.rs 对齐式口径判定 */
   const weekState = ready?.weekState ?? "unset";
@@ -1666,6 +1670,16 @@ export function TimetablePanel() {
       document.removeEventListener("mousedown", onDown);
     };
   }, [weekPickerOpen]);
+
+  // 导入 / 导出弹层：Esc 关闭（busy 时忽略）
+  useEffect(() => {
+    if (!ioOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !icsBusy) setIoOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [ioOpen, icsBusy]);
 
   /** 展示周：用户切换 > 后端当前周 > 第 1 周 */
   const week = viewWeek ?? currentWeek ?? 1;
@@ -1751,23 +1765,23 @@ export function TimetablePanel() {
     b.override?.changeType !== "extra" &&
     b.course.startSection != null;
 
-  /** 落点命中测试（契约 §10.2 纯前端几何，不走 grid.rs 互转）：显示列 = 天列 rect
-   *  命中（网格外 clamp 到首/末列）；目标大节 = clamp(floor((y-网格顶)/ROW_H)+1,
-   *  1, slots.length-跨度)（末位对齐，整块不超作息行数）。跳过日期列无效。 */
+  /** 落点命中测试（契约 §10.2 纯前端几何 + §17 小节坐标）：显示列 = 天列 rect
+   *  命中（网格外 clamp 到首/末列）；目标小节 = clamp(floor((y-网格顶)/ROW_H_S)+1,
+   *  1, sectionSlots.length-跨度)（末位对齐，整块不超小节行数）。跳过日期列无效。 */
   const hitTest = (
     x: number,
     y: number,
     block: PlacedBlock,
-  ): { col: number; startBlock: number } | null => {
+  ): { col: number; startSection: number } | null => {
     const rects = dragRectsRef.current;
     if (rects.length === 0) return null;
     let col = rects.findIndex((r) => x < r.left + r.width);
     if (col === -1) col = rects.length - 1; // 越过右缘 → 末列
     if (isSkippedCol(col)) return null;
-    const span = block.endBlock - block.startBlock;
-    const raw = Math.floor((y - rects[col].top) / ROW_H) + 1;
-    const startBlock = Math.min(Math.max(1, slots.length - span), Math.max(1, raw));
-    return { col, startBlock };
+    const span = block.endSection - block.startSection;
+    const raw = Math.floor((y - rects[col].top) / ROW_H_S) + 1;
+    const startSection = Math.min(Math.max(1, sectionSlots.length - span), Math.max(1, raw));
+    return { col, startSection };
   };
 
   const onBlockPointerDown = (b: PlacedBlock, e: React.PointerEvent<HTMLButtonElement>) => {
@@ -1790,7 +1804,7 @@ export function TimetablePanel() {
       startY: e.clientY,
       active: false,
       col: -1,
-      startBlock: -1,
+      startSection: -1,
     });
   };
 
@@ -1803,7 +1817,7 @@ export function TimetablePanel() {
       suppressClickRef.current = true; // 进入拖拽：吃掉 pointerup 后的 click
     }
     const hit = hitTest(e.clientX, e.clientY, d.block);
-    updateDrag({ ...d, active: true, col: hit?.col ?? -1, startBlock: hit?.startBlock ?? -1 });
+    updateDrag({ ...d, active: true, col: hit?.col ?? -1, startSection: hit?.startSection ?? -1 });
   };
 
   const onBlockPointerUp = async (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -1812,7 +1826,7 @@ export function TimetablePanel() {
     updateDrag(null);
     if (!d.active) return; // 纯点击：click 正常触发详情浮层
     suppressClickRef.current = true;
-    if (d.col < 0 || d.startBlock < 0) return; // 无效落点（跳过日列/网格外）：回弹不落库
+    if (d.col < 0 || d.startSection < 0) return; // 无效落点（跳过日列/网格外）：回弹不落库
     await commitDrag(d);
   };
 
@@ -1835,15 +1849,15 @@ export function TimetablePanel() {
    *  本周残留的 drag: 链路 override，否则渲染层仍按 override 移位、与直改冲突）。
    *  位置未变短路不产生记录。跨度按课程原始小节差保持，教室按显示值保持。 */
   const commitDrag = async (d: DragState) => {
-    if (d.col < 0 || d.startBlock < 0) return; // 兜底守卫：无效落点不落库（day=0 会炸渲染）
+    if (d.col < 0 || d.startSection < 0) return; // 兜底守卫：无效落点不落库（day=0 会炸渲染）
     const b = d.block;
     const course = b.course;
     if (course.startSection == null || course.endSection == null) return; // custom 课无小节（不渲染块，理论不可达）
     const day = displayDayOf(d.col);
-    const newStartSection = d.startBlock * 2 - 1; // 大节 → 小节口径（契约 §10.4）
-    // 跨度按课程原始小节差保持（冻结公式，契约 §10.4）：如 3-4 节拖到第 3 大节 → 5-6
+    const newStartSection = d.startSection; // 落点即小节号（契约 §17 小节坐标）
+    // 跨度按课程原始小节差保持（冻结公式，契约 §10.4）：如 3-4 节拖到小节 5 → 5-6
     const newEndSection = newStartSection + (course.endSection - course.startSection);
-    if (day === b.day && d.startBlock === b.startBlock) return; // 位置未变短路
+    if (day === b.day && d.startSection === b.startSection) return; // 位置未变短路
     setBusyKey("drag");
     setNoticeMsg(null);
     try {
@@ -1981,15 +1995,33 @@ export function TimetablePanel() {
     }
   };
 
-  const parseNotice = async () => {
-    if (!noticeText.trim()) return;
-    setParsing(true);
+  /** 扫描公告（批 B 契约 §19）：只发现不解析——结果列表供用户逐条点「解析」；
+   *  需登录（未登录/网络错误透传后端中文 message）。 */
+  const scanNotices = async () => {
+    setScanning(true);
     setNoticeMsg(null);
-    const r = await invokeCommand<NoticeCandidate[]>("parse_notice", { text: noticeText });
-    setParsing(false);
+    const r = await invokeCommand<ScheduleNoticeBrief[]>("list_schedule_notices");
+    setScanning(false);
     if (r.success && r.data) {
-      setCandidates(r.data);
-      if (r.data.length === 0) setNoticeMsg({ ok: false, text: "未从该文本中识别出调课/停课/补课信息" });
+      setNoticeBriefs(r.data);
+    } else {
+      setNoticeMsg({ ok: false, text: r.message ?? "公告扫描失败" });
+    }
+  };
+
+  /** 解析单条公告正文（批 B 契约 §19）：结果喂给现有候选确认流（不自动 apply）；
+    空候选 / needsBrowser / 空正文等失败均以 noticeMsg 呈现后端中文 message。 */
+  const parseNoticeUrl = async (n: ScheduleNoticeBrief) => {
+    setParsingUrl(n.url);
+    setNoticeMsg(null);
+    const r = await invokeCommand<NoticeCandidate[]>("parse_notice_from_url", { url: n.url });
+    setParsingUrl(null);
+    if (r.success && r.data) {
+      if (r.data.length === 0) {
+        setNoticeMsg({ ok: false, text: `未从《${n.title}》中识别出调课/停课/补课信息` });
+      } else {
+        setCandidates(r.data);
+      }
     } else {
       setNoticeMsg({ ok: false, text: r.message ?? "解析失败" });
     }
@@ -2212,19 +2244,15 @@ export function TimetablePanel() {
       {/* 顶栏标题态机（批 7 蓝图小件 2，契约 §13.1）：unset → 点按开设置弹层；
           before → 距开学天数；vacation → 假期；normal → 周次按钮（开选择弹层） */}
       {weekState === "unset" ? (
+        // 契约 §17：开学日不再手动设置——点击直接触发教务导入自动写入
         <button
           type="button"
-          onClick={() => {
-            setSettingsErr(null);
-            setSkippedErr(null);
-            setBulkMsg(null);
-            setBulkErr(null);
-            setSettingsOpen(true);
-          }}
-          className="mr-1 rounded text-body font-medium text-alert underline decoration-dotted underline-offset-4 hover:text-text"
-          title="点击打开课表设置"
+          disabled={importing}
+          onClick={doImport}
+          className="mr-1 rounded text-body font-medium text-alert underline decoration-dotted underline-offset-4 hover:text-text disabled:opacity-50"
+          title="点击从教务导入，自动设置学期开学日与周数"
         >
-          尚未设置开学日
+          {importing ? "导入中…" : "完成导入后自动设置开学日"}
         </button>
       ) : weekState === "before" ? (
         <span className="tabular-num mr-1 text-body font-medium text-text-2">
@@ -2248,7 +2276,7 @@ export function TimetablePanel() {
             <div
               role="dialog"
               aria-label="选择周次"
-              className="absolute right-0 top-8 z-40 rounded-card border border-line bg-surface p-3 shadow-pop"
+              className="absolute right-0 top-8 z-40 min-w-max rounded-card border border-line bg-surface p-3 shadow-pop"
             >
               <div className="grid grid-cols-10 gap-1">
                 {Array.from({ length: totalWeeks }, (_, i) => i + 1).map((w) => (
@@ -2303,50 +2331,29 @@ export function TimetablePanel() {
         <ChevronRight aria-hidden="true" />
       </Button>
       <span aria-hidden className="mx-1 h-5 w-px bg-line" />
+      {/* 添加课程主入口（批 B 契约 §19）：「全部课程」列表删除后顶栏是唯一手动
+          添加入口，预填当前展示周；编辑/删除入口在网格块详情浮层 */}
+      <Button variant="outline" size="sm" onClick={() => openForm({ weeks: [week] }, null)}>
+        <Plus aria-hidden="true" className="size-3.5" />
+        添加课程
+      </Button>
       <Button variant="outline" size="sm" disabled={importing} onClick={doImport}>
         <RefreshCw aria-hidden="true" className={cn("size-3.5", importing && "animate-spin")} />
         {importing ? "同步中…" : "导入 / 同步"}
       </Button>
-      {/* ICS 课前提醒（契约 §12.3）：无/15/30/60，随「导出 ICS」按钮传参 */}
-      <select
-        aria-label="课前提醒"
-        value={remindMinutes ?? 0}
-        onChange={(e) => setRemindMinutes(Number(e.target.value) || null)}
-        className="h-8 rounded-control border border-line bg-surface px-2 text-caption text-text"
-      >
-        <option value={0}>无提醒</option>
-        <option value={15}>提前 15 分钟</option>
-        <option value={30}>提前 30 分钟</option>
-        <option value={60}>提前 60 分钟</option>
-      </select>
-      <Button variant="outline" size="sm" disabled={icsBusy} onClick={exportIcs}>
-        <Download aria-hidden="true" className="size-3.5" />
-        导出 ICS
-      </Button>
-      <Button variant="outline" size="sm" disabled={icsBusy} onClick={exportTimetableJson}>
-        <Download aria-hidden="true" className="size-3.5" />
-        导出 JSON
-      </Button>
+      {/* 导入 / 导出聚合入口（契约 §17）：ICS/JSON 导出与 JSON 导入收拢进弹层 */}
       <Button
         variant="outline"
         size="sm"
         disabled={icsBusy}
-        onClick={() => importJsonRef.current?.click()}
-      >
-        <Upload aria-hidden="true" className="size-3.5" />
-        导入 JSON
-      </Button>
-      <input
-        ref={importJsonRef}
-        type="file"
-        accept=".json,application/json"
-        className="hidden"
-        onChange={async (e) => {
-          const f = e.target.files?.[0];
-          e.target.value = ""; // 允许重复选择同一文件
-          if (f) await importTimetableJson(f);
+        onClick={() => {
+          setIcsMsg(null);
+          setIoOpen(true);
         }}
-      />
+      >
+        <Download aria-hidden="true" className="size-3.5" />
+        导入 / 导出
+      </Button>
       <Button variant="outline" size="sm" onClick={() => { setSlotsErr(null); setSlotsOpen(true); }}>
         <Clock aria-hidden="true" className="size-3.5" />
         作息
@@ -2404,7 +2411,7 @@ export function TimetablePanel() {
             icon={CalendarRange}
             domain="sched"
             title="还没有课表"
-            hint="登录教务后一键导入本学期课表；也可以先手动添加课程。"
+            hint="没有课程？点击顶栏「添加课程」手动建课，或「导入 / 同步」从教务拉取。"
             action={
               <>
                 <Button disabled={importing} onClick={doImport}>
@@ -2507,23 +2514,17 @@ export function TimetablePanel() {
                   </div>
                 );
               })}
-              {/* 时间列：一律取后端 slots（校本大节作息），前端不硬编码时间 */}
+              {/* 时间列：内置 11 小节表（契约 §17，后端恒定下发），每小节号+起止两行 */}
               <div>
-                {slots.map((s) => (
+                {sectionSlots.map((s) => (
                   <div
                     key={s.number}
                     className="flex flex-col items-center justify-center border-b border-line px-1 text-center last:border-b-0"
-                    style={{ height: ROW_H }}
+                    style={{ height: ROW_H_S }}
                   >
                     <span className="tabular-num text-body font-medium text-text-2">
                       {s.number}
                     </span>
-                    {/* 节次别名（批 5 §11.3）：有 alias 时节号下显示小字 */}
-                    {s.alias && (
-                      <span className="max-w-[52px] truncate text-caption text-sched" title={s.alias}>
-                        {s.alias}
-                      </span>
-                    )}
                     <span className="tabular-num text-caption opacity-60 text-text-2">
                       {s.startTime}
                     </span>
@@ -2554,7 +2555,7 @@ export function TimetablePanel() {
                       i === todayCol && "bg-sched/5",
                       drag?.active && drag.col === i && "bg-sched/15", // 落点列高亮（契约 §10.3）
                     )}
-                    style={{ height: ROW_H * slots.length }}
+                    style={{ height: ROW_H_S * sectionSlots.length }}
                   >
                     {/* 跳过日期列（契约 §8.1）：课程与空位按钮都不渲染，居中「休」标 */}
                     {skipped ? (
@@ -2563,40 +2564,41 @@ export function TimetablePanel() {
                       </p>
                     ) : (
                       <>
-                        {/* 空位按钮：点击空白格新建课程（预填星期/大节/展示周），渲染在课程块之下 */}
-                        {slots.map((s) => (
-                      <button
-                        key={`slot-${s.number}`}
-                        type="button"
-                        aria-label={`${DAY_NAMES[day]}第${s.number}大节空位，点击添加课程`}
-                        onClick={() => {
-                          if (currentWeek === null) {
-                            setNoticeMsg({ ok: false, text: "请在学期内添加课程" });
-                            return;
-                          }
-                          openForm(
-                            {
-                              day,
-                              startSection: s.number * 2 - 1,
-                              endSection: s.number * 2,
-                              weeks: [week],
-                            },
-                            null,
-                          );
-                        }}
-                        className="absolute left-0 w-full border-b border-line/50 last:border-b-0 hover:bg-sched/10 focus-visible:bg-sched/10"
-                        style={{ top: (s.number - 1) * ROW_H, height: ROW_H }}
-                      />
-                    ))}
-                        {/* 拖拽落点预览：按原跨度画虚线 ghost div（契约 §10.3） */}
-                        {drag?.active && drag.col === i && drag.startBlock >= 1 && (
+                        {/* 空位按钮：点击空白格新建课程（预填星期/小节/展示周，契约 §17
+                            小节坐标：每小节一格、start=end=小节号），渲染在课程块之下 */}
+                        {sectionSlots.map((s) => (
+                          <button
+                            key={`slot-${s.number}`}
+                            type="button"
+                            aria-label={`${DAY_NAMES[day]}第${s.number}小节空位，点击添加课程`}
+                            onClick={() => {
+                              if (currentWeek === null) {
+                                setNoticeMsg({ ok: false, text: "请在学期内添加课程" });
+                                return;
+                              }
+                              openForm(
+                                {
+                                  day,
+                                  startSection: s.number,
+                                  endSection: s.number,
+                                  weeks: [week],
+                                },
+                                null,
+                              );
+                            }}
+                            className="absolute left-0 w-full border-b border-line/50 last:border-b-0 hover:bg-sched/10 focus-visible:bg-sched/10"
+                            style={{ top: (s.number - 1) * ROW_H_S, height: ROW_H_S }}
+                          />
+                        ))}
+                        {/* 拖拽落点预览：按原跨度画虚线 ghost div（契约 §10.3 + §17 小节坐标） */}
+                        {drag?.active && drag.col === i && drag.startSection >= 1 && (
                           <div
                             aria-hidden
                             className="pointer-events-none absolute left-0 w-full rounded-inner border-2 border-dashed border-sched bg-sched/10"
                             style={{
-                              top: (drag.startBlock - 1) * ROW_H + 2,
+                              top: (drag.startSection - 1) * ROW_H_S + 2,
                               height:
-                                (drag.block.endBlock - drag.block.startBlock + 1) * ROW_H - 4,
+                                (drag.block.endSection - drag.block.startSection + 1) * ROW_H_S - 4,
                             }}
                           />
                         )}
@@ -2605,8 +2607,8 @@ export function TimetablePanel() {
                     {col.map((b) => {
                       const pos = layout.get(b.key) ?? { lane: 0, lanes: 1 };
                       const color = courseColor(b.course, customColors);
-                      const top = (b.startBlock - 1) * ROW_H + 2;
-                      const height = (b.endBlock - b.startBlock + 1) * ROW_H - 4;
+                      const top = (b.startSection - 1) * ROW_H_S + 2;
+                      const height = (b.endSection - b.startSection + 1) * ROW_H_S - 4;
                       const draggable = isDraggable(b);
                       const dragging = drag?.active === true && drag.block.key === b.key;
                       const dragInvalid = dragging && drag.col < 0; // 无效落点 = 不可放置态
@@ -2619,7 +2621,7 @@ export function TimetablePanel() {
                             if (el) blockRefs.current.set(b.key, el);
                             else blockRefs.current.delete(b.key);
                           }}
-                          aria-label={`${b.course.name}，${DAY_NAMES[b.day]}第${b.startBlock}至${b.endBlock}大节${b.ghost ? `（${b.ghost === "cancelled" ? "已停" : "已调出"}）` : ""}${b.nonCurrent ? "（非本周）" : ""}${draggable ? "，可拖拽调整位置" : ""}`}
+                          aria-label={`${b.course.name}，${DAY_NAMES[b.day]}第${b.startSection}至${b.endSection}小节${b.ghost ? `（${b.ghost === "cancelled" ? "已停" : "已调出"}）` : ""}${b.nonCurrent ? "（非本周）" : ""}${draggable ? "，可拖拽调整位置" : ""}`}
                           onClick={() => {
                             // 拖拽结束/取消后的 click 必须吃掉（pointer capture 后 click
                             // 仍触发，契约 §10.1）；未进入拖拽的纯点击照常开详情
@@ -2798,6 +2800,16 @@ export function TimetablePanel() {
                         <Pencil aria-hidden="true" className="size-3.5" />
                         编辑
                       </Button>
+                      {/* 删除入口（批 B §19）：「全部课程」列表删除后移到这里，带确认 */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-alert hover:text-alert"
+                        disabled={busyKey === `del-${c.id}`}
+                        onClick={() => removeCourse(c)}
+                      >
+                        删除
+                      </Button>
                     </div>
                   </>
                 );
@@ -2866,28 +2878,29 @@ export function TimetablePanel() {
             />
           )}
 
-          {/* 调课通知区（有课程才显示） */}
+          {/* 调整来源 · 公告发现区（批 B 契约 §19，有课程才显示）：粘贴解析卡片退役，
+              流程 = 检查公告 → 简报列表 → 逐条解析 → 候选确认流（不自动 apply） */}
           {tt.courses.length > 0 && (
             <Surface className="mt-4 px-4 py-4">
-              <div className="flex items-center gap-2">
-                <ClipboardPaste aria-hidden="true" className="size-4 text-sched" />
-                <p className="text-body font-semibold text-text">调课 / 停课 / 补课通知</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Rss aria-hidden="true" className="size-4 text-sched" />
+                <p className="text-body font-semibold text-text">调整来源 · 公告发现</p>
+                <span className="ml-auto">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={scanning}
+                    onClick={() => void scanNotices()}
+                  >
+                    <RefreshCw aria-hidden="true" className={cn("size-3.5", scanning && "animate-spin")} />
+                    {scanning ? "扫描中…" : noticeBriefs === null ? "检查公告调整" : "重新检查"}
+                  </Button>
+                </span>
               </div>
               <p className="mt-1 text-caption text-text-2">
-                粘贴教务处或学院通知原文，自动提取调课信息；要素不全的会列出原因待你确认。
+                自动扫描「通知公告」与「教务处」栏目，发现调课/停课/补课通知；解析结果确认后才会生效。
               </p>
-              <div className="mt-2.5 flex items-start gap-2">
-                <textarea
-                  value={noticeText}
-                  onChange={(e) => setNoticeText(e.target.value)}
-                  rows={3}
-                  placeholder="粘贴通知文本，例如：第5周周四3-4节 信息安全 调整到 D4-305"
-                  className="min-h-[72px] flex-1 rounded-control border border-line bg-surface px-3 py-2 text-body text-text placeholder:text-text-2/60"
-                />
-                <Button disabled={parsing || !noticeText.trim()} onClick={parseNotice}>
-                  {parsing ? "解析中…" : "解析"}
-                </Button>
-              </div>
+
               {noticeMsg && (
                 <p
                   className={cn("mt-2 text-caption", noticeMsg.ok ? "text-sched" : "text-alert")}
@@ -2895,6 +2908,56 @@ export function TimetablePanel() {
                 >
                   {noticeMsg.text}
                 </p>
+              )}
+
+              {noticeBriefs !== null && noticeBriefs.length === 0 && (
+                <p className="mt-2 text-caption text-text-2">近期公告中未发现调课类通知。</p>
+              )}
+              {noticeBriefs !== null && noticeBriefs.length > 0 && (
+                <ul className="mt-2.5 space-y-1.5">
+                  {noticeBriefs.map((n) => (
+                    <li
+                      key={n.url}
+                      className="rounded-inner border border-line bg-surface-2 px-3 py-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <p
+                          className="min-w-0 flex-1 basis-48 truncate text-body text-text"
+                          title={n.title}
+                        >
+                          {n.title}
+                        </p>
+                        <span className="tabular-num shrink-0 text-caption text-text-2">
+                          {n.date.slice(0, 10)}
+                        </span>
+                        <span className="shrink-0 rounded bg-line px-1.5 py-0.5 text-caption text-text-2">
+                          {n.column}
+                        </span>
+                        {n.matchedKeywords.map((k) => (
+                          <span
+                            key={k}
+                            className={cn(
+                              "shrink-0 rounded px-1.5 py-0.5 text-caption",
+                              NOTICE_STRONG_WORDS.has(k)
+                                ? "bg-alert/10 font-medium text-alert"
+                                : "bg-line text-text-2",
+                            )}
+                          >
+                            {k}
+                          </span>
+                        ))}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={parsingUrl === n.url || scanning}
+                          onClick={() => void parseNoticeUrl(n)}
+                        >
+                          {parsingUrl === n.url ? "解析中…" : "解析"}
+                        </Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
               )}
 
               {/* 候选列表：高置信可自动应用，低置信显示 reason */}
@@ -2983,62 +3046,108 @@ export function TimetablePanel() {
             </Surface>
           )}
 
-          {/* 全部课程列表（停开灰显；编辑/删除入口） */}
-          <div className="mt-6 mb-4 flex items-center justify-between">
-            <p className="text-body font-semibold text-text">
-              全部课程 · {tt.courses.length} 门
-            </p>
-            <Button variant="outline" size="sm" onClick={() => openForm({}, null)}>
-              <Plus aria-hidden="true" className="size-3.5" />
-              手动添加
-            </Button>
-          </div>
-          <ul className="space-y-2">
-            {[...tt.courses]
-              .sort((a, b) => a.day - b.day || (a.startSection ?? 0) - (b.startSection ?? 0))
-              .map((c) => (
-                <li key={c.id}>
-                  <Surface className={cn("flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5", c.disabled && "opacity-55")}>
-                    <span
-                      aria-hidden
-                      className="size-2.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: courseColor(c, customColors) }}
-                    />
-                    <p className="min-w-0 truncate text-body font-medium text-text">{c.name}</p>
-                    {c.disabled && (
-                      <span className="shrink-0 rounded bg-line px-1 text-caption text-text-2">已停开</span>
-                    )}
-                    <span className="tabular-num min-w-0 truncate text-caption text-text-2">
-                      {DAY_NAMES[c.day]} {courseTimeLabel(c)} · 第 {fmtWeeks(c.weeks)} 周
-                      {c.position && ` · ${c.position}`}
-                      {c.teacher && ` · ${c.teacher}`}
-                    </span>
-                    <span className="ml-auto flex shrink-0 items-center gap-2">
-                      <span className="rounded bg-line px-1 text-caption text-text-2">
-                        {c.source === "import" ? "导入" : "手动"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => openForm({ ...c }, c)}
-                        className="text-caption text-text-2 hover:text-text"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyKey === `del-${c.id}`}
-                        onClick={() => removeCourse(c)}
-                        className="text-caption text-alert hover:underline disabled:opacity-50"
-                      >
-                        删除
-                      </button>
-                    </span>
-                  </Surface>
-                </li>
-              ))}
-          </ul>
         </>
       ) : null}
+
+      {/* 导入 / 导出聚合弹层（契约 §17，SettingsEditor 同款遮罩样式）：
+          ICS/JSON 导出与 JSON 导入复用既有处理函数与 icsMsg 错误提示 */}
+      {ioOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !icsBusy) setIoOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-label="导入 / 导出"
+            className="w-full max-w-md rounded-card border border-line bg-surface p-4 shadow-pop"
+          >
+            <p className="text-body font-semibold text-text">导入 / 导出</p>
+            <p className="mt-1 text-caption text-text-2">
+              课表数据可导出为 ICS（日历订阅）或 JSON（备份）；导入 JSON 会覆盖当前课表。
+            </p>
+            <div className="mt-3 grid gap-3">
+              <div className="grid gap-1.5">
+                <span className="text-caption text-text-2">导出 ICS · 课前提醒</span>
+                <div className="flex items-center gap-2">
+                  <select
+                    aria-label="课前提醒"
+                    value={remindMinutes ?? 0}
+                    onChange={(e) => setRemindMinutes(Number(e.target.value) || null)}
+                    disabled={icsBusy}
+                    className="h-9 flex-1 rounded-control border border-line bg-surface px-2 text-body text-text disabled:opacity-50"
+                  >
+                    <option value={0}>无提醒</option>
+                    <option value={15}>提前 15 分钟</option>
+                    <option value={30}>提前 30 分钟</option>
+                    <option value={60}>提前 60 分钟</option>
+                  </select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={icsBusy}
+                    onClick={() => void exportIcs()}
+                  >
+                    <Download aria-hidden="true" className="size-3.5" />
+                    导出 ICS
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <span className="text-caption text-text-2">导出 JSON · 备份</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={icsBusy}
+                  onClick={() => void exportTimetableJson()}
+                >
+                  <Download aria-hidden="true" className="size-3.5" />
+                  导出 JSON
+                </Button>
+              </div>
+              <div className="grid gap-1.5 border-t border-line pt-3">
+                <span className="text-caption text-text-2">导入 JSON · 恢复备份</span>
+                <p className="text-caption text-alert">
+                  导入将覆盖当前课表的课程与调整记录，操作不可撤销。
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={icsBusy}
+                  onClick={() => importJsonRef.current?.click()}
+                >
+                  选择 JSON 文件…
+                </Button>
+                <input
+                  ref={importJsonRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = ""; // 允许重复选择同一文件
+                    if (f) await importTimetableJson(f);
+                  }}
+                />
+              </div>
+              {icsMsg && (
+                <p className="text-caption text-alert" role="alert">
+                  {icsMsg}
+                </p>
+              )}
+            </div>
+            <div className="mt-3 flex items-center justify-end gap-2 border-t border-line pt-3">
+              <Button variant="outline" size="sm" disabled={icsBusy} onClick={() => setIoOpen(false)}>
+                关闭
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

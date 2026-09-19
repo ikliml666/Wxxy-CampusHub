@@ -60,6 +60,8 @@ pub fn run() {
             commands::timetable::move_day_courses,
             commands::timetable::quick_delete,
             commands::timetable::get_today_courses,
+            commands::timetable::list_schedule_notices,
+            commands::timetable::parse_notice_from_url,
             commands::synjones::get_ecard,
             commands::synjones::get_ecard_transactions,
             commands::synjones::get_wallet_cards,
