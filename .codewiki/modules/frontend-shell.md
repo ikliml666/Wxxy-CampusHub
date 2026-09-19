@@ -26,7 +26,6 @@ source_files:
   - tauri-app/frontend/src/panels/SchedulePanel.tsx
   - tauri-app/frontend/src/panels/AppsPanel.tsx
   - tauri-app/frontend/src/panels/WalletPanel.tsx
-  - tauri-app/frontend/src/panels/PowerPanel.tsx
   - tauri-app/frontend/src/panels/SettingsPanel.tsx
 tags:
   - react

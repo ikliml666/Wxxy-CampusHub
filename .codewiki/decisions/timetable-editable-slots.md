@@ -4,7 +4,6 @@ type: decision
 source_files:
   - crates/campus-schedule/src/model.rs
   - tauri-app/src-tauri/src/commands/timetable.rs
-  - tauri-app/src-tauri/src/lib.rs
   - tauri-app/frontend/src/panels/TimetablePanel.tsx
   - tauri-app/frontend/src/shared/types.ts
 tags:
