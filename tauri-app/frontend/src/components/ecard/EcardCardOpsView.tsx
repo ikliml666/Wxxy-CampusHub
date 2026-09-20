@@ -107,13 +107,10 @@ function LostSection({
     setBusy(true);
     setErr("");
     setMsg("");
-    const r =
-      v.mode === "plain"
-        ? await invokeCommand("ecard_unlost_plain", { password: v.plain })
-        : await invokeCommand("ecard_unlost", {
-            padId: v.padId,
-            positions: v.positions,
-          });
+    const r = await invokeCommand("ecard_unlost", {
+      padId: v.padId,
+      positions: v.positions,
+    });
     setBusy(false);
     if (r.success) {
       setKeypadOpen(false);
@@ -181,7 +178,6 @@ function LostSection({
       ) : keypadOpen ? (
         <div className="mt-3">
           <SecureKeypad
-            kind="standard"
             title="输入查询密码以解挂"
             busy={busy}
             error={padErr}
@@ -358,7 +354,6 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
           ) : step >= 0 ? (
             <div className="mt-3">
               <SecureKeypad
-                kind="standard"
                 title={`请输入${PWD_STEPS[step]}`}
                 busy={busy}
                 error={padErr}
@@ -424,7 +419,6 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
               {resetStep >= 0 ? (
                 <div className="mt-3">
                   <SecureKeypad
-                    kind="standard"
                     title={`请输入${RESET_STEPS[resetStep]}`}
                     busy={busy}
                     error={padErr}

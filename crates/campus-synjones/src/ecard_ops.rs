@@ -296,67 +296,6 @@ pub fn assemble_pwd(input: PasswordInput) -> Result<String, CampusSynjonesError>
     build_pwd(&secret, &input.positions)
 }
 
-/// 取一把新键盘**只为 uuid**（用户走系统键盘明文输入时不消费位置映射；
-/// 键盘的乱序键位/图片一律丢弃，不进缓存、不透出前端）。
-pub async fn fresh_keyboard_uuid(client: &SynjonesClient) -> Result<String, CampusSynjonesError> {
-    let v = client
-        .get(
-            EP_KEYBOARD,
-            &[("type", KeyboardKind::Standard.type_param()), ("order", "1")],
-            Envelope::Berserker,
-        )
-        .await?;
-    let (uuid, _keys, _images) = parse_keyboard(&v["data"]).ok_or_else(|| {
-        CampusSynjonesError::Parse("安全键盘响应缺少 uuid".to_string())
-    })?;
-    Ok(uuid)
-}
-
-/// 明文密码 → `pwd` 协议串（`"1$1$" + 明文 + "$1$" + uuid`）。
-/// 适用场景：用户在应用内用**系统键盘**直接输入密码（用户显式选择，明文只在
-/// 本机前端内存与 IPC 出现，不进日志/错误文案——错误构造点统一过 redact_secrets）。
-pub fn plain_pwd(uuid: &str, password: &str) -> Result<String, CampusSynjonesError> {
-    if password.is_empty() {
-        return Err(CampusSynjonesError::Parse("请输入密码".to_string()));
-    }
-    Ok(format!("1$1${password}$1${uuid}"))
-}
-
-/// 校验查询密码（**明文输入版**；与 [`check_pwd`] 同一端点，GET + query）。
-pub async fn check_pwd_plain(
-    client: &SynjonesClient,
-    account: &str,
-    password: &str,
-) -> Result<(), CampusSynjonesError> {
-    let uuid = fresh_keyboard_uuid(client).await?;
-    let pwd = plain_pwd(&uuid, password)?;
-    let v = client
-        .get(
-            EP_CHECK_PWD,
-            &[("account", account), ("pwd", pwd.as_str()), ("pwdType", PWD_TYPE)],
-            Envelope::Berserker,
-        )
-        .await?;
-    require_retcode_ok(&v)
-}
-
-/// 解挂（**明文输入版**；POST JSON）。
-pub async fn unlost_card_plain(
-    client: &SynjonesClient,
-    account: &str,
-    password: &str,
-) -> Result<(), CampusSynjonesError> {
-    let uuid = fresh_keyboard_uuid(client).await?;
-    let pwd = plain_pwd(&uuid, password)?;
-    let form = [
-        ("account", account.to_string()),
-        ("pwd", pwd),
-        ("pwdType", PWD_TYPE.to_string()),
-    ];
-    let v = client.post_json(EP_UNLOST, &form, Envelope::Berserker).await?;
-    require_retcode_ok(&v)
-}
-
 /// 写操作响应的**双层判定**第二层（第一层 `code==200` 已由 `client` 判过）：
 /// 业务层要求 `data.retcode == "0"`，失败文案取 `data.errmsg`（缺失回落顶层 `msg`）。
 ///

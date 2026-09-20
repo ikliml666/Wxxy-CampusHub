@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 12：安全键盘「伪字符映射协议」逆转——密码输错根因修复 + 查看卡号官方三步弹窗
+
+- **模块**：`crates/campus-synjones/src/{ecard_ops.rs,ecard.rs}`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardBankView,EcardCardOpsView}.tsx`
+- **根因（推翻批 6 与旧取证两轮结论，用户坚持的密码是对的）**：`keyboard` 接口的 `numberKeyboard` 是**伪字符数组**（与想输的数字无关），`numberKeyboardImage` 才是每键一张「画着数字」的图片；服务端按 uuid 批次做数字↔伪字符映射还原。旧实现把伪字符当键面文字渲染，用户面对一堆字母符号无从输入真实密码——「输入密码就是错误」的根因。应用内端到端实锤：Number 键盘 + positions 链提交证件后六位**校验通过（retcode=0）**；旧「该校密码非证件后六位」结论作废（当时把明文直拼 pwd，协议上必然 60005）。详见 wiki `learnings/ecard-keyboard-pseudochar-protocol.md`
+- **系统键盘明文输入模式删除**：明文脱离键盘批次映射，服务端还原必失败（协议上不可行）——删除 UI 入口与 `ecard_check_pwd_plain`/`ecard_unlost_plain` 命令、`plain_pwd`/`fresh_keyboard_uuid`
+- **SecureKeypad 重写**：键面改为渲染官方图片九宫格（`images`，与官方 H5 一致），提交逻辑不变（padId + 位置下标）；全部调用点从 standard 91 键伪字符盘改为 Number 键盘；删 altMode/明文分支
+- **查看卡号官方同款三步**：密码校验通过 → **底部弹窗**（只显前 4 位 + 通栏「查看卡号」按钮）→ 点按钮才显完整卡号（4 位一组 + 保管提示）。后端新增 `fetch_bank_number`：校验通过后回读本人卡列表 `bankacc`（官方同款数据源——`checkPwd` 只是显示闸门，全号随卡列表早已下发），`ecard_check_pwd` 填充 `bankCardNo`；学校未下发时前端如实提示不伪造
+- **验证**：cargo test 121 通过、tsc 零错误；CDP 真机全流程——键盘输证件后六位 → 校验通过 → 弹窗显前 4 位 → 点按钮显 19 位完整卡号（尾 4 位与已绑定卡吻合）
+
 ## 2026-09-20 · M4.5 批 6：密码支持系统键盘明文输入（用户要求）+ 转账失败说明文案
 
 - **模块**：`crates/campus-synjones/src/ecard_ops.rs`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardCardOpsView,EcardBankView,EcardTransferView}.tsx`

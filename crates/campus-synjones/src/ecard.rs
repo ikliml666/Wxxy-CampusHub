@@ -409,6 +409,24 @@ pub async fn current_account(client: &SynjonesClient) -> Result<String, CampusSy
     Ok(acc)
 }
 
+/// 绑定银行卡的**完整卡号**（`getCampusCards` 首个非空 `bankacc` 原文；未绑定 → 空串）。
+///
+/// 官方「查看卡号」的同款数据源：完整号早已随卡列表下发（官方前端存 sessionStorage、
+/// 详情页直接读），`checkPwd` 只是显示闸门——故校验通过后回读本字段即可，无需第三跳。
+/// 红线：完整卡号只随返回值到命令层 → 前端弹窗展示（用户密码校验通过后的本人数据），
+/// 不进日志、不进错误文案、不持久化。
+pub async fn fetch_bank_number(client: &SynjonesClient) -> Result<String, CampusSynjonesError> {
+    let v = client.get(EP_CARDS_FULL, &[], Envelope::Berserker).await?;
+    Ok(v["data"]["card"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .map(|c| text_of(c.get("bankacc")))
+                .find(|s| !s.is_empty())
+        })
+        .unwrap_or_default())
+}
+
 /// 流水查询的增强筛选（契约 §1.4：全部实测生效）。
 ///
 /// `None` / 空串的参数**不进 query**（避免改变服务端语义——实测 `type` 不传即全量）。

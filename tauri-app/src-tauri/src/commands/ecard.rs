@@ -28,7 +28,7 @@
 use super::auth::CommandResult;
 use super::synjones::{err_text, synjones_session, ERR_NO_SESSION};
 use crate::infra::state::AppState;
-use campus_synjones::ecard::{current_account, CardDetail};
+use campus_synjones::ecard::{current_account, fetch_bank_number, CardDetail};
 use campus_synjones::ecard_ops::{
     bind_bank, bind_user, cancel_bank, check_pwd, fetch_secure_keyboard, find_pwd, KeyboardKind,
     lost_card, modify_pwd, send_bind_bank_code, send_bind_user_code, send_find_pwd_code,
@@ -40,7 +40,6 @@ use campus_synjones::ecard_stats::{
 };
 use campus_synjones::client::Envelope;
 use campus_synjones::ecard_face;
-use campus_synjones::ecard_ops::{check_pwd_plain, unlost_card_plain};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -427,11 +426,12 @@ pub struct EcardOpId {
 }
 
 /// `ecard_check_pwd` → data。`bank_card_no` 本校无「校验密码查银行卡号」需求，恒 None
-/// （契约 §2.5：全号仅校验通过才回——本校无该路径，绝不无凭回号）。
+/// （契约 §2.5：全号仅校验通过才回——回读值来自本人卡列表 `bankacc`，无凭不回）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckPwdResult {
     pub ok: bool,
+    /// 完整银行卡号（校验通过后回读；未绑定/学校未下发 → None）。
     pub bank_card_no: Option<String>,
 }
 
@@ -527,7 +527,15 @@ pub async fn ecard_check_pwd(
             Err(msg) => return Ok(CommandResult::err(&msg)),
         };
         Ok(match check_pwd(client, &account, pad).await {
-            Ok(()) => CommandResult::ok(CheckPwdResult { ok: true, bank_card_no: None }),
+            Ok(()) => {
+                // 官方同款：完整银行卡号随卡列表早已下发，checkPwd 只是显示闸门；
+                // 校验通过后回读 bankacc 填充（未绑定/学校未下发 → None，前端如实提示）。
+                let bank_card_no = fetch_bank_number(client).await.unwrap_or_default();
+                CommandResult::ok(CheckPwdResult {
+                    ok: true,
+                    bank_card_no: (!bank_card_no.is_empty()).then_some(bank_card_no),
+                })
+            }
             Err(e) => CommandResult::err(&err_text(&e)),
         })
     })
@@ -1086,43 +1094,6 @@ pub async fn ecard_face_upload(
     }
     with_synjones!(state, |client| {
         Ok(match ecard_face::replace_face(client, &bytes).await {
-            Ok(()) => CommandResult::ok(()),
-            Err(e) => CommandResult::err(&err_text(&e)),
-        })
-    })
-}
-/// 校验查询密码（**系统键盘明文输入版**；密码明文只在 IPC 与后端内存出现，不进日志）。
-#[tauri::command]
-pub async fn ecard_check_pwd_plain(
-    state: State<'_, AppState>,
-    account: Option<String>,
-    password: String,
-) -> Result<CommandResult<CheckPwdResult>, String> {
-    with_synjones!(state, |client| {
-        let account = match resolve_account(client, account).await {
-            Ok(a) => a,
-            Err(msg) => return Ok(CommandResult::err(&msg)),
-        };
-        Ok(match check_pwd_plain(client, &account, &password).await {
-            Ok(()) => CommandResult::ok(CheckPwdResult { ok: true, bank_card_no: None }),
-            Err(e) => CommandResult::err(&err_text(&e)),
-        })
-    })
-}
-
-/// 解挂（**系统键盘明文输入版**）。
-#[tauri::command]
-pub async fn ecard_unlost_plain(
-    state: State<'_, AppState>,
-    account: Option<String>,
-    password: String,
-) -> Result<CommandResult<()>, String> {
-    with_synjones!(state, |client| {
-        let account = match resolve_account(client, account).await {
-            Ok(a) => a,
-            Err(msg) => return Ok(CommandResult::err(&msg)),
-        };
-        Ok(match unlost_card_plain(client, &account, &password).await {
             Ok(()) => CommandResult::ok(()),
             Err(e) => CommandResult::err(&err_text(&e)),
         })
