@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 3 补验四：转账「未开通」复核（app 来源四变体全 400）、查询密码 60005 实证、限额本地持久化
+
+- **模块**：`tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx`（唯一代码改动）+ wiki/CHANGELOG
+- **用户反馈三点**：① 免密与限额没有同步数据 ② 查看卡号报 `60005 账户密码错误` ③ 官方浏览器里把 pc 字样改为 app 就能正常访问（项目有记录——HANDOFF.md「`synAccessSource=pc` 被服务端拒」结论）
+- **转账复核（推翻上轮「官方页面也失败」的表述，维持「学校未开通」结论）**：上轮官方 PC 转账页的「服务大厅未授权/没有可转入的卡」实为**官方 PC 前端自己用 `synAccessSource=pc` 被服务端拒**（4030 旧结论）——不是转账功能未开通的证据。本轮在官方页面上下文用 **`app` 来源 + 官方 token** 直接调 `/ykt/tsm/cardTransfer`（官方字段逐字、0.01 元）：**四变体（正向/反向/整数 1 元/旧端点 acctypeTransfer）全部 `code=400`**（前三个「操作失败」、旧端点「业务异常」），且官方 plat 移动壳的宫格里**根本没有转账入口**——服务端业务层拒绝一切形态，维持**该校未开通卡间转账**结论，代码保留官方形态
+- **查询密码 60005 实证（应用无 bug）**：在官方页面上下文用官方协议（`pwd="1$1$"+明文+"$1$"+官方 uuid`、`account=42940`、GET checkPwd）提交**身份证后六位 190453**，官方同样返回 `retcode=60005 账户密码错误`——证明：① 我们的请求格式/键盘翻译链路与官方逐字一致（同一格式官方也 60005）② **用户的查询密码不是证件后六位**（改过，或学校初始密码另有规则）。解法：应用内「卡设置 → 忘记旧密码？用短信验证码找回」重设后重试（找回走 `sendfindPwdVer`/`findPwd`，同样已实现）
+- **限额「没有同步数据」→ 本地持久化**：学校侧卡信息接口不回显限额（官方前端同样只做 sessionStorage 本地回写，服务端读回恒为旧值），上一轮只做了组件内存态记住。现改为**localStorage 持久化**（键 `campushub-ecard-limits-local`，按子账户 acctype 存最近提交值），跨会话显示「当前：…（本地记录）」；提交成功文案同步说明。展示用途，清缓存即回到学校侧视图
+- **验证**：`tsc --noEmit` 零错误；官方上下文协议对照两次（转账四变体 + 默认密码一次提交，均无副作用、无资金变动）
+
 ## 2026-09-20 · M4.5 批 3 补验三：官方系统动态抓包对照——四处真 bug 修复 + 转账「学校未开通」实锤 + 人脸采集与设置页考察
 
 - **模块**：`crates/campus-synjones/src/{ecard_ops,ecard}.rs`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardTransferView,EcardCardOpsView}.tsx`、`tauri-app/frontend/src/shared/types.ts`

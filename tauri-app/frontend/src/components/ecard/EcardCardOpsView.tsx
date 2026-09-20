@@ -469,6 +469,42 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
 
 // ---------------- 免密与限额 ----------------
 
+/**
+ * 限额的**本地最近提交记录**（学校侧不回显限额，官方前端也只做本地回写）。
+ * 键=子账户 acctype（如 `42940-000`）；纯展示用途，删除/清缓存即回到学校侧视图。
+ */
+const LIMITS_LOCAL_KEY = "campushub-ecard-limits-local";
+
+type SavedLimits = { day: number; nonpwd: number; single: number };
+
+function loadSavedLimits(accType: string): SavedLimits | null {
+  if (!accType) return null;
+  try {
+    const all = JSON.parse(localStorage.getItem(LIMITS_LOCAL_KEY) ?? "{}") as Record<
+      string,
+      SavedLimits
+    >;
+    const hit = all[accType];
+    return hit && typeof hit.day === "number"
+      ? { day: hit.day, nonpwd: hit.nonpwd, single: hit.single }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLimitsLocal(accType: string, v: SavedLimits): void {
+  try {
+    const all = JSON.parse(
+      localStorage.getItem(LIMITS_LOCAL_KEY) ?? "{}",
+    ) as Record<string, SavedLimits>;
+    all[accType] = v;
+    localStorage.setItem(LIMITS_LOCAL_KEY, JSON.stringify(all));
+  } catch {
+    // 存不了就算了：只影响「当前」显示，不影响写入
+  }
+}
+
 function LimitsSection({
   card,
   onChanged,
@@ -485,11 +521,12 @@ function LimitsSection({
   const [err, setErr] = useState("");
   // 学校侧的卡信息接口**不回显**限额（官方前端同样靠 sessionStorage 本地回写），
   // 所以保存成功后必须自己记住本次提交值，否则重取概览会把界面刷回旧值、看着像没生效。
+  // 记录**持久化到 localStorage**（键=子账户 acctype），跨会话也能显示上次提交的限额。
   const [saved, setSaved] = useState<{
     day: number;
     nonpwd: number;
     single: number;
-  } | null>(null);
+  } | null>(() => loadSavedLimits(acc?.type ?? ""));
 
   // 概览刷新（onChanged 后容器重取）时同步学校侧最新值
   useEffect(() => {
@@ -533,12 +570,14 @@ function LimitsSection({
     });
     setBusy(false);
     if (r.success) {
-      setSaved({
+      const v = {
         day: yuanNum(daycost),
         nonpwd: yuanNum(nonpwd),
         single: yuanNum(single),
-      });
-      setMsg("已提交。学校系统不回显限额，下方「当前」为本次提交值。");
+      };
+      saveLimitsLocal(acc.type, v);
+      setSaved(v);
+      setMsg("已提交。学校系统不回显限额，下方「当前」为本地记录的最近提交值。");
       onChanged();
     } else {
       setErr(r.message ?? "限额设置失败");
@@ -556,7 +595,7 @@ function LimitsSection({
       <p className="text-caption text-text-2">
         当前：单日消费 {yuanText(shown.day)} · 免密 {yuanText(shown.nonpwd)} · 单笔{" "}
         {yuanText(shown.single)}（填 0 表示不限制）
-        {saved ? "（本次提交值）" : ""}
+        {saved ? "（本地记录）" : ""}
       </p>
       <div className="mt-3 flex flex-wrap gap-3">
         {fields.map((f) => (

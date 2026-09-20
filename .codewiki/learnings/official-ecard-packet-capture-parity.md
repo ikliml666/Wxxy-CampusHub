@@ -50,7 +50,15 @@ modifyPwd: POST .../modifyPwd（错误密码 → code=1008 两次输入的密码
 - **SPA 之外的整页跳转会丢 hook**——每次 `goto` 后必须重注入；plat-pc 与 campus-card 前端是不同应用，点宫格应用是整页导航。
 - 受控输入（vant/React）用 `HTMLInputElement.prototype.value` setter + `input` 事件填值；官方按钮点击派发 `MouseEvent('click',{bubbles:true})`。
 
-## 五、未实现（留待后续，接口已考察）
+## 五、三个「看起来像 bug 但不是」的实证（2026-09-20 二轮）
+
+1. **官方 PC 页面的「服务大厅未授权(1)」不是功能未开通的证据**——官方 PC 前端自己用 `synAccessSource=pc`，而服务端**拒收 pc 来源**（HANDOFF.md 4030 旧结论）；在官方页面上下文改用 `app` 来源调接口全部 200。**评估功能是否开通必须用 app 来源在官方上下文直调**。
+2. **卡间转账该校确实未启用**：app 来源 + 官方 token + 官方字段，`cardTransfer` 四变体（正向 0.01 / 反向 / 整数 1 元 / 旧端点 `acctypeTransfer`）**全部 `code=400`**（「操作失败」/「业务异常」），且官方 plat 移动壳宫格无转账入口。服务端业务层拒绝一切形态。
+3. **查询密码 60005 ≠ 客户端 bug**：官方上下文按官方协议提交「证件后六位」同样 `retcode=60005`——该校查询密码**不是**证件后六位（或已被修改）。引导用户走短信找回（`sendfindPwdVer`/`findPwd`）重设，而不是排查客户端。注意 checkPwd 的 pwd 是「明文字符+uuid」，**不需要键盘里恰好有这些字符**，可直接拼串做协议验证（每次提交都计密码尝试，别试错）。
+
+**限额不回显的唯一可行解**：学校卡信息接口读回恒为旧值（官方也只本地回写 sessionStorage）⇒ 应用侧把最近提交值持久化 localStorage（键 `campushub-ecard-limits-local`，按 acctype），展示标注「（本地记录）」。
+
+## 六、未实现（留待后续，接口已考察）
 
 - **人脸采集**：独立 H5 `/overLightMobileH5`（uni-app）。表单=姓名/手机/学工号只读 + 照片上传 + 确认；接口 `POST /fapi/meeting/largeScreen/faceAcquisition/{userId}`（multipart 字段 `avatar`）与 `.../replaceFace/{userId}`，前置 `checkFaceScore` 检测人脸分数；token 是 H5 自有体系（对接需先验证鉴权链是否认 synjones token）。
 - **「我的-设置」**（`/plat/user/setup`）：个人资料、安全设置（手机号+登录密码）、支付设置（脱机二维码开关 `getUserOfflienSwitch`、付款码支付顺序、校园卡支付设置=转账标识+限额【我们已有】）、设备管理、通用、关于、换账号、清缓存、退出。
