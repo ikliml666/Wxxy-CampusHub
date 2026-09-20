@@ -31,6 +31,7 @@
 - [[learnings\portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工（受保护资源与两种白名单）]]
 - [[learnings\synjones-charge-yuan-vs-fen-and-pending-orders|慧新E校 charge 侧金额是元、一卡通侧是分；待支付单「恒 500」旧结论已推翻]]
 - [[learnings\subagent-batch-image-labeling|批量图片标注不可靠：改结构化拼图 + 客观特征交叉校验]]
+- [[learnings\zhengfang-tiaoxiu-swap-entries|教务调休条目形态与公告置换冗余]]
 - [[learnings\zhengfang-kblist-multi-section-per-jxb|正方 kbList 同一教学班按多时段拆多条——diff 匹配键必须含时段]]
 - [[learnings\jwglxt-sso-chain|正方教务 SSO 链与课表接口取证（ST 绑定 service / TGT 不落 cookie / 901 会话特征）]]
 - [[learnings\kaptcha-arithmetic-five-roots|算术验证码识别：从 2.9% 到 100% 的五个根因]]

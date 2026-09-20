@@ -121,6 +121,15 @@ pub struct CourseTableConfig {
     /// 为准（手动停课日无节日名，横幅回退「放假」）。旧文件无该键 → 空。
     #[serde(default)]
     pub holiday_names: Vec<NamedDate>,
+    /// 最近一次自动导入教务课表成功的日期（每日自动同步的闸，2026-09-20）：
+    /// 后台任务每天首次 tick 时 `!= Some(今天)` 才导入，成功后写今天。手动导入
+    /// 也一并写入（当天已同步就不再自动重复）。旧文件无该键 → None。
+    #[serde(default)]
+    pub last_auto_import: Option<NaiveDate>,
+    /// 最近一次拉取法定节假日成功的日期（节假日刷新闸，2026-09-20）。
+    /// 旧文件无该键 → None。
+    #[serde(default)]
+    pub last_holiday_fetch: Option<NaiveDate>,
 }
 
 /// 按日期区间的作息规则（契约 §9.1，批 3）。`slots` 恒非空（保存时校验）。
@@ -302,6 +311,8 @@ mod tests {
                 swap_days: vec![],
                 holiday_names: vec![],
                 show_non_current_week: true,
+            last_auto_import: None,
+            last_holiday_fetch: None,
                 slot_rules: vec![SlotRule {
                     start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
                     end_date: NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),

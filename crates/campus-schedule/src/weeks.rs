@@ -106,6 +106,8 @@ mod tests {
             holiday_names: vec![],
             slot_rules: vec![],
             show_non_current_week: false,
+            last_auto_import: None,
+            last_holiday_fetch: None,
         };
         assert_eq!(
             current_week(

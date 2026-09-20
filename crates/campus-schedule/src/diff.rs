@@ -228,6 +228,57 @@ pub fn diff_courses(existing: &[Course], incoming: &[Course]) -> DiffResult {
     }
 }
 
+/// 教务已覆盖判定（每日自动导入的「教务为准」清理与置换采纳校验共用）：
+/// 存在未停开的导入课程，在教学周 `week` 的 `weekday`（1=周一 … 7=周日）有课。
+/// 依据（2026-09-20 取证）：教务 kbList 以「新增同教学班条目（xqj=7、zcd 锁定
+/// 补课周）」表达调休补课——置换日所在教学周该星期有教务课 ⇒ 调休已进本地
+/// 课表，同一事实的公告置换表达即冗余。
+pub fn weekday_covered(courses: &[Course], week: u32, weekday: u8) -> bool {
+    courses.iter().any(|c| {
+        c.source == CourseSource::Import && !c.disabled && c.day == weekday && c.weeks.contains(&week)
+    })
+}
+
+/// 冗余 extra override 判定（导入后清理）：公告「补课」override 的新时段与
+/// 教务课表已有的导入课程条目完全重合（同名、双方都有 jxb_id 时要求一致、
+/// 同星期同起止小节、override 周次全覆盖）⇒ 教务已表达该次补课，override
+/// 冗余应删，否则同格重复渲染（2026-09-20 用户报「同一门课挤在同一格」）。
+/// 原课已删除（course_id 失配）的 override 不判冗余，保守保留。
+pub fn redundant_extra_override_ids(
+    courses: &[Course],
+    overrides: &[crate::model::CourseOverride],
+) -> Vec<String> {
+    use crate::model::OverrideKind;
+    let by_id: std::collections::HashMap<&str, &Course> =
+        courses.iter().map(|c| (c.id.as_str(), c)).collect();
+    overrides
+        .iter()
+        .filter(|ov| {
+            if ov.change_type != OverrideKind::Extra {
+                return false;
+            }
+            let Some(origin) = by_id.get(ov.course_id.as_str()) else {
+                return false;
+            };
+            let day = ov.new_day.unwrap_or(origin.day);
+            let (Some(s), Some(e)) = (ov.new_start_section, ov.new_end_section) else {
+                return false;
+            };
+            courses.iter().any(|c| {
+                c.source == CourseSource::Import
+                    && !c.disabled
+                    && c.name == origin.name
+                    && (origin.class_id.is_none() || c.class_id == origin.class_id)
+                    && c.day == day
+                    && c.start_section == Some(s)
+                    && c.end_section == Some(e)
+                    && ov.weeks.iter().all(|w| c.weeks.contains(w))
+            })
+        })
+        .map(|ov| ov.id.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +498,68 @@ mod tests {
         assert_eq!((r.added, r.removed), (0, 1));
         assert_eq!(r.courses.iter().filter(|c| !c.disabled).count(), 1);
         assert_eq!(r.courses.iter().filter(|c| c.disabled).count(), 1);
+    }
+
+    /// weekday_covered：该周该星期有未停开导入课才算已覆盖（2026-09-20 取证口径）。
+    #[test]
+    fn weekday_covered_matches_import_course_in_week() {
+        let mut c = course("default-a", "信息安全", Some("A"));
+        c.day = 7;
+        c.weeks = vec![2];
+        assert!(weekday_covered(&[c.clone()], 2, 7));
+        // 周次不含 → 未覆盖
+        assert!(!weekday_covered(&[c.clone()], 5, 7));
+        // Manual 不算教务覆盖
+        let mut m = c.clone();
+        m.source = CourseSource::Manual;
+        assert!(!weekday_covered(&[m.clone()], 2, 7));
+        // 停开不算
+        let mut d = c.clone();
+        d.disabled = true;
+        assert!(!weekday_covered(&[d], 2, 7));
+    }
+
+    /// redundant_extra_override_ids：与教务条目完全重合的 extra 判冗余；
+    /// 时段不同 / jxb 不同 / Manual 重合 / rescheduled 类型都不算。
+    #[test]
+    fn redundant_extra_requires_exact_overlap() {
+        use crate::model::{CourseOverride, OverrideKind};
+        let ov = |id: &str, course_id: &str, day: u8| CourseOverride {
+            id: id.into(),
+            course_id: course_id.into(),
+            weeks: vec![5],
+            change_type: OverrideKind::Extra,
+            new_day: Some(day),
+            new_start_section: Some(3),
+            new_end_section: Some(4),
+            new_position: None,
+            source_notice_id: "n1".into(),
+            auto_applied: true,
+        };
+        let mut origin = course("old-1", "信息安全", Some("A"));
+        origin.day = 1; // 原课周一
+        let mut swaped = course("new-swap", "信息安全", Some("A"));
+        swaped.day = 7; // 教务调休条目：周日 3-4 节第 5 周
+        swaped.weeks = vec![5];
+        // 教务已排周日 3-4 → extra(周日 3-4) 冗余
+        assert_eq!(
+            redundant_extra_override_ids(&[origin.clone(), swaped.clone()], &[ov("o1", "old-1", 7)]),
+            vec!["o1"]
+        );
+        // 教务没排周日 → 保留
+        assert!(redundant_extra_override_ids(&[origin.clone()], &[ov("o1", "old-1", 7)]).is_empty());
+        // 时段不同 → 保留
+        let mut other = swaped.clone();
+        other.start_section = Some(5);
+        other.end_section = Some(6);
+        assert!(redundant_extra_override_ids(&[origin.clone(), other], &[ov("o1", "old-1", 7)]).is_empty());
+        // jxb 不一致的同名条目 → 不算覆盖（保守保留）
+        let mut other_jxb = swaped.clone();
+        other_jxb.class_id = Some("B".into());
+        assert!(redundant_extra_override_ids(&[origin.clone(), other_jxb], &[ov("o1", "old-1", 7)]).is_empty());
+        // 周次未全覆盖（教务只排第 5 周，override 还要第 7 周）→ 保留
+        let mut wide = ov("o1", "old-1", 7);
+        wide.weeks = vec![5, 7];
+        assert!(redundant_extra_override_ids(&[origin, swaped], &[wide]).is_empty());
     }
 }

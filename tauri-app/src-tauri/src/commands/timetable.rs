@@ -36,11 +36,13 @@
 use super::auth::CommandResult;
 use crate::infra::state::AppState;
 use crate::infra::{state, timetable};
-use campus_portal::{html_text, section_time_slots, ScheduleNoticeBrief};
+use campus_auth::cas::CasClient;
+use campus_portal::{html_text, section_time_slots, PortalClient, ScheduleNoticeBrief};
 use campus_schedule::model::{Course, CourseOverride, SlotRule, TimeSlot, Timetable};
 use campus_schedule::{
-    current_week, diff_courses, detect_date_swap, expand_occurrences, parse_kb_response,
-    parse_notice_text,
+    current_week, diff_courses, detect_date_swap, expand_occurrences, merge_holidays,
+    parse_kb_response, parse_notice_text, parse_timor_year, redundant_extra_override_ids,
+    weekday_covered,
     previous_or_same_day_of_week, semester_start_from_week, week_index_at_date, OccurrenceKind,
     NoticeConfidence, OverrideKind, Semester,
 };
@@ -48,7 +50,7 @@ use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tauri::State;
+use tauri::{Manager, State};
 
 /// 无会话时的约定文案（与 profile.rs / portal.rs 同口径）。
 const ERR_NO_SESSION: &str = "请先登录";
@@ -211,7 +213,79 @@ fn truncate_remark(remark: &mut Option<String>) {
     }
 }
 
-/// 从教务导入课表：SSO → 拉取 → diff 旧库 → 落库 → 返回变更摘要。
+/// 导入内核（命令与每日自动同步共用，2026-09-20 抽取）：SSO → 拉取 → diff →
+/// **教务为准清理** → 落库。清理口径（2026-09-20 取证：教务 kbList 以「新增同
+/// 教学班条目」表达调休补课）：① 撤销「教务已表达」的置换——swap.date 所在
+/// 教学周该星期已有导入课，同一事实的公告置换即冗余（用户报「同一门课挤在
+/// 同一格」的根源）；② 删除与教务条目完全重合的 extra override（旧逐课补课
+/// 方案的残留）。手动与自动导入成功都写 `last_auto_import`（当天不重复自动导）。
+pub(crate) async fn run_timetable_import(
+    client: CasClient,
+    tgt: Option<String>,
+    portal: PortalClient,
+) -> Result<ImportResult, String> {
+    // 学期信息（门户会话内已缓存）：推导口径 = 冻结契约 §1.2（不用 grade）
+    let sem = portal
+        .query_semester_info()
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(xnm) = sem
+        .start_date
+        .get(0..4)
+        .and_then(|s| s.parse::<u32>().ok())
+    else {
+        return Err("学期信息异常，无法推导学年".into());
+    };
+    let semester = match sem.semester.trim() {
+        "1" => Semester::First,
+        "2" => Semester::Second,
+        other => return Err(format!("暂不支持该学期序号（{other}）")),
+    };
+
+    // 拉取课表 JSON（内部：901 → TGT 静默重进 → 重试一次；仍失败 → JwglNotLogin，
+    // Display 文案「教务会话已失效，请重新登录」直接透出）
+    let json = client
+        .fetch_timetable_json(tgt.as_deref(), xnm, semester.xqm())
+        .await
+        .map_err(|e| e.to_string())?;
+    let incoming =
+        parse_kb_response(&json, timetable::DEFAULT_TABLE_ID).map_err(|e| e.to_string())?;
+
+    let dir = state::data_dir()?;
+    let old = timetable::load_timetable(&dir);
+    let diff = diff_courses(&old.courses, &incoming);
+
+    let mut tt = old;
+    // 用学期信息初始化/更新配置（契约 §17：同步口径收敛在纯函数，失败静默
+    // 保留旧值，不因个别字段坏数据丢课表）
+    apply_semester_info_to_config(&mut tt.config, &sem);
+    tt.courses = diff.courses;
+
+    if let Some(start) = tt.config.semester_start_date {
+        tt.config.swap_days.retain(|sw| {
+            let week = week_index_at_date(sw.date, start, tt.config.first_day_of_week);
+            // 置换日不在学期内（week < 1）→ 交由用户处置，不自动清
+            week < 1 || !weekday_covered(&tt.courses, week as u32, sw.weekday)
+        });
+    }
+    let redundant = redundant_extra_override_ids(&tt.courses, &tt.overrides);
+    if !redundant.is_empty() {
+        tt.overrides.retain(|ov| !redundant.contains(&ov.id));
+    }
+    tt.config.last_auto_import = Some(chrono::Local::now().date_naive());
+    tt.updated_at = chrono::Local::now().to_rfc3339();
+
+    timetable::save_timetable(&dir, &tt)?;
+    Ok(ImportResult {
+        added: diff.added,
+        changed: diff.changed,
+        removed: diff.removed,
+        total: tt.courses.len() as u32,
+        changes: diff.changes,
+    })
+}
+
+/// 从教务导入课表：SSO → 拉取 → diff 旧库 → 教务为准清理 → 落库 → 返回变更摘要。
 #[tauri::command]
 pub async fn import_timetable(
     state: State<'_, AppState>,
@@ -226,61 +300,8 @@ pub async fn import_timetable(
     let Some((client, tgt, portal)) = session else {
         return Ok(CommandResult::err(ERR_NO_SESSION));
     };
-
-    // 学期信息（门户会话内已缓存）：推导口径 = 冻结契约 §1.2（不用 grade）
-    let sem = portal.query_semester_info().await;
-    let sem = match sem {
-        Ok(s) => s,
-        Err(e) => return Ok(CommandResult::err(&e.to_string())),
-    };
-    let Some(xnm) = sem
-        .start_date
-        .get(0..4)
-        .and_then(|s| s.parse::<u32>().ok())
-    else {
-        return Ok(CommandResult::err("学期信息异常，无法推导学年"));
-    };
-    let semester = match sem.semester.trim() {
-        "1" => Semester::First,
-        "2" => Semester::Second,
-        other => {
-            return Ok(CommandResult::err(&format!("暂不支持该学期序号（{other}）")));
-        }
-    };
-
-    // 拉取课表 JSON（内部：901 → TGT 静默重进 → 重试一次；仍失败 → JwglNotLogin，
-    // Display 文案「教务会话已失效，请重新登录」直接透出）
-    let json = match client
-        .fetch_timetable_json(tgt.as_deref(), xnm, semester.xqm())
-        .await
-    {
-        Ok(j) => j,
-        Err(e) => return Ok(CommandResult::err(&e.to_string())),
-    };
-    let incoming = match parse_kb_response(&json, timetable::DEFAULT_TABLE_ID) {
-        Ok(c) => c,
-        Err(e) => return Ok(CommandResult::err(&e.to_string())),
-    };
-
-    let dir = state::data_dir()?;
-    let old = timetable::load_timetable(&dir);
-    let diff = diff_courses(&old.courses, &incoming);
-
-    let mut tt = old;
-    // 用学期信息初始化/更新配置（契约 §17：同步口径收敛在纯函数，失败静默
-    // 保留旧值，不因个别字段坏数据丢课表）
-    apply_semester_info_to_config(&mut tt.config, &sem);
-    tt.courses = diff.courses;
-    tt.updated_at = chrono::Local::now().to_rfc3339();
-
-    match timetable::save_timetable(&dir, &tt) {
-        Ok(()) => Ok(CommandResult::ok(ImportResult {
-            added: diff.added,
-            changed: diff.changed,
-            removed: diff.removed,
-            total: tt.courses.len() as u32,
-            changes: diff.changes,
-        })),
+    match run_timetable_import(client, tgt, portal).await {
+        Ok(r) => Ok(CommandResult::ok(r)),
         Err(e) => Ok(CommandResult::err(&e)),
     }
 }
@@ -1081,6 +1102,19 @@ pub async fn apply_swap_day(
                 candidate.date.format("%Y-%m-%d")
             ));
         }
+        // 公告辅助化（2026-09-20）：教务课表每天自动导入且以「新增同教学班
+        // 条目」表达调休——置换日所在教学周该星期已有导入课 ⇒ 教务已表达，
+        // 同一事实的公告置换不再采纳（防同格重复）。
+        if let Some(start) = tt.config.semester_start_date {
+            let week = week_index_at_date(candidate.date, start, tt.config.first_day_of_week);
+            if week >= 1 && weekday_covered(&tt.courses, week as u32, weekday) {
+                return Err(format!(
+                    "教务课表已包含 {}（周{}）的调休安排，以教务为准，无需采纳该置换",
+                    candidate.date.format("%Y-%m-%d"),
+                    weekday
+                ));
+            }
+        }
         let sw = campus_schedule::SwapDay {
             date: candidate.date,
             weekday,
@@ -1133,99 +1167,126 @@ pub struct HolidaysFetchResult {
     pub year: u32,
 }
 
-/// 一键拉取法定节假日（契约 §22，timor.tech 公开 API，时光课程表同源）：
-/// 拉当年 `holiday/year/{year}`，`holiday=true`（放假）的日期**并入**
-/// `skipped_dates`（去重；整体替换语义只对 `holiday_names` —— 节日名随官方
-/// 修订），节日名写入 `holiday_names` 供网格横幅/今日页显示。`holiday=false`
-/// （调休补班日）**忽略**——API 不说明补班日上哪天的课，置换日由公告解析
-/// （`apply_swap_day`）或手动编辑补全。失败中文透传，本地数据不动。
-#[tauri::command]
-pub async fn fetch_holidays() -> Result<CommandResult<HolidaysFetchResult>, String> {
-    let year = chrono::Local::now().year() as u32;
-    let url = format!("https://timor.tech/api/holiday/year/{year}");
+/// timor.tech 拉取用的浏览器 UA（无 UA 会被 Cloudflare 拦截，2026-09-20 实测）。
+const TIMOR_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36";
+
+/// 节假日拉取内核（命令与每日自动同步共用，2026-09-20 抽取；解析与合并下沉
+/// [`campus_schedule::parse_timor_year`] / [`campus_schedule::merge_holidays`]）：
+/// 当年 + 次年各拉一次 `holiday/year/{year}`（第一学期 9 月开学跨年，次年元旦
+/// 数据在次年才发布），`holiday=true`（放假）经 merge 并入 `skipped_dates`
+/// （刷新先剔除旧自动假日再并入新集，手动停课日不受影响），节日名写入
+/// `holiday_names` 供网格横幅/今日页显示。`holiday=false`（调休补班日）忽略
+/// ——补班日照常上课，上哪天的课由教务调休条目（每天自动导入）为准，公告
+/// 置换解析（`apply_swap_day`）只作教务未表达时的兜底。次年拉取失败宽容
+/// （当年数据照常落库）。失败中文透传，本地数据不动。
+/// ponytail: 与课表导入路径间无进程内互斥（沿用契约 §2.2 调用方串行假设），
+/// 后台 tick 与用户手动操作极端并发时后写覆盖，数据下次刷新自愈。
+pub(crate) async fn refresh_holidays_inner(
+    today: chrono::NaiveDate,
+) -> Result<HolidaysFetchResult, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36",
-        )
-        .send()
-        .await
-        .map_err(|_| "节假日服务连接失败，请检查网络".to_string())?;
-    if !resp.status().is_success() {
-        return Ok(CommandResult::err(&format!(
-            "节假日服务返回 HTTP {}",
-            resp.status()
-        )));
-    }
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|_| "节假日服务响应格式异常".to_string())?;
-    let Some(holidays) = v.get("holiday").and_then(|h| h.as_object()) else {
-        return Ok(CommandResult::err("节假日服务响应缺少 holiday 字段"));
-    };
-    // (date, name) 收集：holiday=true 才是放假日；日期取条目内 date 字段（含年）
-    let mut days: Vec<(NaiveDate, String)> = Vec::new();
-    for (k, entry) in holidays {
-        let is_hol = entry.get("holiday").and_then(|b| b.as_bool()).unwrap_or(false);
-        if !is_hol {
-            continue;
+    let this_year = today.year();
+    let mut days: Vec<campus_schedule::NamedDate> = Vec::new();
+    for year in [this_year, this_year + 1] {
+        let url = format!("https://timor.tech/api/holiday/year/{year}");
+        let resp = client
+            .get(&url)
+            .header("User-Agent", TIMOR_UA)
+            .send()
+            .await
+            .map_err(|_| "节假日服务连接失败，请检查网络".to_string())?;
+        if !resp.status().is_success() {
+            if year == this_year {
+                return Err(format!("节假日服务返回 HTTP {}", resp.status()));
+            }
+            continue; // 次年数据年底才发布，缺失不阻塞当年
         }
-        let date_str = entry
-            .get("date")
-            .and_then(|d| d.as_str())
-            .unwrap_or(k)
-            .to_string();
-        let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") else {
-            continue; // 形态异常的条目跳过，不致全批失败
-        };
-        let name = entry
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("法定节假日")
-            .to_string();
-        days.push((date, name));
+        let body = resp
+            .text()
+            .await
+            .map_err(|_| "节假日服务响应读取失败".to_string())?;
+        match parse_timor_year(&body) {
+            Ok(mut d) => days.append(&mut d),
+            Err(e) if year == this_year => return Err(e),
+            Err(_) => continue,
+        }
     }
     if days.is_empty() {
-        return Ok(CommandResult::err("节假日服务未返回 {year} 年放假数据"));
+        return Err("节假日服务未返回放假数据".into());
     }
-    days.sort_by_key(|(d, _)| *d);
-    days.dedup();
     let dir = state::data_dir()?;
-    let mut before_set: std::collections::HashSet<NaiveDate> = std::collections::HashSet::new();
-    let tt = timetable::load_timetable(&dir);
-    before_set.extend(tt.config.skipped_dates.iter().copied());
-    let added = days
-        .iter()
-        .filter(|(d, _)| !before_set.contains(d))
-        .count() as u32;
-    mutate_timetable(&dir, |tt| {
-        // skipped_dates 并集（手动条目与公告停课日不动）
-        let mut merged: Vec<NaiveDate> = tt.config.skipped_dates.clone();
-        for (d, _) in &days {
-            if !merged.contains(d) {
-                merged.push(*d);
-            }
-        }
-        merged.sort();
-        tt.config.skipped_dates = merged;
-        // holiday_names 整体替换为本次拉取结果（名随官方修订）
-        tt.config.holiday_names = days
-            .iter()
-            .map(|(d, name)| campus_schedule::NamedDate { date: *d, name: name.clone() })
-            .collect();
-        Ok(())
-    })?;
-    Ok(CommandResult::ok(HolidaysFetchResult {
+    let mut tt = timetable::load_timetable(&dir);
+    let before: std::collections::HashSet<NaiveDate> =
+        tt.config.skipped_dates.iter().copied().collect();
+    let added = days.iter().filter(|n| !before.contains(&n.date)).count() as u32;
+    let total = days.len() as u32;
+    let (skipped, named) = merge_holidays(
+        tt.config.skipped_dates.clone(),
+        &tt.config.holiday_names,
+        days,
+    );
+    tt.config.skipped_dates = skipped;
+    tt.config.holiday_names = named;
+    tt.config.last_holiday_fetch = Some(today);
+    timetable::save_timetable(&dir, &tt)?;
+    Ok(HolidaysFetchResult {
         added,
-        total: days.len() as u32,
-        year,
-    }))
+        total,
+        year: this_year as u32,
+    })
+}
+
+/// 一键拉取法定节假日（契约 §22，timor.tech 公开 API，时光课程表同源）。
+#[tauri::command]
+pub async fn fetch_holidays() -> Result<CommandResult<HolidaysFetchResult>, String> {
+    match refresh_holidays_inner(chrono::Local::now().date_naive()).await {
+        Ok(r) => Ok(CommandResult::ok(r)),
+        Err(e) => Ok(CommandResult::err(&e)),
+    }
+}
+
+/// 每日自动同步 tick（后台任务，2026-09-20）：① 法定节假日刷新（无需会话，
+/// 自己的闸 `last_holiday_fetch`）；② 教务课表导入（**教务为准**，闸
+/// `last_auto_import`，手动导入也写闸 → 当天不再重复）。无会话静默跳过——
+/// 绝不在后台拉起登录链路顶掉用户正在用的会话；失败只 warn，下小时重试。
+pub(crate) async fn auto_sync_tick(app: tauri::AppHandle) {
+    let today = chrono::Local::now().date_naive();
+    let Ok(dir) = state::data_dir() else {
+        return;
+    };
+    let tt = timetable::load_timetable(&dir);
+    if tt.config.last_holiday_fetch != Some(today) {
+        match refresh_holidays_inner(today).await {
+            Ok(r) => log::info!("[auto-sync] 法定节假日已更新（{} 天）", r.total),
+            Err(e) => log::warn!("[auto-sync] 法定节假日拉取失败：{e}"),
+        }
+    }
+    if tt.config.last_auto_import == Some(today) {
+        return;
+    }
+    let st = app.state::<AppState>();
+    let session = {
+        let guard = st.session.lock().await;
+        guard
+            .as_ref()
+            .map(|s| (s.client.clone(), s.tgt.clone(), s.portal.clone()))
+    };
+    let Some((client, tgt, portal)) = session else {
+        return;
+    };
+    match run_timetable_import(client, tgt, portal).await {
+        Ok(r) => log::info!(
+            "[auto-sync] 每日课表导入完成：新增 {} 变更 {} 停开 {}",
+            r.added,
+            r.changed,
+            r.removed
+        ),
+        Err(e) => log::warn!("[auto-sync] 每日课表导入失败：{e}"),
+    }
 }
 
 // ---------------- 批量操作：调课搬迁 / 快速删除（契约 §14，2026-09-19 批 8） ----------------
@@ -1917,6 +1978,15 @@ pub async fn save_skipped_dates(
         let mut ds = dates.clone();
         ds.sort();
         ds.dedup();
+        // 法定假日（holiday_names 记录的自动条目）不随手动编辑丢失：用户编辑
+        // 的只是手动停课日，自动假日要并入（2026-09-20 与每日节假日刷新配套）
+        for n in &tt.config.holiday_names {
+            if !ds.contains(&n.date) {
+                ds.push(n.date);
+            }
+        }
+        ds.sort();
+        ds.dedup();
         tt.config.skipped_dates = ds;
         Ok(tt.clone())
     }) {
@@ -2013,6 +2083,8 @@ mod tests {
                 show_non_current_week: false,
                 swap_days: vec![],
                 holiday_names: vec![],
+                last_auto_import: None,
+                last_holiday_fetch: None,
             },
             courses,
             overrides: vec![],

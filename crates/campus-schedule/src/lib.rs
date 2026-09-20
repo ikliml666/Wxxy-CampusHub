@@ -19,6 +19,7 @@
 
 pub mod diff;
 pub mod grid;
+pub mod holiday;
 pub mod model;
 pub mod notice;
 pub mod occurrence;
@@ -26,9 +27,12 @@ pub mod timeslots;
 pub mod weeks;
 pub mod zhengfang;
 
-pub use diff::{diff_courses, format_weeks, DiffResult};
+pub use diff::{
+    diff_courses, format_weeks, redundant_extra_override_ids, weekday_covered, DiffResult,
+};
 
 pub use grid::{grid_scale_to_time, merge_courses, time_to_grid_scale, MergedCourseBlock, ScheduleMode};
+pub use holiday::{merge_holidays, parse_timor_year};
 pub use model::{
     expand_week_mask, Course, CourseOverride, CourseSource, CourseTableConfig, NamedDate,
     OverrideKind, SwapDay, TimeSlot, Timetable,
