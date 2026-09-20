@@ -16,10 +16,17 @@ use crate::{CampusSynjonesError as Err, *};
 use base64::Engine;
 use md5::{Digest, Md5};
 
-/// fapi 根（与 `BERSERKER_BASE` 同一台内网服务器，服务不同）。
+/// fapi 根（与 `BERSERKER_BASE` 同一台内网服务器，服务不同；默认值，M4 路由下由
+/// [`fapi_base_of`] 按 client 的收口 base 现算）。
 pub const FAPI_BASE: &str = "http://10.3.100.110/fapi/";
 /// 官方 autoLogin 写死的 H5 账号密码（`isThird:true` 自动开设）。
 pub const FAPI_AUTO_PASSWORD: &str = "123456";
+
+/// client 视角的 fapi 根（M4 收口点）：`<业务 base>/fapi/`——校内等于 [`FAPI_BASE`]，
+/// 校外 WebVPN 模式是网关包装形态（`wrap_url` 保留 path，`/fapi/` 前缀原样生效）。
+pub fn fapi_base_of(client: &crate::SynjonesClient) -> String {
+    format!("{}/fapi/", client.base_url().trim_end_matches('/'))
+}
 
 /// fapi 请求头：`timeStamp` + `sign`（官方源码形态；当前服务端不校验）。
 fn sign_headers(path: &str) -> reqwest::header::HeaderMap {
@@ -62,12 +69,15 @@ fn encrypt_password(public_key_b64: &str, password: &str) -> Result<String, Err>
 /// fapi 登录：返回 `token` 与 `userId`。
 ///
 /// `username` 为学工号；`password` 用官方 autoLogin 约定（[`FAPI_AUTO_PASSWORD`]）。
+/// `fapi_base` 由调用方按 client 路由态给（[`fapi_base_of`]），HTTP 句柄用
+/// `client.effective_http()`（WebVPN 模式带网关 cookie）。
 async fn fapi_login(
     http: &reqwest::Client,
+    fapi_base: &str,
     username: &str,
 ) -> Result<(String, i64), Err> {
     let key: String = http
-        .get(format!("{FAPI_BASE}img/code/public/key"))
+        .get(format!("{fapi_base}img/code/public/key"))
         .send()
         .await
         .and_then(|r| r.error_for_status())
@@ -92,7 +102,7 @@ async fn fapi_login(
         ("isThird", "true".into()),
     ];
     let v: serde_json::Value = http
-        .post(format!("{FAPI_BASE}oauth/token"))
+        .post(format!("{fapi_base}oauth/token"))
         .header("Content-type", "application/x-www-form-urlencoded")
         .headers(sign_headers("oauth/token"))
         .form(&form)
@@ -152,11 +162,11 @@ pub async fn face_detail(client: &crate::SynjonesClient) -> Result<FaceDetail, E
     let token = client
         .token_snapshot()
         .ok_or_else(|| Err::Face("请先登录一卡通".into()))?;
-    let http = client.http_client();
+    let http = client.effective_http();
     let sno = sno_from_token(&token)?;
-    let (_, user_id) = fapi_login(http, &sno).await?;
+    let (_, user_id) = fapi_login(http, &fapi_base_of(client), &sno).await?;
     let v: serde_json::Value = http
-        .get(format!("{FAPI_BASE}oauth/detail"))
+        .get(format!("{}oauth/detail", fapi_base_of(client)))
         .query(&[("userId", user_id.to_string())])
         .headers(sign_headers("oauth/detail"))
         .send()
@@ -196,9 +206,10 @@ pub async fn replace_face(
     let token = client
         .token_snapshot()
         .ok_or_else(|| Err::Face("请先登录一卡通".into()))?;
-    let http = client.http_client();
+    let http = client.effective_http();
     let sno = sno_from_token(&token)?;
-    let (_, user_id) = fapi_login(http, &sno).await?;
+    let fapi = fapi_base_of(client);
+    let (_, user_id) = fapi_login(http, &fapi, &sno).await?;
     let path = format!("meeting/largeScreen/replaceFace/{user_id}");
     let part = reqwest::multipart::Part::bytes(photo.to_vec())
         .file_name("avatar.jpg")
@@ -208,7 +219,7 @@ pub async fn replace_face(
         .part("avatar", part)
         .text("userId", user_id.to_string());
     let resp = http
-        .post(format!("{FAPI_BASE}{path}"))
+        .post(format!("{fapi}{path}"))
         .headers(sign_headers(&path))
         .multipart(form)
         .send()
@@ -243,5 +254,25 @@ mod tests {
         let mut h2 = Md5::new();
         h2.update(format!("/oauth/token-@-{ts}"));
         assert_eq!(format!("{:x}", h2.finalize()), expect);
+    }
+
+    /// fapi 根收口：校内直连 = 默认常量；WebVPN base 覆盖时跟随到网关形态。
+    #[test]
+    fn fapi_base_follows_client_base_override() {
+        let mut c = crate::client::SynjonesClient::new(
+            campus_auth::cas::CasClient::new().expect("创建 CasClient 失败"),
+            None,
+            None,
+        );
+        assert_eq!(fapi_base_of(&c), FAPI_BASE, "直连应等于默认常量");
+        c.set_webvpn(
+            Some("https://webvpn.cwxu.edu.cn/http/77726476706e69737468656265737421a1a70fcf696138003059d8fc".to_string()),
+            None,
+        );
+        assert_eq!(
+            fapi_base_of(&c),
+            "https://webvpn.cwxu.edu.cn/http/77726476706e69737468656265737421a1a70fcf696138003059d8fc/fapi/",
+            "WebVPN 模式 fapi 根应跟随覆盖 base"
+        );
     }
 }

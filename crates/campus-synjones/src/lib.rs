@@ -39,6 +39,16 @@ pub mod recharge;
 pub mod sso;
 pub mod turnover;
 
+/// WebVPN 校外路由门面（M4）：转发 campus-webvpn 的路由决策、URL 包装与会话类型。
+///
+/// campus-hub 的命令层只依赖本 crate（其 `src-tauri/Cargo.toml` 不在本批改动范围，
+/// 不直接依赖 campus-webvpn）；[`NetZone`] 与应用层 `infra::net_zone::NetZone` 同构，
+/// 由调用方逐变体映射。
+pub mod routing {
+    pub use campus_webvpn::route::{route, NetZone, RouteDecision};
+    pub use campus_webvpn::{wrap_url, GATEWAY, WebVpnSession};
+}
+
 pub use charge::{
     list_feeitems, query_cascade, Choice, ElectricityQuery, ElectricityView, FeeItem, Field,
     RoomStep,

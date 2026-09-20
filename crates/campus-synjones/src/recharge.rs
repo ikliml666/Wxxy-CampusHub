@@ -613,6 +613,12 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// 自带最小头组（`synjones-auth` + `synAccessSource`）与「明确拒绝→静默重进→重发一次」纪律
 /// （与 `client.rs::send` 同口径，只是这里不需要 form 与 `Envelope` 之外的设施）。
 /// 不共享 `CasClient` 的 Cookie jar：实测该端点只认 token 头（裸 reqwest client 即可成功）。
+///
+/// base 与 HTTP 句柄经 client 的 M4 收口点取（[`SynjonesClient::base_url`]/
+/// [`SynjonesClient::effective_http`]）：WebVPN 模式下自动落到网关包装 base + 网关
+/// cookie jar 的 client，本函数无感知。静默重进的 401 语义两条链路一致（业务后端
+/// 明确拒绝 ⇒ 未产生副作用），不因 WebVPN 模式改变（网关层失效表现为非 JSON 落点，
+/// 归 Parse/Http，本就不触发重进）。
 async fn json_post(
     client: &SynjonesClient,
     path: &str,
@@ -624,8 +630,9 @@ async fn json_post(
             Some(t) => t,
             None => client.reenter().await?,
         };
-        let resp = reqwest::Client::new()
-            .post(format!("{}{path}", crate::BERSERKER_BASE))
+        let resp = client
+            .effective_http()
+            .post(format!("{}{path}", client.base_url()))
             .header("synjones-auth", token.auth_value())
             .header("synAccessSource", crate::SYN_ACCESS_SOURCE)
             .json(body)

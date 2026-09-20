@@ -1,0 +1,30 @@
+[package]
+name = "campus-webvpn"
+version = "0.1.0"
+edition = "2021"
+description = "深澜(Srun) WebVPN：AES-128-CFB host 加密 URL 包装 + 会话层（CAS 联动登录/探活）"
+license = "Apache-2.0"
+
+[dependencies]
+aes = "0.8"
+# CFB128（全块段）：流式模式无 padding，密文长度 = 明文长度；加解密同为 keystream 异或
+cfb-mode = "0.8"
+hex = "0.4"
+thiserror = "2"
+url = "2"
+# 会话层：TGT 换 ST 复用 campus-auth 的 CasClient::sso_ticket 与 WEBVPN_SERVICE 常量
+campus-auth = { path = "../campus-auth" }
+# 会话层 HTTP（与 campus-auth 同 features，rustls 免系统 OpenSSL）
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "cookies",
+    "charset",
+] }
+
+[dev-dependencies]
+# webvpn_session_live.rs 的 #[tokio::test] 运行时
+tokio = { version = "1", features = ["rt", "macros"] }
+# live 探针：CAS 登录（kaptcha PNG 解码 + base64）复用 campus-auth 的验证码求解
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }

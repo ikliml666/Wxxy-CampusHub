@@ -8,6 +8,8 @@ license = "Apache-2.0"
 [dependencies]
 # 复用 CAS 会话：CasClient::sso_ticket 换票 + sso_follow 手动跟随 302 链（共用同一 Cookie jar）
 campus-auth = { path = "../campus-auth" }
+# M4 校外路由：WebVPN 会话句柄（SSO 桥逐跳包装跟随）+ URL 包装（base 覆盖形态）
+campus-webvpn = { path = "../campus-webvpn" }
 # 版本与 features 照抄 campus-auth/campus-portal（内网明文 IP 也需 rustls-tls 的 client 构建能力）
 reqwest = { version = "0.12", default-features = false, features = [
     "json",

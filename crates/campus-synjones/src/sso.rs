@@ -40,6 +40,7 @@ use crate::{
     CampusSynjonesError, SynjonesToken, BERSERKER_BASE, LY_CAS_REDIRECT_PATH, LY_CAS_SERVICE_PREFIX,
 };
 use campus_auth::cas::CasClient;
+use campus_webvpn::{wrap_url, WebVpnSession, GATEWAY};
 
 /// 默认 targetUrl 路径：**一卡通子应用首页**。
 ///
@@ -152,6 +153,61 @@ pub async fn sso_token(
     })
 }
 
+/// WebVPN 回跳链的入口 URL（纯函数供单测）：`wrap_url(service & ticket=ST)`。
+///
+/// - **service 本身不参与换票包装**：换票 `POST {CAS_BASE}/v1/tickets/{TGT}` 走公网
+///   CAS（`wxcas.cwxu.edu.cn` 校外可达），service 必须保持 CAS 注册的内网原值；
+/// - **回跳入口才包装**：`GET service&ticket=ST` 这一步要真正打到 lyCas（内网），
+///   校外经网关代理；`WebVpnSession::follow_wrap` 对链中每一跳 Location 同样先判后包
+///   （幂等：Location 可能已是网关包装形态）。
+/// - ticket 用 `&` 追加（lyCas service 自带 query）+ form_urlencoded 编码，与
+///   `campus_webvpn::session::login_redirect_url` 同款。
+pub fn vpn_entry_url(service: &str, ticket: &str) -> Result<String, campus_webvpn::WebVpnError> {
+    let mut u = reqwest::Url::parse(service)
+        .map_err(campus_webvpn::WebVpnError::InvalidUrl)?;
+    u.query_pairs_mut().append_pair("ticket", ticket);
+    wrap_url(u.as_str(), GATEWAY)
+}
+
+/// CAS TGT → 慧新E校 token（SSO 桥，**校外 WebVPN 链路**）。
+///
+/// 与 [`sso_token`] 的差异只在回跳链的走向：换票同款（CAS 公网可达、service 原值），
+/// 回跳链入口经网关包装、由 [`WebVpnSession::follow_wrap`] 手动跟随且**每一跳 Location
+/// 都先判后包**。token 仍从落点 URL query 提取（`wrap_url` 原样保留 query，提取逻辑
+/// 与校内链路完全同源）。`vpn` 用网关侧 cookie jar（WebVPN 登录态），与 CAS jar 互不污染。
+pub async fn sso_token_via(
+    cas: &CasClient,
+    tgt: &str,
+    target_url: &str,
+    vpn: &WebVpnSession,
+) -> Result<SynjonesToken, CampusSynjonesError> {
+    let service = ly_cas_service_url(target_url);
+    let st = cas
+        .sso_ticket(tgt, &service)
+        .await
+        .map_err(|e| CampusSynjonesError::SsoFailed(crate::redact_secrets(&format!(
+            "CAS 换票失败（TGT 可能已过期）：{e}"
+        ))))?;
+    let entry = vpn_entry_url(&service, &st).map_err(|e| {
+        CampusSynjonesError::SsoFailed(crate::redact_secrets(&format!(
+            "回跳入口包装失败：{e}"
+        )))
+    })?;
+    let landing = vpn.follow_wrap(&entry).await.map_err(|e| {
+        CampusSynjonesError::SsoFailed(crate::redact_secrets(&format!(
+            "跟随 lyCas 回跳链失败（WebVPN）：{e}"
+        )))
+    })?;
+    extract_token_from_url(&landing).ok_or_else(|| {
+        CampusSynjonesError::SsoFailed(format!(
+            "落点未携带 token（host={:?} path={} query 键={:?}），请重新登录后重试",
+            landing.host_str(),
+            landing.path(),
+            query_keys(&landing)
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +279,26 @@ mod tests {
         let keys = query_keys(&u);
         assert_eq!(keys, vec!["a".to_string(), "synjones-auth".to_string()]);
         assert!(!format!("{keys:?}").contains("SECRET"));
+    }
+
+    /// WebVPN 回跳入口：service 保持内网原值参与 targetUrl，仅整条回跳 URL 被网关包装，
+    /// ticket 以 `&` 追加且编码；幂等性（已包装形态原样通过）同样成立。
+    #[test]
+    fn vpn_entry_url_wraps_service_and_appends_ticket() {
+        let service = ly_cas_service_url("http://10.3.100.110/charge-pc/pays/450");
+        let entry = vpn_entry_url(&service, "ST-abc123").expect("应包装成功");
+        let hex = campus_webvpn::encrypt_host("10.3.100.110");
+        assert_eq!(
+            entry,
+            format!(
+                "{GATEWAY}/http/{hex}/berserker-auth/cas/login/lyCas?targetUrl=http%3A%2F%2F10.3.100.110%2Fcharge-pc%2Fpays%2F450&ticket=ST-abc123"
+            )
+        );
+        // ticket 特殊字符被编码（防御性，与 login_redirect_url 同款）；
+        // 裸前缀无 query → 用 `?` 追加（正式链路 service 自带 targetUrl → `&`，上面已验证）
+        let entry2 = vpn_entry_url(&LY_CAS_SERVICE_PREFIX, "ST a+b").expect("应包装成功");
+        assert!(entry2.ends_with("?ticket=ST+a%2Bb"), "实际 {entry2}");
+        // 幂等：已是网关形态的入口原样通过（follow_wrap 逐跳同理）
+        assert_eq!(vpn_entry_url(&entry, "ST-x").unwrap(), format!("{entry}&ticket=ST-x"));
     }
 }

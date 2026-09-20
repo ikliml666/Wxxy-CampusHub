@@ -454,9 +454,18 @@ pub fn balance_from_fields(fields: &[Field]) -> (Option<f64>, String) {
 /// 不走 [`SynjonesClient`]（其 `get` 强制 `ensure_token`）——匿名端点不该要求会话。
 /// 头组仍照客户端惯例双份携带 `synAccessSource`（实测匿名四种组合皆 200，此处防学校侧后续收紧）。
 pub async fn list_feeitems(cas: &CasClient) -> Result<Vec<FeeItem>, CampusSynjonesError> {
-    let resp = cas
-        .http_client()
-        .get(format!("{BERSERKER_BASE}{EP_FEEITEM}"))
+    list_feeitems_via(cas.http_client(), BERSERKER_BASE).await
+}
+
+/// 片区目录的**路由版**（M4）：HTTP 句柄与 base 由调用方给——校外 WebVPN 模式传
+/// `vpn.wrapped_client()` + 网关包装 base（匿名端点没有 client 路由态可借，命令层
+/// 直接注入）；校内传 CAS 的 client 与 [`BERSERKER_BASE`]（即 [`list_feeitems`]）。
+pub async fn list_feeitems_via(
+    http: &reqwest::Client,
+    base: &str,
+) -> Result<Vec<FeeItem>, CampusSynjonesError> {
+    let resp = http
+        .get(format!("{base}{EP_FEEITEM}"))
         .query(&[("synAccessSource", SYN_ACCESS_SOURCE)])
         .header("synAccessSource", SYN_ACCESS_SOURCE)
         .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")

@@ -5,8 +5,9 @@
 //! token 签发体系（PC 落点 token 调 plat 接口全 200），无需第二套会话。
 //! 探针取证见 `tests/plat_sso_probe_live.rs`。
 //!
-//! 红线：本模块只做**只读**面。写操作（下线设备 / 解绑校园卡 / 改手机号 / 改密码）
-//! 涉及账号安全与不可逆状态，各自单独实现并由用户显式触发，不在此顺路提供。
+//! 红线：写操作（下线设备 / 解绑校园卡 / 改手机号 / 改密码）**一律由用户显式触发**
+//! ——本模块只提供设备写操作两条（官方 bundle 取证见各函数注释），改手机号/改密码
+//! 涉短信验证码流程不在此实现。
 
 use crate::client::{Envelope, SynjonesClient};
 use crate::CampusSynjonesError;
@@ -124,4 +125,49 @@ pub async fn pay_code(
         .or_else(|| v.get("msg").and_then(Value::as_str))
         .unwrap_or("获取付款码失败");
     Err(CampusSynjonesError::Parse(msg.trim().to_string()))
+}
+
+// ---------------- 设备管理写操作（2026-09-20 官方 plat bundle 取证；由用户显式触发） ----------------
+
+/// 下线指定**已登录在线**设备（`POST /berserker-base/equipment/offlineEquipmentByUser`）。
+///
+/// 官方 bundle 证据（`/plat/js/searcher.89d412b9.js`，deviceManage 组件）：
+/// `this.$api.post("/berserker-base/equipment/offlineEquipmentByUser",{equipmentUserBh:t})`
+/// ——body 只有一个字段，值为设备条目 `id`（axios 默认 JSON，同本仓
+/// [`SynjonesClient::post_json`] 范式）。官方成功判定仅 `code===200`（无 retcode
+/// 第二层），故这里信封判定通过即成功；失败文案由信封层携带透出。
+///
+/// ⚠️ 写操作会真踢用户设备的登录态：live 验证只到「参数构造」为止（见
+/// `tests/plat_device_write_probe_live.rs`），真发必须由用户在前端显式触发。
+pub async fn offline_device(
+    client: &SynjonesClient,
+    equipment_user_bh: &str,
+) -> Result<(), CampusSynjonesError> {
+    client
+        .post_json(
+            "/berserker-base/equipment/offlineEquipmentByUser",
+            &[("equipmentUserBh", equipment_user_bh.to_string())],
+            Envelope::Berserker,
+        )
+        .await
+        .map(|_| ())
+}
+
+/// 移除指定**已授权**设备（`POST /berserker-base/equipment/removeEquipmentByUser`）。
+///
+/// 官方 bundle 证据（同上 searcher chunk，authorizedList 组件）：
+/// `this.$api.post("/berserker-base/equipment/removeEquipmentByUser",{equipmentUserBh:t})`
+/// ——报文形态与 [`offline_device`] 完全同构，仅端点不同。红线同上。
+pub async fn remove_device(
+    client: &SynjonesClient,
+    equipment_user_bh: &str,
+) -> Result<(), CampusSynjonesError> {
+    client
+        .post_json(
+            "/berserker-base/equipment/removeEquipmentByUser",
+            &[("equipmentUserBh", equipment_user_bh.to_string())],
+            Envelope::Berserker,
+        )
+        .await
+        .map(|_| ())
 }

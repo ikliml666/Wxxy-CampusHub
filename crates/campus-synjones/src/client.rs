@@ -14,9 +14,10 @@
 //! 统一归一为 [`CampusSynjonesError::NotLogin`]；首次命中时用 CAS TGT **静默重进桥一次**
 //! 并重试一次，仍失败才向上报 `NotLogin`（与 `campus-auth::jwglxt` 的既有范式一致）。
 
-use crate::sso::{default_target_url, sso_token};
+use crate::sso::{default_target_url, sso_token, sso_token_via};
 use crate::{CampusSynjonesError, SynjonesToken, BERSERKER_BASE, SYN_ACCESS_SOURCE};
 use campus_auth::cas::CasClient;
+use campus_webvpn::WebVpnSession;
 use serde_json::Value;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -103,7 +104,7 @@ pub fn parse_envelope(
     })
 }
 
-/// 慧新E校业务客户端。Clone 廉价（`CasClient` 与 reqwest client 均为 Arc 包装，共享 Cookie jar）。
+/// 慧新E校业务客户端。Clone 廉价（`CasClient`、reqwest client 与 `WebVpnSession` 均为 Arc 包装，共享 Cookie jar）。
 #[derive(Clone)]
 pub struct SynjonesClient {
     /// 已登录的 CAS 会话（共享其 `http_client` 与 Cookie jar）。
@@ -116,12 +117,49 @@ pub struct SynjonesClient {
     base: String,
     /// SSO 桥的 targetUrl。
     target_url: String,
+    /// 校外 WebVPN 路由覆盖（M4）：业务 base 覆盖（网关包装形态，去尾斜杠）。
+    /// `None` = 校内直连现状（[`BERSERKER_BASE`]）；全部 base 拼接点收口在 [`Self::base_url`]。
+    base_override: Option<String>,
+    /// 校外 WebVPN 会话（与 `base_override` 同步经 [`Self::set_webvpn`] 设置）：
+    /// 业务请求与 SSO 桥逐跳包装跟随共用它的网关 cookie jar。
+    vpn: Option<WebVpnSession>,
 }
 
 impl SynjonesClient {
     /// 共享 HTTP 客户端（fapi 人脸采集等旁路请求复用连接池）。
     pub fn http_client(&self) -> &reqwest::Client {
         self.cas.http_client()
+    }
+
+    /// **业务请求应使用的 HTTP 句柄**（M4 路由收口点）：WebVPN 模式返回网关会话的
+    /// 业务 client（网关 cookie jar），校内直连返回 CAS 的共享 client。
+    /// 旁路请求（fapi 人脸采集等不走 `get`/`post_*` 的）一律经本方法取句柄。
+    pub fn effective_http(&self) -> &reqwest::Client {
+        match &self.vpn {
+            Some(v) => v.wrapped_client(),
+            None => self.cas.http_client(),
+        }
+    }
+
+    /// 业务 base（M4 收口点）：WebVPN 模式返回网关包装形态，否则 [`BERSERKER_BASE`]。
+    /// 所有 base 拼接点（`get`/`post_form`/`post_json_vals`/`recharge::json_post`/fapi）必须经它。
+    pub fn base_url(&self) -> &str {
+        self.base_override.as_deref().unwrap_or(self.base.as_str())
+    }
+
+    /// 是否处于校外 WebVPN 路由模式（命令层据此给写路径追加「走官网」提示等）。
+    pub fn is_webvpn(&self) -> bool {
+        self.vpn.is_some()
+    }
+
+    /// 设置校外 WebVPN 路由态（命令层路由决策的唯一注入口）。
+    ///
+    /// - `base`：`wrap_url(BERSERKER_BASE, GATEWAY)` 去尾斜杠后的网关包装形态；
+    /// - `vpn`：与 base 同源的 WebVPN 会话（clone 与原实例共享网关 cookie jar，
+    ///   锁外使用安全）；校内直连传 `(None, None)` 即回到现状。
+    pub fn set_webvpn(&mut self, base: Option<String>, vpn: Option<WebVpnSession>) {
+        self.base_override = base;
+        self.vpn = vpn;
     }
 
     /// 当前 synjones token 快照（人脸采集要解 JWT 里的学号；None = 尚未登录）。
@@ -137,6 +175,8 @@ impl SynjonesClient {
             token: std::sync::Arc::new(Mutex::new(token)),
             base: BERSERKER_BASE.to_string(),
             target_url: default_target_url(),
+            base_override: None,
+            vpn: None,
         }
     }
 
@@ -168,11 +208,18 @@ impl SynjonesClient {
     }
 
     /// 静默重进：无视缓存重新走 SSO 桥，成功后刷新缓存。
+    ///
+    /// WebVPN 模式走 [`sso_token_via`]（逐跳包装跟随，复用网关 cookie jar），校内
+    /// 直连走 [`sso_token`]（现状链路）——两条链的换票 service 都是 CAS 注册的内网
+    /// 原值（CAS 公网可达，service 值不参与包装，见 `sso.rs`）。
     pub async fn reenter(&self) -> Result<SynjonesToken, CampusSynjonesError> {
         let Some(tgt) = self.tgt.as_deref() else {
             return Err(CampusSynjonesError::NotLogin);
         };
-        let token = sso_token(&self.cas, tgt, &self.target_url).await?;
+        let token = match &self.vpn {
+            Some(v) => sso_token_via(&self.cas, tgt, &self.target_url, v).await?,
+            None => sso_token(&self.cas, tgt, &self.target_url).await?,
+        };
         if let Ok(mut g) = self.token.lock() {
             *g = Some(token.clone());
         }
@@ -198,9 +245,8 @@ impl SynjonesClient {
     ) -> Result<Value, CampusSynjonesError> {
         self.send(kind, |token| {
             let mut rb = Self::with_headers(
-                self.cas
-                    .http_client()
-                    .get(format!("{}{path}", self.base))
+                self.effective_http()
+                    .get(format!("{}{path}", self.base_url()))
                     .timeout(REQUEST_TIMEOUT),
                 token,
             );
@@ -224,9 +270,8 @@ impl SynjonesClient {
                 vec![("synAccessSource", SYN_ACCESS_SOURCE.to_string())];
             fields.extend(form.iter().map(|(k, v)| (*k, v.clone())));
             Self::with_headers(
-                self.cas
-                    .http_client()
-                    .post(format!("{}{path}", self.base))
+                self.effective_http()
+                    .post(format!("{}{path}", self.base_url()))
                     .timeout(REQUEST_TIMEOUT)
                     .form(&fields),
                 token,
@@ -275,9 +320,8 @@ impl SynjonesClient {
         let body = Value::Object(obj);
         self.send(kind, |token| {
             Self::with_headers(
-                self.cas
-                    .http_client()
-                    .post(format!("{}{path}", self.base))
+                self.effective_http()
+                    .post(format!("{}{path}", self.base_url()))
                     .timeout(REQUEST_TIMEOUT)
                     .json(&body),
                 token,
@@ -590,5 +634,55 @@ mod tests {
         assert!(matches!(e, CampusSynjonesError::NotLogin), "实际 {e:?}");
         // 桩只服务一条连接：能收到请求即证明「无 TGT 时不重试」
         assert!(rx.recv().is_ok());
+    }
+
+    // ---------- M4：WebVPN 路由注入 ----------
+
+    /// `set_webvpn` 注入的 base 覆盖对全部拼接路径生效：GET / POST form / POST JSON
+    /// 三条业务路径都打到 override 指向的桩（校内默认 base 不变由既有桩测试覆盖）。
+    #[tokio::test]
+    async fn base_override_redirects_all_request_kinds() {
+        let (base, rx) = stub(http_json(r#"{"code":200,"success":true,"data":{}}"#));
+        let mut c = SynjonesClient::new(
+            CasClient::new().expect("创建 CasClient 失败"),
+            None,
+            Some(SynjonesToken::bearer("T")),
+        );
+        c.set_webvpn(Some(base.clone()), None);
+        assert_eq!(c.base_url(), base, "base_url 应返回 override");
+        assert!(!c.is_webvpn(), "未给 vpn 会话时不算 WebVPN 模式（base-only 是测试形态）");
+
+        c.get("/a", &[], Envelope::Berserker).await.expect("GET 应成功");
+        assert!(rx.recv().expect("GET 未达桩").starts_with("GET /a"), "GET 应打 override");
+
+        let (base2, rx2) = stub(http_json(r#"{"code":200,"message":"ok"}"#));
+        c.set_webvpn(Some(base2.clone()), None);
+        c.post_form("/b", &[("k", "v".to_string())], Envelope::Charge)
+            .await
+            .expect("POST form 应成功");
+        assert!(rx2.recv().expect("POST form 未达桩").starts_with("POST /b"));
+
+        let (base3, rx3) = stub(http_json(r#"{"code":200,"data":{}}"#));
+        c.set_webvpn(Some(base3.clone()), None);
+        c.post_json("/c", &[("k", "v".to_string())], Envelope::Berserker)
+            .await
+            .expect("POST JSON 应成功");
+        assert!(rx3.recv().expect("POST JSON 未达桩").starts_with("POST /c"));
+    }
+
+    /// `set_webvpn(None, None)` 回到校内直连：base_url 回落默认值，is_webvpn 复位。
+    #[test]
+    fn clear_webvpn_restores_direct_base() {
+        let mut c = SynjonesClient::new(
+            CasClient::new().expect("创建 CasClient 失败"),
+            None,
+            Some(SynjonesToken::bearer("T")),
+        );
+        assert!(!c.is_webvpn(), "构造默认为直连");
+        c.set_webvpn(Some("https://webvpn.cwxu.edu.cn/http/x".to_string()), None);
+        assert_eq!(c.base_url(), "https://webvpn.cwxu.edu.cn/http/x", "override 生效");
+        c.set_webvpn(None, None);
+        assert!(!c.is_webvpn());
+        assert_eq!(c.base_url(), BERSERKER_BASE, "清掉 override 应回落内网 base");
     }
 }
