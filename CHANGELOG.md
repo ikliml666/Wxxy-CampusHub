@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 3 补验三：官方系统动态抓包对照——四处真 bug 修复 + 转账「学校未开通」实锤 + 人脸采集与设置页考察
+
+- **模块**：`crates/campus-synjones/src/{ecard_ops,ecard}.rs`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardTransferView,EcardCardOpsView}.tsx`、`tauri-app/frontend/src/shared/types.ts`
+- **背景**：用户报「官方一卡通系统里都能正常操作，是对接没做好」，并截图指出：查询键盘排版不便且经常「获取键盘失败」、输密码提交 404、转账选择框选中换不了、圈存无法开启、限额无法设置。用浏览器（browser-use + 请求记录器）走完整官方链路（融合门户 → 服务大厅 → 一卡通 → 支付设置/银行卡/转账页）**动态抓取官方真实报文**逐项对照
+- **修复 1（解挂 404）**：官方端点是**小写 `unlostCard`**，旧实现写成 `unLostCard`，该校路径大小写敏感 → 用户在解挂流程输完密码提交得到 `HTTP 404`。改回官方原文（`ecard_ops.rs` EP_UNLOST）
+- **修复 2（圈存「无法开启」的真相——写成功、读回解析错）**：官方 `queryCard` 卡级 `autotrans_flag` 真机实测为 **2**（自助及自动转账），旧解析 `== Some(1)` 把它读成 false → 用户提交圈存**其实已写入学校**，界面却显示「关闭」。改为**非 0 即开启**并新增 `autotrans_flag_kind` 原值透出（0/1/2），前端「当前」按官方档位文案显示（禁止/只允许自助/自助及自动）。`set_autotrans` 报文同时对齐官方抓包：`autotransFlag` 字符串、金额 **JSON number 分**、档位 1 不带 `autotransLimite`
+- **修复 3（转账选择框选中换不了）**：`queryCardByTransfer` 返回的 CARD/ACCOUNT 两账户 `account` 是**同一个卡号**（42940）→ 两 `<option>` 的 value 重复 → 选中后再也切不动。选项 value/key 改用唯一 `code`（CARD/ACCOUNT），提交仍按 code 找回完整账户对象
+- **修复 4（键盘排版 + 稳定性）**：91 键从四组摊平改为**分区 tab**（数字/大写/小写/符号，默认数字区、每键仍携全局下标、提交语义不变），真机点验切换正常；取键盘请求补上官方恒带的 `order=1` 参数，前端失败**自动重试一次**。另实测官方 Number 键盘真相：**10 个随机字符**、无刷新按钮、输错换批——官方原生体验本就如此，我们保留 Standard 全键盘是合理替代
+- **限额报文 number 化**：官方抓包 `{"account":"42940","acctype":"000","daycostlimit":50000,...}` 金额为 JSON number 分；`set_limits` 从字符串切换为 number（`yuan_to_fen_str` 随之删除，浮点陷阱口径由单测钉住）。`check_pwd` 确认本就是 GET+query 与官方一致（实测错误密码返回业务错误 `60005 账户密码错误`，非 404）；`modify_pwd` 实测业务报错 `1008 两次输入不一致`，端点亦通
+- **转账「学校侧未开通」实锤**：官方 PC 前端 `/transfer` 页在本校当前环境下同样报「服务大厅未授权(1)」+「该卡没有可转入的卡」+ JS 异常——官方自己也用不了；维持「端点协议正确、该校未开通」判定，待学校开通后无需改代码
+- **新功能考察（结论已写入 wiki，实现留待下一轮）**：① **人脸采集**=独立 H5（`/overLightMobileH5`，uni-app），表单形态：姓名/手机号/学工号只读 + 点击上传照片 + 确认；接口 `POST /fapi/meeting/largeScreen/faceAcquisition/{userId}`（采集，multipart 字段 `avatar`）与 `replaceFace/{userId}`（替换），前置 `checkFaceScore` 校验人脸分数，token 为 H5 应用自有体系（对接需验证鉴权链）② **「我的-设置」页选项**（`/plat/user/setup`）：个人资料、安全设置（手机号+登录密码）、支付设置（脱机二维码开关 `getUserOfflienSwitch`、付款码支付顺序、校园卡支付设置=转账标识+限额——我们已有）、设备管理、通用、关于、换账号、清缓存、退出
+- **用户账户状态**：官方页验证操作已全部还原——限额 500→0（官方报文 retcode=0）、圈存 flag 2→1→2、金额 20/20 未动；本校 dev 应用仅发过错误密码协议探针（无风险）
+- **验证**：`cargo test --workspace` 全绿（22 个套件 0 failed）、`tsc --noEmit` 零错误；真机 CDP 点验——转账选择框 `CARD→ACCOUNT` 可自由切换、键盘四分区 tab 渲染与切换正常、圈存档位读回 `flag:true, kind:2`
+
 ## 2026-09-20 · M4.5 批 3 补验二：写操作协议实测修正（form→JSON body）+ 限额真机打通 + 限额不回显的界面修复 + 转账结论
 
 - **模块**：`crates/campus-synjones/src/{client,ecard_ops}.rs`、`tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx`（本轮 Rust 改动仅前两个文件）

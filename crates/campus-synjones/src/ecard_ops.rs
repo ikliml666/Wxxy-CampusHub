@@ -201,8 +201,14 @@ pub async fn fetch_secure_keyboard(
     client: &SynjonesClient,
     kind: KeyboardKind,
 ) -> Result<SecurePad, CampusSynjonesError> {
+    // 官方恒带 `order=1`（bundle 全部调用点 `keyboardOptions:{types,order:1}`），
+    // 与官方完全对齐（不带该参数曾出现间歇性失败的用户报告）。
     let v = client
-        .get(EP_KEYBOARD, &[("type", kind.type_param())], Envelope::Berserker)
+        .get(
+            EP_KEYBOARD,
+            &[("type", kind.type_param()), ("order", "1")],
+            Envelope::Berserker,
+        )
         .await?;
     let (uuid, keys, images) = parse_keyboard(&v["data"]).ok_or_else(|| {
         CampusSynjonesError::Parse("安全键盘响应缺少 uuid 或键位数据".to_string())
@@ -219,7 +225,9 @@ pub async fn fetch_secure_keyboard(
 
 /// 一卡通写操作端点（`/berserker-app/ykt/tsm/*`）。
 pub const EP_LOST: &str = "/berserker-app/ykt/tsm/lostCard";
-pub const EP_UNLOST: &str = "/berserker-app/ykt/tsm/unLostCard";
+/// ⚠️ 路径是**小写 `unlostCard`**（官方 bundle 原文）——该校路径大小写敏感，
+/// 旧实现的 `unLostCard` 在解挂提交时得到 `HTTP 404`（2026-09-20 官方动态抓包对照确认）。
+pub const EP_UNLOST: &str = "/berserker-app/ykt/tsm/unlostCard";
 pub const EP_CHECK_PWD: &str = "/berserker-app/ykt/tsm/checkPwd";
 pub const EP_MODIFY_PWD: &str = "/berserker-app/ykt/tsm/modifyPwd";
 pub const EP_SEND_FIND_PWD_VER: &str = "/berserker-app/ykt/tsm/sendfindPwdVer";
@@ -286,11 +294,6 @@ pub fn assemble_pwd(input: PasswordInput) -> Result<String, CampusSynjonesError>
         CampusSynjonesError::Parse("密码键盘已过期或不存在，请重新获取键盘后再输入".to_string())
     })?;
     build_pwd(&secret, &input.positions)
-}
-
-/// 元（前端口径）→ 分（协议口径）字符串。`0.1` 元必须得到 `"10"`（浮点陷阱：先 ×100 再取整）。
-fn yuan_to_fen_str(yuan: f64) -> String {
-    ((yuan * 100.0).round() as i64).to_string()
 }
 
 /// 写操作响应的**双层判定**第二层（第一层 `code==200` 已由 `client` 判过）：
@@ -440,18 +443,29 @@ pub async fn set_limits(
         // 无 `-` 的形态（服务端若改口径）：account 回落到调用方给的卡号，acctype 原样
         None => (account.to_string(), acc_type.to_string()),
     };
+    // 官方报文 2026-09-20 抓包：`{"account":"42940","acctype":"000","daycostlimit":50000,
+    // "nonpwdlimit":0,"singlelimit":0}`——金额是 **JSON number 分**。
+    let fen = |y: f64| serde_json::Value::Number(serde_json::Number::from((y * 100.0).round() as i64));
     let form = [
-        ("account", acc),
-        ("acctype", acct),
-        ("daycostlimit", yuan_to_fen_str(day_yuan)),
-        ("nonpwdlimit", yuan_to_fen_str(nonpwd_yuan)),
-        ("singlelimit", yuan_to_fen_str(single_yuan)),
+        ("account", serde_json::json!(acc)),
+        ("acctype", serde_json::json!(acct)),
+        ("daycostlimit", fen(day_yuan)),
+        ("nonpwdlimit", fen(nonpwd_yuan)),
+        ("singlelimit", fen(single_yuan)),
     ];
-    let v = client.post_json(EP_PAY_LIMITE_MODIFY, &form, Envelope::Berserker).await?;
+    let v = client
+        .post_json_vals(EP_PAY_LIMITE_MODIFY, &form, Envelope::Berserker)
+        .await?;
     require_retcode_ok(&v)
 }
 
-/// 转账标识（`autotransFlag` + 金额**分**；`limite_yuan` 为 None 时不带 `autotransLimite`）。
+/// 转账标识（圈存）。
+///
+/// 官方报文 2026-09-20 抓包（真实提交、`retcode=0`）：
+/// - flag=1：`{"account","autotransFlag":"1","autotransAmt":2000}`（**不带 limite**）
+/// - flag=2：`{"account","autotransFlag":"2","autotransAmt":2000,"autotransLimite":2000}`
+///
+/// 要点：`autotransFlag` 是**字符串**；金额是 **JSON number 分**。
 pub async fn set_autotrans(
     client: &SynjonesClient,
     account: &str,
@@ -459,15 +473,18 @@ pub async fn set_autotrans(
     amt_yuan: f64,
     limite_yuan: Option<f64>,
 ) -> Result<(), CampusSynjonesError> {
+    let fen = |y: f64| serde_json::Value::Number(serde_json::Number::from((y * 100.0).round() as i64));
     let mut form = vec![
-        ("account", account.to_string()),
-        ("autotransFlag", flag.to_string()),
-        ("autotransAmt", yuan_to_fen_str(amt_yuan)),
+        ("account", serde_json::json!(account)),
+        ("autotransFlag", serde_json::json!(flag.to_string())),
+        ("autotransAmt", fen(amt_yuan)),
     ];
     if let Some(l) = limite_yuan {
-        form.push(("autotransLimite", yuan_to_fen_str(l)));
+        form.push(("autotransLimite", fen(l)));
     }
-    let v = client.post_json(EP_MODIFY_ACC, &form, Envelope::Berserker).await?;
+    let v = client
+        .post_json_vals(EP_MODIFY_ACC, &form, Envelope::Berserker)
+        .await?;
     require_retcode_ok(&v)
 }
 
@@ -801,14 +818,17 @@ mod tests {
             .expect("数字 0 应成功");
     }
 
-    /// 元 → 分换算：`0.1` 元必须得 `"10"`（浮点陷阱钉死）；79.96 → 7996；整数元亦然。
+    /// 元 → 分换算的浮点陷阱（`0.1` 元必须得 10 分；`0.29`×100=28.999… round 后 29）。
+    /// 现在金额统一走 JSON number（`set_limits`/`set_autotrans` 内联 `(y*100).round()`），
+    /// 该口径用同样的算式钉在这里。
     #[test]
     fn yuan_to_fen_handles_float_traps() {
-        assert_eq!(yuan_to_fen_str(0.1), "10");
-        assert_eq!(yuan_to_fen_str(0.29), "29", "0.29×100=28.999…，round 后必须 29");
-        assert_eq!(yuan_to_fen_str(79.96), "7996");
-        assert_eq!(yuan_to_fen_str(100.0), "10000");
-        assert_eq!(yuan_to_fen_str(0.0), "0");
+        let fen = |y: f64| (y * 100.0).round() as i64;
+        assert_eq!(fen(0.1), 10);
+        assert_eq!(fen(0.29), 29, "0.29×100=28.999…，round 后必须 29");
+        assert_eq!(fen(79.96), 7996);
+        assert_eq!(fen(100.0), 10000);
+        assert_eq!(fen(0.0), 0);
     }
 
     /// PasswordInput 的 PartialEq/Clone 形态（命令层要按参数重组它）。

@@ -26,6 +26,7 @@
 - [[learnings\ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘机制]]
 - [[learnings\meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]
 - [[learnings\history-dedupe-not-by-adjacent-sort|历史去重不能靠「排序后看相邻」（同 id 会被别的房间插在中间）]]
+- [[learnings\official-ecard-packet-capture-parity|官方一卡通动态抓包对照与对接修复（unlostCard 大小写 / flag 档位 / 账户 value 重复）]]
 - [[learnings\cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级设计（content.jsp 系不可抓）]]
 - [[learnings\portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工（受保护资源与两种白名单）]]
 - [[learnings\synjones-charge-yuan-vs-fen-and-pending-orders|慧新E校 charge 侧金额是元、一卡通侧是分；待支付单「恒 500」旧结论已推翻]]

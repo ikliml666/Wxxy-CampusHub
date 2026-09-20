@@ -35,6 +35,8 @@ export function EcardTransferView({ onChanged }: { onChanged: () => void }) {
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
 
+  // ⚠️ 选项的 value 用 `code`（CARD/ACCOUNT）而不是 `account`——本校两账户的
+  // `account` 是同一个卡号（42940），value 重复会导致 select 选中后再也换不了。
   const [srcAcc, setSrcAcc] = useState("");
   const [dstAcc, setDstAcc] = useState("");
   const [amount, setAmount] = useState("");
@@ -61,8 +63,8 @@ export function EcardTransferView({ onChanged }: { onChanged: () => void }) {
     void load();
   }, []);
 
-  const src = list?.find((a) => a.account === srcAcc) ?? null;
-  const dst = list?.find((a) => a.account === dstAcc) ?? null;
+  const src = list?.find((a) => a.code === srcAcc) ?? null;
+  const dst = list?.find((a) => a.code === dstAcc) ?? null;
 
   const amountErr = (() => {
     const s = amount.trim();
@@ -205,7 +207,7 @@ export function EcardTransferView({ onChanged }: { onChanged: () => void }) {
             {list
               .filter((a) => a.canTransferOut && !a.lostFlag)
               .map((a) => (
-                <option key={a.account} value={a.account}>
+                <option key={a.code} value={a.code}>
                   {a.label}（余额 ¥ {a.balanceYuan.toFixed(2)}）
                 </option>
               ))}
@@ -229,7 +231,7 @@ export function EcardTransferView({ onChanged }: { onChanged: () => void }) {
               选择转入账户
             </option>
             {list.map((a) => (
-              <option key={a.account} value={a.account} disabled={a.lostFlag}>
+              <option key={a.code} value={a.code} disabled={a.lostFlag}>
                 {a.label}
                 {a.lostFlag ? "（已挂失）" : ""}
               </option>

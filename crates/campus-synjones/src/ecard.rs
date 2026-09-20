@@ -258,8 +258,10 @@ pub struct CardDetail {
     pub acc_status: Option<i64>,
     /// 卡有效期（`expdate` 原文）。
     pub exp_date: String,
-    /// 自动转账（圈存）开关（`autotrans_flag == 1`）。
+    /// 自动转账（圈存）开关（**非 0 即开启**——官方真机实测档位 `2` 也表示开启）。
     pub autotrans_flag: bool,
+    /// 圈存档位原值（0=禁止 1=只允许自助 2=自助及自动；官方 setCard 页按此显示）。
+    pub autotrans_flag_kind: i64,
     /// 自动转账金额（元，`autotrans_amt` 分→元）。
     pub autotrans_amt_yuan: f64,
     /// 自动转账余额下限（元，`autotrans_limite` 分→元）。
@@ -289,7 +291,10 @@ pub fn parse_card_detail(v: &Value) -> CardDetail {
         frozen: int_of(v.get("freezeflag")) == Some(1),
         acc_status: int_of(v.get("acc_status")),
         exp_date: text_of(v.get("expdate")),
-        autotrans_flag: int_of(v.get("autotrans_flag")) == Some(1),
+        // ⚠️ 官方真机 queryCard 卡级 `autotrans_flag: 2` 表示「自助及自动转账」——
+        // 旧实现 `== Some(1)` 把它读成 false，圈存写入成功后界面仍显示「关闭」。
+        autotrans_flag: int_of(v.get("autotrans_flag")).unwrap_or(0) != 0,
+        autotrans_flag_kind: int_of(v.get("autotrans_flag")).unwrap_or(0),
         autotrans_amt_yuan: yuan(int_of(v.get("autotrans_amt")).unwrap_or(0)),
         autotrans_limite_yuan: yuan(int_of(v.get("autotrans_limite")).unwrap_or(0)),
         day_cost_limit_yuan: yuan(int_of(v.get("daycostlimit")).unwrap_or(0)),

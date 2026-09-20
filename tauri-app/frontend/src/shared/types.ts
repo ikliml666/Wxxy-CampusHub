@@ -891,8 +891,10 @@ export interface EcardCard {
   frozen: boolean;
   accStatus: number | null;
   expDate: string;
-  /** 自动转账（圈存）开关 */
+  /** 自动转账（圈存）开关（官方档位 1/2 都算开启） */
   autotransFlag: boolean;
+  /** 圈存档位原值（0=禁止 1=只允许自助 2=自助及自动） */
+  autotransFlagKind: number;
   autotransAmtYuan: number;
   autotransLimiteYuan: number;
   dayCostLimitYuan: number;

@@ -599,6 +599,12 @@ const AUTOTRANS_OPTIONS = [
   { value: "2", label: "自助及自动转账" },
 ] as const;
 
+const AUTOTRANS_KIND_LABEL: Record<number, string> = {
+  0: "禁止转账",
+  1: "只允许自助转账",
+  2: "自助及自动转账",
+};
+
 function AutotransSection({
   card,
   onChanged,
@@ -661,8 +667,11 @@ function AutotransSection({
   return (
     <Section title="自动转账（圈存）">
       <p className="text-caption text-text-2">
-        当前：{card.autotransFlag ? "开启" : "关闭"} · 每次圈{" "}
-        {yuanText(card.autotransAmtYuan)} · 余额下限{" "}
+        当前：
+        {card.autotransFlag
+          ? (AUTOTRANS_KIND_LABEL[card.autotransFlagKind] ?? "开启")
+          : "关闭"}
+        {" · "}每次圈 {yuanText(card.autotransAmtYuan)} · 余额下限{" "}
         {yuanText(card.autotransLimiteYuan)}
         。学校侧只返回开/关，具体档位请选择后提交。
       </p>
