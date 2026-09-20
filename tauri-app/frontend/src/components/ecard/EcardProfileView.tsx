@@ -6,14 +6,17 @@ import { cn } from "@/shared/cn";
 import { invokeCommand } from "@/shared/tauriApi";
 import type { PlatDevice, PlatLoginLogs, PlatProfile } from "@/shared/types";
 /**
- * 个人中心（M4.5 批 14）：官方「我的-设置」plat 只读面的桌面化。
+ * 个人中心（M4.5 批 14/15）：官方「我的-设置」plat 面的桌面化。
  *
  * 对齐官方 `/plat/wode`（资料卡）+ `/plat/user/deviceManage`（设备管理）+
  * `plat/user/logList`（登录日志）。数据全部来自 `get_plat_*` 只读命令（plat API
  * 与一卡通同 token，见 [[plat-api-same-token]] wiki learning——组件内不需要知道）。
  *
- * 一期只读：设备「下线」/ 校园卡解绑 / 改手机号 / 改密码等写操作属账号安全动作，
- * 各自需要确认流与专项验证，不在此顺路提供（官方语义也是逐项强确认）。
+ * 设备写操作（批 15，官方 bundle 取证）：在线设备「下线」→ `plat_offline_device`、
+ * 已授权设备「移除」→ `plat_remove_device`（`equipmentUserBh` = 设备 id，契约见
+ * types.ts）。官方语义是逐项强确认（$dialog.confirm），此处用 window.confirm 同口径；
+ * 成功即本地移除该行（官方同款 splice），失败原样展示中文 message。
+ * 校园卡解绑 / 改手机号 / 改密码涉短信验证码流程，不在此提供。
  */
 
 /** plat 用户资料里我们展示的字段（`get_plat_profile` → data 的已知键）。 */
@@ -33,6 +36,10 @@ export function EcardProfileView() {
   const [online, setOnline] = useState<PlatDevice[]>([]);
   const [authorized, setAuthorized] = useState<PlatDevice[]>([]);
   const [logs, setLogs] = useState<PlatLoginLogs | null>(null);
+  /** 正在执行写操作的设备 id（防重复提交；null = 空闲）。 */
+  const [busyId, setBusyId] = useState<string | null>(null);
+  /** 写操作错误（就地显示在设备区，不与整页兜底 msg 混用）。 */
+  const [writeErr, setWriteErr] = useState("");
 
   const refetch = useCallback(async () => {
     setPhase("loading");
@@ -76,6 +83,28 @@ export function EcardProfileView() {
     void refetch();
   }, [refetch]);
 
+  /** 设备写操作：window.confirm 二次确认（官方 $dialog.confirm 同口径）→ 命令 → 本地移除。 */
+  const writeDevice = async (
+    d: PlatDevice,
+    cmd: "plat_offline_device" | "plat_remove_device",
+    confirmText: string,
+  ) => {
+    if (busyId !== null) return;
+    if (!window.confirm(confirmText)) return;
+    setBusyId(d.id);
+    setWriteErr("");
+    const r = await invokeCommand<null>(cmd, { equipmentUserBh: d.id });
+    setBusyId(null);
+    if (r.success) {
+      // 官方同款：成功即从列表 splice 掉该设备（免整页重拉四路只读）
+      const drop = (l: PlatDevice[]) => l.filter((x) => x.id !== d.id);
+      if (cmd === "plat_offline_device") setOnline(drop);
+      else setAuthorized(drop);
+    } else {
+      setWriteErr(r.message || "操作失败，请稍后重试");
+    }
+  };
+
   const deviceRow = (d: PlatDevice, online: boolean) => (
     <div
       key={d.id}
@@ -92,7 +121,25 @@ export function EcardProfileView() {
           最近登录：{d.updateTime || d.createTime || "—"}
         </p>
       </div>
-      <MonitorSmartphone aria-hidden className="size-4 shrink-0 text-text-2" />
+      <div className="flex shrink-0 items-center gap-1.5">
+        <Button
+          variant="ghost"
+          size="xs"
+          disabled={busyId !== null}
+          onClick={() =>
+            void writeDevice(
+              d,
+              online ? "plat_offline_device" : "plat_remove_device",
+              online
+                ? `确认下线「${d.name || "该设备"}」？该设备的登录态将被移除。`
+                : `确认移除「${d.name || "该设备"}」的授权信息？`,
+            )
+          }
+        >
+          {busyId === d.id ? "处理中…" : online ? "下线" : "移除"}
+        </Button>
+        <MonitorSmartphone aria-hidden className="size-4 text-text-2" />
+      </div>
     </div>
   );
 
@@ -106,7 +153,7 @@ export function EcardProfileView() {
         </Button>
       </div>
       <p className="mt-1 text-caption text-text-2">
-        与官方 APP「我的 / 设置」同源；一期只读，设备下线等操作后续单独提供。
+        与官方 APP「我的 / 设置」同源；设备下线 / 移除授权已支持，改手机号等后续提供。
       </p>
 
       {phase === "loading" && (
@@ -181,6 +228,12 @@ export function EcardProfileView() {
               authorized.map((d) => deviceRow(d, false))
             )}
           </div>
+
+          {writeErr && (
+            <p className="mt-2 text-caption text-alert" role="alert">
+              {writeErr}
+            </p>
+          )}
 
           <p className={cn("mt-4 flex items-center gap-1 text-caption font-medium text-text")}>
             <ScrollText aria-hidden className="size-3.5" />

@@ -1,8 +1,9 @@
-import { useDeferredValue, useEffect } from "react";
+import { useDeferredValue, useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Bell, Search } from "lucide-react";
-import type { PanelId } from "@/shared/types";
+import type { NotificationCounts, PanelId } from "@/shared/types";
+import { getNotifications } from "@/shared/tauriApi";
 import { useUiStore } from "@/stores/uiStore";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +22,7 @@ import { TodoPanel } from "@/panels/TodoPanel";
 import { SchedulePanel } from "@/panels/SchedulePanel";
 import { AppsPanel } from "@/panels/AppsPanel";
 import { EcardsPanel } from "@/panels/EcardsPanel";
+import { NotificationsPanel } from "@/panels/NotificationsPanel";
 import { SettingsPanel } from "@/panels/SettingsPanel";
 
 const PANEL_MAP: Record<PanelId, ComponentType> = {
@@ -31,16 +33,32 @@ const PANEL_MAP: Record<PanelId, ComponentType> = {
   schedule: SchedulePanel,
   apps: AppsPanel,
   ecard: EcardsPanel,
+  notifications: NotificationsPanel,
   settings: SettingsPanel,
 };
 
 export default function AppShell() {
   const activePanel = useUiStore((s) => s.activePanel);
+  const setActivePanel = useUiStore((s) => s.setActivePanel);
   const theme = useUiStore((s) => s.theme);
   const openCommandPalette = useUiStore((s) => s.openCommandPalette);
   // 快速连切时 useDeferredValue 只渲染最终面板，AnimatePresence 不闪烁
   const deferredPanel = useDeferredValue(activePanel);
   const ActivePanel = PANEL_MAP[deferredPanel];
+
+  // Bell 未读计数：不轮询（后台 poll_tick 已持续检查，前端只读本地结果）——
+  // 挂载时取一次，另在每次切面板时顺手刷新（get_notifications 仅读本地文件，
+  // 无网络请求），保证从通知面板标完已读切走后徽标即消失。
+  const [unread, setUnread] = useState<NotificationCounts | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getNotifications().then((r) => {
+      if (alive && r.success && r.data) setUnread(r.data.counts);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [activePanel]);
 
   // 主题 → DOM 单向同步（开关入口在账号菜单的外观行）
   useEffect(() => {
@@ -94,20 +112,29 @@ export default function AppShell() {
               </Tooltip>
             </div>
 
-            {/* 右：铃铛占位（M5 接入）+ 账号区 */}
+            {/* 右：通知中心入口（未读徽标）+ 账号区 */}
             <div className="flex shrink-0 items-center gap-1.5">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    aria-label="通知"
-                    aria-disabled="true"
+                    aria-label={unread != null && unread.total > 0 ? `通知中心（${unread.total} 条未读）` : "通知中心"}
+                    onClick={() => setActivePanel("notifications")}
+                    className="relative"
                   >
                     <Bell className="size-4" />
+                    {unread != null && unread.total > 0 && (
+                      <span
+                        aria-hidden
+                        className="tabular-num absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-alert px-1 text-[10px] leading-none font-semibold text-white"
+                      >
+                        {unread.total > 99 ? "99+" : unread.total}
+                      </span>
+                    )}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>通知中心 · M5 接入</TooltipContent>
+                <TooltipContent>通知中心</TooltipContent>
               </Tooltip>
               <AccountMenu />
             </div>

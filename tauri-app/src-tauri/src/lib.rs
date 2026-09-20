@@ -2,6 +2,7 @@
 //! 协议核心全部在 campus-auth crate，本 crate 只做 IPC 接线与本地持久化。
 
 pub mod account;
+pub mod app_tray;
 pub mod commands;
 pub mod infra;
 
@@ -16,6 +17,9 @@ pub fn run() {
         // 系统浏览器/文件打开（open_in_browser 命令在 Rust 侧调用其 API，
         // 不开放前端直接 invoke 插件命令，故无需额外 capability）
         .plugin(tauri_plugin_opener::init())
+        // 系统通知（M5 通知中心）：只在 Rust 侧 poll_tick 经 NotificationExt 发送，
+        // 同样不开放前端 invoke，无需额外 capability
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             commands::auth::get_captcha,
             commands::auth::login,
@@ -107,6 +111,8 @@ pub fn run() {
             commands::ecard::get_plat_equipment,
             commands::ecard::get_plat_login_logs,
             commands::ecard::get_plat_offline_switch,
+            commands::ecard::plat_offline_device,
+            commands::ecard::plat_remove_device,
             commands::ecard::get_ecard_paycode,
             commands::ecard::get_ecard_paycode_settings,
             commands::ecard::ecard_send_bind_bank_code,
@@ -115,6 +121,10 @@ pub fn run() {
             commands::ecard::ecard_send_bind_user_code,
             commands::ecard::ecard_bind_user,
             commands::ecard::ecard_unbind_user,
+            commands::notification::get_notifications,
+            commands::notification::mark_notifications_read,
+            commands::notification::get_notification_settings,
+            commands::notification::save_notification_settings,
         ])
         // M4 批 2 启动补采：今天还没采过 + 有内存会话时，后台补一次日余额快照。
         // 不弹窗、不阻塞启动（spawn 后立刻返回）、失败只记日志（不出现 token/账号/户号）。
@@ -133,7 +143,30 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             });
+            // 通知中心轮询（M5 批 2）：门户资讯 / 待办 / 电费低余额三类检查合一，
+            // 每 tick 热读 settings 拿间隔与开关；无会话静默跳过、单源失败退避
+            // （×2 封顶 2h）、新通知发系统通知并进通知中心。见
+            // commands::notification::poll_tick。不弹窗、失败只记日志。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::notification::poll_tick(handle).await;
+            });
+            // 托盘常驻（M5 批 4）：图标 + 「显示主窗口 / 退出」菜单，左键唤起
+            // 窗口。创建失败只 log（缺托盘不影响应用）。
+            app_tray::build_tray(app.handle());
             Ok(())
+        })
+        // 主窗口关闭 = 隐藏到托盘（托盘常驻语义，M5 批 4）：拦截 CloseRequested
+        // 后仅 hide，应用继续跑后台轮询；真退出只走托盘菜单「退出」→ app.exit。
+        // 托盘未建成（app_tray::TRAY_READY = false）时不拦截：走默认关闭退出，
+        // 否则窗口藏起来没有托盘可唤回（P1）。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && app_tray::TRAY_READY.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

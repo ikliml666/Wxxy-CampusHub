@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import {
+  Bell,
   CalendarDays,
   CalendarRange,
   LayoutGrid,
@@ -28,8 +29,9 @@ export const DOCK_ITEMS: {
   icon: LucideIcon;
   color: string;
 }[] = [
-  // 8 项（M4.5：原「钱包」+「电费」两个入口合并成「一卡通」）：总宽约 8×40 + 7×4 + 24 = 372px，
-  // 1280px 默认窗口下不溢出；磁吸/胶囊动画按 DOCK_ITEMS 遍历注册，无需额外适配。
+  // 9 项（M5：追加「通知」入口；M4.5 起「一卡通」已合并钱包/电费）：总宽约
+  // 9×40 + 8×4 + 24 = 416px（≈420px），1280px 默认窗口下仍不溢出；磁吸/胶囊
+  // 动画按 DOCK_ITEMS 遍历注册，无需额外适配。
   { id: "today",     label: "今日", icon: SunMedium,      color: "var(--color-brand)" },
   { id: "timetable", label: "课表", icon: CalendarRange,  color: "var(--color-sched)" },
   { id: "info",      label: "资讯", icon: Newspaper,      color: "var(--color-info)" },
@@ -37,6 +39,8 @@ export const DOCK_ITEMS: {
   { id: "schedule",  label: "日程", icon: CalendarDays,   color: "var(--color-sched)" },
   { id: "apps",      label: "应用", icon: LayoutGrid,     color: "var(--color-sched)" },
   { id: "ecard",     label: "一卡通", icon: Wallet,       color: "var(--color-wallet)" },
+  // 通知中心聚合公告/待办/电费三类，主体是门户公告，复用资讯域紫（不新增 token）
+  { id: "notifications", label: "通知", icon: Bell,      color: "var(--color-info)" },
   { id: "settings",  label: "设置", icon: Settings,       color: "var(--color-text-2)" },
 ];
 

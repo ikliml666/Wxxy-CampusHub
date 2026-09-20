@@ -47,12 +47,16 @@
 //! 片区 id、不带 token；`showData` 之外的 `map.data` 含户号（PII），crate 层已不透出。
 
 use super::auth::{session_client, CommandResult};
-use super::synjones::{err_text, synjones_session};
+use super::synjones::{
+    detect_zone, ensure_webvpn_session, err_text, synjones_session_routed, wrapped_base,
+    ERR_OFFCAMPUS_RELOGIN,
+};
 use crate::infra::state::{self, AppState};
 use campus_auth::cas::CasClient;
 use campus_synjones::charge::{self, ElectricityQuery, FeeItem, RoomStep};
 use campus_synjones::recharge::{self, PayMethod, PasswordPad, RechargeOrder};
-use campus_synjones::{CampusSynjonesError, BERSERKER_BASE};
+use campus_synjones::routing::{route, NetZone as RouteZone, RouteDecision};
+use campus_synjones::{CampusSynjonesError, SynjonesClient, BERSERKER_BASE};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -260,10 +264,32 @@ pub(crate) fn elec_err(e: &CampusSynjonesError) -> String {
 
 /// 片区目录（**免登录可调**：`/charge/feeitem` 是该服务唯一匿名端点，见 crate 头注）。
 /// 已登录时复用会话 client（同 Cookie jar），未登录时现建一个——不触碰 token 缓存。
+///
+/// M4 路由：校外内网 IP 直连必失败，改走 WebVPN——但匿名端点也必须有**网关会话**
+/// （网关 cookie），故未登录（无 TGT）时校外直接给可操作文案，不再尝试直连。
 #[tauri::command]
 pub async fn list_feeitems(
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<FeeItem>>, String> {
+    let zone = detect_zone().await;
+    if zone == RouteZone::OffCampus {
+        let (cas, tgt) = {
+            let guard = state.session.lock().await;
+            match guard.as_ref() {
+                Some(s) => (s.client.clone(), s.tgt.clone()),
+                None => return Ok(CommandResult::err(ERR_OFFCAMPUS_RELOGIN)),
+            }
+        };
+        let vpn = ensure_webvpn_session(&cas, tgt.as_deref()).await?;
+        let base = wrapped_base();
+        return Ok(
+            match charge::list_feeitems_via(vpn.wrapped_client(), &base).await {
+                Ok(items) => CommandResult::ok(items),
+                Err(e) => CommandResult::err(&elec_err(&e)),
+            },
+        );
+    }
+    // Campus / Unknown：现状直连（Unknown 直连失败由 elec_err 报「需校园网」兜底）
     let cas = match session_client(&state).await {
         Some(c) => c,
         None => match CasClient::new() {
@@ -286,8 +312,10 @@ pub async fn query_electricity(
     feeitem_id: String,
     path: Vec<RoomStep>,
 ) -> Result<CommandResult<ElectricityQuery>, String> {
-    let Some(guard) = synjones_session(&state).await else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
+    let guard = match synjones_session_routed(&state).await {
+        Ok(Some(g)) => g,
+        Ok(None) => return Ok(CommandResult::err(ERR_NO_SESSION)),
+        Err(e) => return Ok(CommandResult::err(&e)),
     };
     let Some(sess) = guard.as_ref() else {
         return Ok(CommandResult::err(ERR_NO_SESSION));
@@ -337,10 +365,22 @@ pub async fn delete_electricity_room(id: String) -> Result<CommandResult<Vec<Sav
 
 // ---------------- 去官网充值（系统浏览器） ----------------
 
+/// 浏览器充值 URL（纯函数供单测）：校外把内网官网页包装成网关 URL（浏览器自身持有
+/// WebVPN 登录态，未登录时网关会弹登录页——链路始终可达）；校内/未知保持内网直开。
+/// `has_vpn_session` 恒传 true：桌面 App 的网关会话与浏览器无关，包装决策只看归属。
+fn browser_recharge_url(feeitem_id: &str, zone: RouteZone) -> String {
+    let raw = format!("{BERSERKER_BASE}{RECHARGE_PATH_PREFIX}{}", feeitem_id.trim());
+    match route(&raw, zone, true) {
+        RouteDecision::Wrapped(w) => w,
+        _ => raw,
+    }
+}
+
 /// 充值入口：在系统浏览器打开官方充值页（2026-09-19 裁决：不再内嵌官方界面，
 /// 客户端直调官方接口的充值在后续批次接入）。
 /// 入参只允许数字片区 id，URL 由后端拼装，前端无法借它打开任意地址（与 `portal::open_in_browser`
-/// 的白名单思路一致，只是这里的合法目标是内网 IP）。
+/// 的白名单思路一致，只是这里的合法目标是内网 IP；M4 起校外经 `browser_recharge_url`
+/// 包装为网关 URL，前端拿不到原始拼接过程）。
 #[tauri::command]
 pub async fn open_recharge_in_browser(
     app: AppHandle,
@@ -350,7 +390,7 @@ pub async fn open_recharge_in_browser(
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
         return Ok(CommandResult::err("片区 id 非法"));
     }
-    let url = format!("{BERSERKER_BASE}{RECHARGE_PATH_PREFIX}{id}");
+    let url = browser_recharge_url(id, detect_zone().await);
     Ok(
         match app.opener().open_url(url.clone(), None::<&str>) {
             Ok(()) => CommandResult::empty(),
@@ -361,11 +401,13 @@ pub async fn open_recharge_in_browser(
 
 // ---------------- 充值六条（M3.1 批 C） ----------------
 
-/// 充值命令面取会话（与 `query_electricity` 同一把锁/同一个客户端）。
+/// 充值命令面取会话（与 `query_electricity` 同一把锁/同一个客户端，M4 起带路由决策）。
 macro_rules! with_synjones {
     ($state:expr, |$client:ident| $body:expr) => {{
-        let Some(guard) = synjones_session(&$state).await else {
-            return Ok(CommandResult::err(ERR_NO_SESSION));
+        let guard = match synjones_session_routed(&$state).await {
+            Ok(Some(g)) => g,
+            Ok(None) => return Ok(CommandResult::err(ERR_NO_SESSION)),
+            Err(e) => return Ok(CommandResult::err(&e)),
         };
         let Some(sess) = guard.as_ref() else {
             return Ok(CommandResult::err(ERR_NO_SESSION));
@@ -373,6 +415,20 @@ macro_rules! with_synjones {
         let $client = &sess.client;
         $body
     }};
+}
+
+/// 支付类**写路径**（建单/提交）的失败文案（M4 红线）：校外 WebVPN 模式追加
+/// 「不自动重试 + 走官网」提示——一次失败即报错，绝不静默二次提交（资金安全）。
+/// `cancel`（清理未支付单）不追加：清理动作无害且必要，提示反而阻止用户收尾。
+fn pay_err_text(client: &SynjonesClient, e: &CampusSynjonesError) -> String {
+    let base = elec_err(e);
+    if client.is_webvpn() {
+        format!(
+            "{base}；当前为校外网络，为避免重复扣款本操作不会自动重试，请改用「去官网充值」或连回校园网后再试"
+        )
+    } else {
+        base
+    }
 }
 
 /// `recharge_create` → data。
@@ -442,7 +498,7 @@ pub async fn recharge_create(
         Ok(
             match recharge::create_order(client, &feeitem_id, &tranamt, path.as_deref()).await {
                 Ok(order_id) => CommandResult::ok(RechargeCreated { order_id }),
-                Err(e) => CommandResult::err(&elec_err(&e)),
+                Err(e) => CommandResult::err(&pay_err_text(client, &e)),
             },
         )
     })
@@ -544,7 +600,7 @@ pub async fn recharge_submit(
             .await
             {
                 Ok(()) => CommandResult::empty(),
-                Err(e) => CommandResult::err(&elec_err(&e)),
+                Err(e) => CommandResult::err(&pay_err_text(client, &e)),
             },
         )
     })
@@ -585,6 +641,48 @@ pub async fn recharge_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use campus_synjones::routing::GATEWAY;
+
+    // ---------------- M4：校外路由 ----------------
+
+    /// 浏览器充值 URL：校外 → 网关包装形态（path 原样）；校内 → 内网直开；
+    /// 幂等决策链路（route + wrap_url）与 synjones.rs 的业务 base 同源。
+    #[test]
+    fn browser_recharge_url_wraps_off_campus_only() {
+        let off = browser_recharge_url("450", RouteZone::OffCampus);
+        assert!(
+            off.starts_with(GATEWAY) && off.ends_with("/charge-pc/pays/450"),
+            "校外应包装为网关 URL 且 path 原样：{off}"
+        );
+        let on = browser_recharge_url("450", RouteZone::Campus);
+        assert_eq!(on, format!("{BERSERKER_BASE}{RECHARGE_PATH_PREFIX}450"), "校内保持内网直开");
+        // Unknown 与 Campus 同为直连（决策表口径）
+        assert_eq!(
+            browser_recharge_url("450", RouteZone::Unknown),
+            format!("{BERSERKER_BASE}{RECHARGE_PATH_PREFIX}450")
+        );
+        // 入参带空白也要被 trim 掉再拼（与命令层校验同口径）
+        assert_eq!(browser_recharge_url(" 450 ", RouteZone::Campus).ends_with("/450"), true);
+    }
+
+    /// 写路径失败文案：WebVPN 模式必须含「不自动重试 + 去官网」提示；校内保持原文。
+    #[test]
+    fn pay_err_text_adds_offcampus_hint_only_in_webvpn_mode() {
+        // is_webvpn 只由 client 的 vpn 态决定；WebVpnSession::new() 无网络 IO，可直接构造
+        let mut c = SynjonesClient::new(
+            CasClient::new().expect("创建 CasClient 失败"),
+            None,
+            Some(campus_synjones::SynjonesToken::bearer("T")),
+        );
+        let e = CampusSynjonesError::Http("HTTP 502".to_string());
+        assert_eq!(pay_err_text(&c, &e), elec_err(&e), "校内不加提示");
+        let vpn = campus_synjones::routing::WebVpnSession::new().expect("会话构造无 IO");
+        c.set_webvpn(Some(super::super::synjones::wrapped_base()), Some(vpn));
+        let webvpn_text = pay_err_text(&c, &e);
+        assert!(webvpn_text.contains("去官网充值"), "应提示走官网：{webvpn_text}");
+        assert!(webvpn_text.contains("不会自动重试"), "应声明不自动重试（资金安全）：{webvpn_text}");
+        assert!(webvpn_text.starts_with(&elec_err(&e)), "服务端原文保留在前");
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let n = SystemTime::now()

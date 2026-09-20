@@ -17,6 +17,7 @@ const PANEL_IDS: readonly PanelId[] = [
   "schedule",
   "apps",
   "ecard",
+  "notifications",
   "settings",
 ] as const;
 
@@ -96,7 +97,9 @@ export const useUiStore = create<{
       // 非法形态（手改）同样兜底为空数组。
       // M4.5：v3 面板 9 → 8（"wallet" + "power" 合并成 "ecard"）——旧值**显式迁移**
       // 到 "ecard"（否则用户升级后会被兜底踢回今日页，白丢一次点击）。
-      version: 3,
+      // M5：v4 追加 "notifications"——旧 8 值（含 v3 迁移结果）仍全部合法、原样
+      // 保留；非法值（手改/旧版本残留）兜底回 "today"，防止 PANEL_MAP 查空白屏。
+      version: 4,
       migrate: (persisted) => {
         const s = persisted as Partial<{
           activePanel: string;

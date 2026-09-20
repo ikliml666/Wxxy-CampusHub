@@ -888,6 +888,19 @@ mod tests {
             }
         }
     }
+
+    /// plat 设备写操作参数校验：官方 `equipmentUserBh` 是 Long 型 id 字符串，只放行
+    /// 纯数字串；空/空白/带杂质一律拒绝（信任边界，值将直接进服务端 body）。
+    #[test]
+    fn equipment_bh_accepts_digits_only() {
+        assert_eq!(clean_equipment_bh(" 42940 ").unwrap(), "42940");
+        assert_eq!(clean_equipment_bh("0").unwrap(), "0");
+        assert!(clean_equipment_bh("").is_err(), "空串拒绝");
+        assert!(clean_equipment_bh("   ").is_err(), "纯空白拒绝");
+        assert!(clean_equipment_bh("42940; drop").is_err(), "带杂质拒绝");
+        assert!(clean_equipment_bh("abc").is_err(), "非数字拒绝");
+        assert!(clean_equipment_bh("4294.0").is_err(), "小数点拒绝");
+    }
 }
 
 // ---------------- 人脸采集（fapi 智慧校园服务；官方 overLightMobileH5 复刻） ----------------
@@ -1099,6 +1112,54 @@ pub async fn get_ecard_paycode_settings(
     with_synjones!(state, |client| {
         Ok(match plat::offline_switch(client).await {
             Ok(b) => CommandResult::ok(EcardPaycodeSettings { offline_switch: b }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+// ---------------- plat 设备写操作（官方 bundle 取证，报文见 plat.rs；前端必须已二次确认） ----------------
+
+/// 设备编号信任边界校验：官方 `equipmentUserBh` 是服务端 Long 型 id 的字符串形态。
+/// 只放行**纯数字**串——空串/带杂质的值直接拒绝，不进服务端 body（防呆 + 防拼注入）。
+fn clean_equipment_bh(raw: &str) -> Result<String, String> {
+    let bh = raw.trim();
+    if bh.is_empty() || !bh.chars().all(|c| c.is_ascii_digit()) {
+        return Err("设备编号无效，请刷新后重试".to_string());
+    }
+    Ok(bh.to_string())
+}
+
+/// 下线指定**已登录在线**设备（写操作；官方同款弹窗确认在前端，报文见 plat.rs）。
+#[tauri::command]
+pub async fn plat_offline_device(
+    state: State<'_, AppState>,
+    equipment_user_bh: String,
+) -> Result<CommandResult<()>, String> {
+    let bh = match clean_equipment_bh(&equipment_user_bh) {
+        Ok(b) => b,
+        Err(msg) => return Ok(CommandResult::err(&msg)),
+    };
+    with_synjones!(state, |client| {
+        Ok(match plat::offline_device(client, &bh).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 移除指定**已授权**设备授权（写操作；报文同 [`plat_offline_device`]，仅端点不同）。
+#[tauri::command]
+pub async fn plat_remove_device(
+    state: State<'_, AppState>,
+    equipment_user_bh: String,
+) -> Result<CommandResult<()>, String> {
+    let bh = match clean_equipment_bh(&equipment_user_bh) {
+        Ok(b) => b,
+        Err(msg) => return Ok(CommandResult::err(&msg)),
+    };
+    with_synjones!(state, |client| {
+        Ok(match plat::remove_device(client, &bh).await {
+            Ok(()) => CommandResult::ok(()),
             Err(e) => CommandResult::err(&err_text(&e)),
         })
     })

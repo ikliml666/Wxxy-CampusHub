@@ -146,7 +146,7 @@ export interface TodoPage {
   items: TodoItem[];
 }
 
-// PanelId 现为 8 项（M4.5：原 "wallet" + "power" 合并为 "ecard"，宫格首页 + 子页）：
+// PanelId 现为 9 项（M5：追加 "notifications" 通知中心；M4.5：原 "wallet" + "power" 合并为 "ecard"）：
 // 四处同步 = 本类型 + DockNav DOCK_ITEMS + AppShell PANEL_MAP + uiStore 的 PANEL_IDS；
 // uiStore persist 的 migrate 负责把旧值 "wallet"/"power" 迁移到 "ecard"。
 export type PanelId =
@@ -157,6 +157,7 @@ export type PanelId =
   | "schedule"
   | "apps"
   | "ecard"
+  | "notifications"
   | "settings";
 
 // ---------- M2 批次 3：应用页 / 日程页（tauri commands/portal.rs，契约冻结于计划 §2.1） ----------
@@ -1080,6 +1081,10 @@ export interface PlatDevice {
   createTime: string;
   updateTime: string;
 }
+// plat 设备写操作（官方 bundle 取证，POST JSON `{equipmentUserBh: PlatDevice.id}`，
+// 报文镜像见 crates/campus-synjones/src/plat.rs）：无独立 DTO，均返回 CommandResult<void>——
+// - `plat_offline_device`：下线「已登录在线」设备（status="1" 列表项）；
+// - `plat_remove_device`：移除「已授权」设备授权（status="0" 列表项）。
 
 /** `get_plat_login_logs` → data（MyBatis-Plus 分页；本校实测恒空列表）。 */
 export interface PlatLoginLogs {
@@ -1088,4 +1093,58 @@ export interface PlatLoginLogs {
   size: number;
   current: number;
   pages: number;
+}
+// ==================== M5 通知中心契约（2026-09-20，tauri commands/notification.rs 镜像） ====================
+//
+// 后台 poll_tick 产出三类通知：info（门户资讯）/ todo（门户待办）/ electricity（电费低余额）；
+// 系统通知由 Rust 侧发送，前端只消费通知中心列表与设置。
+
+/** 通知中心一条未读通知（`get_notifications` → `items[]`）。 */
+export interface NotificationItem {
+  /** 确定性主键：`info:{栏目id}:{条目id}` / `todo:{条目id}` / `elec:{YYYY-MM-DD}`（前端只读不构造） */
+  id: string;
+  /** `"info"` / `"todo"` / `"electricity"` */
+  kind: string;
+  /** 公告标题 / 待办标题 / 「{房间} 余额不足」 */
+  title: string;
+  /** 副文案（栏目名·发布时间 / 申请人·申请时间 / 余额与阈值明细） */
+  body: string;
+  /** 产生时刻（ISO8601 本地带偏移） */
+  createdAt: string;
+  /** 门户资讯的官网原文 URL（可直接跳转）；待办 / 电费为 null */
+  url: string | null;
+}
+
+/** 各类未读计数（后端按 kind 归好类，前端不自算）。 */
+export interface NotificationCounts {
+  total: number;
+  info: number;
+  todo: number;
+  electricity: number;
+}
+
+/** `get_notifications` / `mark_notifications_read` → data（mark 返回剩余未读，免二次拉取）。 */
+export interface NotificationStateView {
+  /** 后端按产生时间升序存放，前端倒序展示（最新的在前） */
+  items: NotificationItem[];
+  counts: NotificationCounts;
+}
+
+/**
+ * 通知设置（`get_notification_settings` / `save_notification_settings`）。
+ * 全字段有默认值：未落盘过时后端返回默认（全 7 栏订阅、门户/待办 10 分钟、电费 30 分钟）。
+ * 校验规则（save 非法返回中文 message）：三个间隔必须在 5～720 分钟、阈值 ≥ 0。
+ */
+export interface NotificationSettings {
+  /** 门户订阅栏目 id 列表（空数组 = 资讯通知关闭） */
+  infoColumns: string[];
+  todoEnabled: boolean;
+  electricityEnabled: boolean;
+  /** 电费提醒阈值（元）：余额 < 阈值触发（24h 节流，后端控制） */
+  electricityThresholdYuan: number;
+  infoIntervalMin: number;
+  todoIntervalMin: number;
+  electricityIntervalMin: number;
+  /** 静音：true = 只进通知中心，不发系统通知 */
+  muteSystemNotify: boolean;
 }

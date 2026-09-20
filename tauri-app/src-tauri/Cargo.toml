@@ -12,7 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon：托盘常驻（M5 批 4）；image-ico/image-png：运行时解码 include_bytes! 嵌入的
+# icons/icon.ico / default_window_icon 回落链（Wxxy-CampusLogin 同款 feature 组合）
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
@@ -28,4 +30,7 @@ campus-schedule = { path = "../../crates/campus-schedule" }
 # 慧新E校（一卡通）协议核心：钱包页与首页钱包卡取数（M3 批 2）
 campus-synjones = { path = "../../crates/campus-synjones" }
 tauri-plugin-opener = "2"
+# 系统通知（M5 通知中心）：只在 Rust 侧经 NotificationExt 调用（poll_tick），
+# 不开放前端直接 invoke 插件命令，故无需额外 capability（与 opener 同款）。
+tauri-plugin-notification = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset"] }

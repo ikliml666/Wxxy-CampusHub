@@ -15,3 +15,22 @@ export async function invokeCommand<T>(
     return { success: false, message: String(e) };
   }
 }
+
+// ==================== M5 通知中心（tauri commands/notification.rs） ====================
+
+import type { NotificationStateView, NotificationSettings } from "./types";
+
+/** 通知中心未读列表 + 各类计数。 */
+export const getNotifications = () => invokeCommand<NotificationStateView>("get_notifications");
+
+/** 标记已读：ids 缺省/空 = 全部已读；返回剩余未读（免二次拉取）。 */
+export const markNotificationsRead = (ids?: string[]) =>
+  invokeCommand<NotificationStateView>("mark_notifications_read", ids ? { ids } : {});
+
+/** 读取通知设置（未落盘过返回默认值）。 */
+export const getNotificationSettings = () =>
+  invokeCommand<NotificationSettings>("get_notification_settings");
+
+/** 保存通知设置（间隔须 5～720 分钟、阈值 ≥ 0，非法走 message 中文原因）。 */
+export const saveNotificationSettings = (settings: NotificationSettings) =>
+  invokeCommand("save_notification_settings", { settings });

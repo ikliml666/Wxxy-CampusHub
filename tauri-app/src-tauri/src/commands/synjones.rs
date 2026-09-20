@@ -15,6 +15,19 @@
 //! 把 SSO 与业务请求串行化——开销是几次一卡通调用互相排队，代价可忽略，
 //! 换来的是「绝不并发 SSO」这条硬约束。会话变更（换账号 / 重新登录换了 TGT）时重建。
 //!
+//! # 校外 WebVPN 路由（M4）
+//!
+//! 取会话前先判网络归属（`infra::net_zone::detect`，spawn_blocking + 60s 缓存）：
+//! 校内/未知 → 直连现状；校外 → 用 CAS TGT 静默登录深澜网关
+//! （`WebVpnSession::login`，无验证码无交互），把网关包装 base 与会话注入
+//! `SynjonesClient::set_webvpn`——此后该 client 的业务请求与 SSO 桥自动走网关。
+//! 进程级 `static WEBVPN_SESSION` 缓存网关会话（TTL 30 分钟，过期重登；TGT 过期
+//! 时给出 [`ERR_OFFCAMPUS_RELOGIN`] 可操作文案）；login 失败另有 60 秒负缓存
+//! （[`VPN_LOGIN_BACKOFF`]），网关不可达时高频命令不再反复撞整条 SSO 链。锁纪律：
+//! `WEBVPN_SESSION` 用 tokio
+//! Mutex 且 guard 允许跨 await（login 是网络 IO，持锁排队正是我们要的串行化），
+//! `SYNJONES` 锁内只做同步赋值；`net_zone::detect`（netsh 同步阻塞）绝不持任何锁执行。
+//!
 //! # 失败文案
 //!
 //! 业务失败一律 `Ok(CommandResult::err(中文))`（`Err(String)` 仅限 IPC 框架层）；
@@ -23,20 +36,60 @@
 //! （`EcardOverview.account` 是给前端查流水分页用的卡号，只在 IPC 数据里，不入日志）。
 
 use super::auth::CommandResult;
+use crate::infra::net_zone;
 use crate::infra::state::AppState;
+use campus_auth::cas::CasClient;
 use campus_synjones::ecard::{
     fetch_cards, fetch_current_card, fetch_transactions, CardInfo, Transactions, TurnoverFilter,
 };
-use campus_synjones::{CampusSynjonesError, SynjonesClient};
+use campus_synjones::routing::{route, NetZone as RouteZone, RouteDecision, WebVpnSession};
+use campus_synjones::{CampusSynjonesError, SynjonesClient, BERSERKER_BASE};
+use campus_synjones::routing::GATEWAY;
 use serde::Serialize;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tauri::State;
 
 /// 无会话时的约定文案（与 portal.rs / profile.rs / timetable.rs 同口径）。
 pub(crate) const ERR_NO_SESSION: &str = "请先登录";
 
+/// 校外且 WebVPN 会话建立失败（TGT 过期 / 网关不可达）的可操作文案。
+pub(crate) const ERR_OFFCAMPUS_RELOGIN: &str = "校外模式：登录态已过期，请重新登录后再试";
+
 /// 流水每页条数（前端「加载更多」按 `total` 判断是否还有下一页）。
 const PAGE_SIZE: u32 = 15;
+
+/// WebVPN 网关会话 TTL：过期重登（静默换票 + 302 链，无用户交互，成本一次请求链）。
+const VPN_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// 网关 login **负缓存**窗口：刚失败过（60 秒内）不再重试整条 SSO 链，直接回
+/// 可操作文案（网关不可达 / TGT 过期时，高频命令轮询不必每次都撞一遍网络）。
+/// 换 TGT 重新登录后最多再等满 60 秒即恢复。仅内存态，不落盘、不进日志。
+const VPN_LOGIN_BACKOFF: Duration = Duration::from_secs(60);
+
+/// 上次网关 login 失败时刻（负缓存）。std Mutex 瞬时读写、绝不跨 await
+/// （login 的串行化由 `WEBVPN_SESSION` 的 tokio guard 负责，这里只存时间戳）。
+static WEBVPN_LOGIN_FAIL: OnceLock<std::sync::Mutex<Option<Instant>>> = OnceLock::new();
+
+/// 读负缓存：60 秒内失败过 → Some（调用方直接回文案不重试）。
+fn vpn_login_in_backoff() -> bool {
+    WEBVPN_LOGIN_FAIL
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .is_some_and(|t| t.elapsed() < VPN_LOGIN_BACKOFF)
+}
+
+/// 记一次 login 失败时刻（锁中毒按无缓存处理，不影响主流程）。
+fn note_vpn_login_fail() {
+    if let Ok(mut g) = WEBVPN_LOGIN_FAIL
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *g = Some(Instant::now());
+    }
+}
 
 // ---------------- 全局唯一客户端 ----------------
 
@@ -50,20 +103,98 @@ pub(crate) struct SynjonesSession {
 
 static SYNJONES: OnceLock<tokio::sync::Mutex<Option<SynjonesSession>>> = OnceLock::new();
 
-/// 取全局唯一客户端；返回的 guard **必须活到请求结束**（持锁即串行化，见模块头注）。
-/// 未登录 → None（调用方回「请先登录」）。
+/// 进程级 WebVPN 网关会话（M4）：`(会话, 建立时刻)`，TTL 过期静默重登。
+/// 单例语义与 SYNJONES 一致——绝不并发 login（网关侧一次性 token 换发）。
+static WEBVPN_SESSION: OnceLock<tokio::sync::Mutex<Option<(WebVpnSession, Instant)>>> =
+    OnceLock::new();
+
+/// 网络归属 → 路由决策枚举（两枚举同构，编译期钉住映射完整性）。
+fn to_route_zone(z: net_zone::NetZone) -> RouteZone {
+    match z {
+        net_zone::NetZone::Campus => RouteZone::Campus,
+        net_zone::NetZone::OffCampus => RouteZone::OffCampus,
+        net_zone::NetZone::Unknown => RouteZone::Unknown,
+    }
+}
+
+/// 判当前网络归属（spawn_blocking：`detect` 内含 netsh 同步子进程调用，不进 async 线程）。
+pub(crate) async fn detect_zone() -> RouteZone {
+    let z = tokio::task::spawn_blocking(net_zone::detect)
+        .await
+        .unwrap_or(net_zone::NetZone::Unknown);
+    to_route_zone(z)
+}
+
+/// 校外路径下取（必要时新建）WebVPN 网关会话；返回 clone 与原实例共享网关 cookie jar，
+/// 锁外使用安全。
 ///
-/// 可见性 `pub(crate)`：M3 批 3 的电费命令面**复用同一把锁与同一个客户端**
+/// 无 TGT 或 login 失败（TGT 过期 / 网络）→ [`ERR_OFFCAMPUS_RELOGIN`]。持
+/// `WEBVPN_SESSION` 的 tokio guard 跨 await 正是设计：并发命中过期时排队，只 login 一次。
+/// login 失败有 60 秒负缓存（[`VPN_LOGIN_BACKOFF`]）：窗口内直接回文案不再撞网络。
+pub(crate) async fn ensure_webvpn_session(
+    cas: &CasClient,
+    tgt: Option<&str>,
+) -> Result<WebVpnSession, String> {
+    let Some(tgt) = tgt.filter(|t| !t.trim().is_empty()) else {
+        return Err(ERR_OFFCAMPUS_RELOGIN.to_string());
+    };
+    let mutex = WEBVPN_SESSION.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut guard = mutex.lock().await;
+    let fresh = matches!(guard.as_ref(), Some((_, ts)) if ts.elapsed() < VPN_SESSION_TTL);
+    if !fresh {
+        if vpn_login_in_backoff() {
+            return Err(ERR_OFFCAMPUS_RELOGIN.to_string());
+        }
+        match WebVpnSession::login(cas, tgt).await {
+            Ok(session) => *guard = Some((session, Instant::now())),
+            Err(_) => {
+                note_vpn_login_fail();
+                return Err(ERR_OFFCAMPUS_RELOGIN.to_string());
+            }
+        }
+    }
+    Ok(guard.as_ref().expect("fresh 分支必有会话").0.clone())
+}
+
+/// 「业务 base 的网关包装形态」（去尾斜杠，供 `format!("{base}{path}")` 直接拼接）。
+/// 纯函数单测钉住 golden 形态。可见性 `pub(crate)`：电费命令面的匿名目录路由复用。
+pub(crate) fn wrapped_base() -> String {
+    campus_synjones::routing::wrap_url(BERSERKER_BASE, GATEWAY)
+        .expect("BERSERKER_BASE 恒为合法 http URL")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// 取全局唯一客户端（**带校外路由决策**，M4 主路径）；返回的 guard **必须活到请求结束**
+/// （持锁即串行化，见模块头注）。未登录 → `Ok(None)`（调用方回「请先登录」）；
+/// 校外且网关会话建立失败 → `Err([ERR_OFFCAMPUS_RELOGIN])`。
+///
+/// 可见性 `pub(crate)`：电费/一卡通历史等命令面复用同一把锁与同一个客户端
 ///（token 单活，绝不能出现第二套 SSO 缓存），不复制这段逻辑。
-pub(crate) async fn synjones_session(
+pub(crate) async fn synjones_session_routed(
     state: &State<'_, AppState>,
-) -> Option<tokio::sync::MutexGuard<'static, Option<SynjonesSession>>> {
+) -> Result<Option<tokio::sync::MutexGuard<'static, Option<SynjonesSession>>>, String> {
     // 锁内只 clone（cas/username/tgt 均廉价），drop guard 后再 await（本项目锁纪律）
     let (username, tgt, cas) = {
         let guard = state.session.lock().await;
-        let s = guard.as_ref()?;
+        let Some(s) = guard.as_ref() else {
+            return Ok(None);
+        };
         (s.username.clone(), s.tgt.clone(), s.client.clone())
     };
+    // 路由决策（detect 带 60s TTL 缓存；决策目标恒为内网 base）：
+    // 校外 + 有 TGT → Wrapped（建/复用网关会话并注入）；校外 + 无 TGT → NeedLogin；
+    // Campus/Unknown → Direct（Unknown 直连失败由上层中文报错兜底，不做自动二次尝试）
+    let (base_override, vpn) = match route(BERSERKER_BASE, detect_zone().await, tgt.is_some()) {
+        RouteDecision::Wrapped(_) => {
+            let v = ensure_webvpn_session(&cas, tgt.as_deref()).await?;
+            (Some(wrapped_base()), Some(v))
+        }
+        RouteDecision::NeedLogin => return Err(ERR_OFFCAMPUS_RELOGIN.to_string()),
+        // Direct = 校内/未知直连现状；Unreachable 本轮 route 不产生（兜底直连）
+        _ => (None, None),
+    };
+
     let mut guard = SYNJONES
         .get_or_init(|| tokio::sync::Mutex::new(None))
         .lock()
@@ -73,14 +204,32 @@ pub(crate) async fn synjones_session(
         None => true,
     };
     if stale {
-        let client = SynjonesClient::new(cas, tgt.clone(), None);
+        let mut client = SynjonesClient::new(cas, tgt.clone(), None);
+        client.set_webvpn(base_override, vpn);
         *guard = Some(SynjonesSession {
             username,
             tgt,
             client,
         });
+    } else if let Some(sess) = guard.as_mut() {
+        // 非重建路径同样刷新路由态（zone 在 client 生命周期内可能变化：校外 ↔ 校内）
+        sess.client.set_webvpn(base_override, vpn);
     }
-    Some(guard)
+    Ok(Some(guard))
+}
+
+/// 旧入口（兼容既有调用方 `ecard.rs` / `electricity_history.rs` 的签名）：路由照走，
+/// 校外网关会话失败降级为 None（调用方回「请先登录」——文案欠精确但不阻塞界外模块）。
+pub(crate) async fn synjones_session(
+    state: &State<'_, AppState>,
+) -> Option<tokio::sync::MutexGuard<'static, Option<SynjonesSession>>> {
+    match synjones_session_routed(state).await {
+        Ok(g) => g,
+        Err(e) => {
+            log::warn!("WebVPN 会话建立失败，按无会话处理：{e}");
+            None
+        }
+    }
 }
 
 /// 会话失效归一为可操作文案，其余透出 crate 的中文错误（不回显票据/凭据）。
@@ -118,8 +267,10 @@ pub struct EcardOverview {
 /// 钱包页总览：当前卡 + 卡列表 + 流水消费统计位（见 [`EcardOverview`]）。
 #[tauri::command]
 pub async fn get_ecard(state: State<'_, AppState>) -> Result<CommandResult<EcardOverview>, String> {
-    let Some(guard) = synjones_session(&state).await else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
+    let guard = match synjones_session_routed(&state).await {
+        Ok(Some(g)) => g,
+        Ok(None) => return Ok(CommandResult::err(ERR_NO_SESSION)),
+        Err(e) => return Ok(CommandResult::err(&e)),
     };
     let Some(sess) = guard.as_ref() else {
         return Ok(CommandResult::err(ERR_NO_SESSION));
@@ -161,8 +312,10 @@ pub async fn get_ecard_transactions(
     info: Option<String>,
     order_id: Option<String>,
 ) -> Result<CommandResult<Transactions>, String> {
-    let Some(guard) = synjones_session(&state).await else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
+    let guard = match synjones_session_routed(&state).await {
+        Ok(Some(g)) => g,
+        Ok(None) => return Ok(CommandResult::err(ERR_NO_SESSION)),
+        Err(e) => return Ok(CommandResult::err(&e)),
     };
     let Some(sess) = guard.as_ref() else {
         return Ok(CommandResult::err(ERR_NO_SESSION));
@@ -252,16 +405,13 @@ pub async fn get_wallet_cards(state: State<'_, AppState>) -> Result<CommandResul
     let summary = portal.query_wallet_summary().await.ok();
     let portal_balance = summary.as_ref().and_then(|s| s.card_balance);
 
-    // 慧新E校实时余额：任何失败（未登录/校外/桥失败）都静默落到门户
-    let realtime = match synjones_session(&state).await {
-        Some(guard) => match guard.as_ref() {
-            Some(sess) => match fetch_current_card(&sess.client).await {
-                Ok(card) => Some(card.elec_accamt_yuan),
-                Err(_) => None,
-            },
+    // 慧新E校实时余额：任何失败（未登录/校外网关会话失败/桥失败）都静默落到门户
+    let realtime = match synjones_session_routed(&state).await {
+        Ok(Some(guard)) => match guard.as_ref() {
+            Some(sess) => fetch_current_card(&sess.client).await.ok().map(|c| c.elec_accamt_yuan),
             None => None,
         },
-        None => None,
+        _ => None,
     };
 
     let (value_yuan, source) = match (realtime, portal_balance) {
@@ -287,4 +437,47 @@ pub async fn get_wallet_cards(state: State<'_, AppState>) -> Result<CommandResul
             source: "none".to_string(),
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use campus_synjones::routing::wrap_url;
+
+    /// 同构映射钉死：三个变体逐一对应（任一侧改名/加变体即编译失败或此处失败）。
+    #[test]
+    fn route_zone_mapping_is_complete() {
+        assert_eq!(to_route_zone(net_zone::NetZone::Campus), RouteZone::Campus);
+        assert_eq!(to_route_zone(net_zone::NetZone::OffCampus), RouteZone::OffCampus);
+        assert_eq!(to_route_zone(net_zone::NetZone::Unknown), RouteZone::Unknown);
+    }
+
+    /// WebVPN 业务 base 的 golden 形态：网关 + 内网 host 密文、无尾斜杠（供直接拼 path）。
+    #[test]
+    fn wrapped_base_is_gateway_prefix_without_trailing_slash() {
+        let b = wrapped_base();
+        assert_eq!(b, format!("{GATEWAY}/http/{}", hex_encode_103()));
+        assert!(!b.ends_with('/'), "尾斜杠必须去掉，否则拼 path 出现双斜杠");
+        // 与 wrap_url 对带 path 的目标同源：base + path 恰好等于整条包装 URL
+        let path = "/berserker-app/ykt/tsm/queryCurrentCard";
+        assert_eq!(
+            format!("{b}{path}"),
+            wrap_url(&format!("{BERSERKER_BASE}{path}"), GATEWAY).unwrap(),
+            "base+path 必须与 wrap_url 整条包装一致（无双斜杠/丢段）"
+        );
+    }
+
+    fn hex_encode_103() -> String {
+        // encrypt_host 的 golden 值（与 wrap.rs 测试同源）：10.3.100.110 的密文段
+        "77726476706e69737468656265737421a1a70fcf696138003059d8fc".to_string()
+    }
+
+    /// 校外登录失败文案钉住（前端按文案引导重新登录，改动即破坏契约）。
+    #[test]
+    fn offcampus_relogin_message_is_stable() {
+        assert_eq!(
+            ERR_OFFCAMPUS_RELOGIN,
+            "校外模式：登录态已过期，请重新登录后再试"
+        );
+    }
 }

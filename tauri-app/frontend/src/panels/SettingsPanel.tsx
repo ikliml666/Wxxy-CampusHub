@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { LogOut, RefreshCw, Upload, type LucideIcon } from "lucide-react";
 import { Avatar } from "@/components/Avatar";
 import { PanelHeader } from "@/components/PanelHeader";
@@ -6,15 +8,29 @@ import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/authStore";
 import { useUiStore } from "@/stores/uiStore";
 import { cn } from "@/shared/cn";
+import type { InfoColumn, NotificationSettings } from "@/shared/types";
+import {
+  getNotificationSettings,
+  saveNotificationSettings,
+  invokeCommand,
+} from "@/shared/tauriApi";
 
 /** 小号开关：轨道纯色瞬时切换，滑块只做 transform 过渡 */
-function ToggleSwitch({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
+function ToggleSwitch({
+  checked,
+  onToggle,
+  ariaLabel,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  ariaLabel: string;
+}) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label="深色模式"
+      aria-label={ariaLabel}
       onClick={onToggle}
       className={cn(
         "relative h-6 w-10 shrink-0 rounded-full border transition-colors duration-[var(--dur-fast)] ease-out-soft",
@@ -58,6 +74,203 @@ function RowItem({
   );
 }
 
+/** 设置分区里的一行（左文案 + 右控件）。 */
+function SetRow({
+  title,
+  desc,
+  children,
+}: {
+  title: string;
+  desc: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-inner border border-line bg-surface-2 px-3 py-2.5">
+      <div className="min-w-0">
+        <p className="text-body text-text">{title}</p>
+        <p className="text-caption text-text-2">{desc}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * 通知设置卡片（M5 批 3）：三源开关 + 电费阈值 + 轮询间隔只读展示。
+ *
+ * 公告开关的落盘语义 = `infoColumns` 空/非空（后端契约）；打开且列表为空时
+ * 拉 `get_info_columns` 全量回填（前端不硬编码栏目 id）。轮询间隔只读——
+ * 后端校验范围 5..=720 已在，编辑能力留给后续批次（实现成本低者优先）。
+ */
+function NotifSettingsCard() {
+  const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
+  const [settings, setSettings] = useState<NotificationSettings | null>(null);
+  const [infoOn, setInfoOn] = useState(true);
+  const [todoOn, setTodoOn] = useState(true);
+  const [elecOn, setElecOn] = useState(true);
+  const [thresholdText, setThresholdText] = useState("10");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setPhase("loading");
+    setMsg(null);
+    getNotificationSettings().then((r) => {
+      if (!alive) return;
+      if (r.success && r.data) {
+        setSettings(r.data);
+        setInfoOn(r.data.infoColumns.length > 0);
+        setTodoOn(r.data.todoEnabled);
+        setElecOn(r.data.electricityEnabled);
+        setThresholdText(String(r.data.electricityThresholdYuan));
+        setPhase("ready");
+      } else {
+        setPhase("error");
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [reloadTick]);
+
+  if (phase === "loading") {
+    return (
+      <Surface className="px-4 py-4">
+        <p className="text-body font-medium text-text">通知</p>
+        <div aria-hidden className="mt-3 space-y-2">
+          {[0, 1, 2].map((i) => (
+            <span key={i} className="block h-9 animate-pulse rounded bg-line" />
+          ))}
+        </div>
+      </Surface>
+    );
+  }
+
+  if (phase === "error") {
+    return (
+      <Surface className="px-4 py-4">
+        <p className="text-body font-medium text-text">通知</p>
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-inner border border-line bg-surface-2 px-3 py-2.5">
+          <p className="text-caption text-text-2">通知设置获取失败</p>
+          <Button variant="outline" size="sm" onClick={() => setReloadTick((t) => t + 1)}>
+            重试
+          </Button>
+        </div>
+      </Surface>
+    );
+  }
+
+  const toggleInfo = () => {
+    if (infoOn) {
+      setInfoOn(false);
+      setMsg(null);
+      return;
+    }
+    // 开启公告通知需要至少一个订阅栏目：列表为空时拉全量栏目回填
+    const existing = settings?.infoColumns ?? [];
+    if (existing.length > 0) {
+      setInfoOn(true);
+      setMsg(null);
+      return;
+    }
+    invokeCommand<InfoColumn[]>("get_info_columns").then((r) => {
+      if (r.success && r.data && r.data.length > 0 && settings) {
+        setSettings({ ...settings, infoColumns: r.data.map((c) => c.id) });
+        setInfoOn(true);
+        setMsg(null);
+      } else {
+        setMsg({ kind: "err", text: r.message ?? "获取资讯栏目失败，无法开启公告通知" });
+      }
+    });
+  };
+
+  const toggleTodo = () => {
+    setTodoOn((v) => !v);
+    setMsg(null);
+  };
+
+  const toggleElec = () => {
+    setElecOn((v) => !v);
+    setMsg(null);
+  };
+
+  const save = () => {
+    if (!settings) return;
+    const raw = thresholdText.trim();
+    const t = Number(raw);
+    if (raw === "" || !Number.isFinite(t)) {
+      setMsg({ kind: "err", text: "电费提醒阈值必须是数字" });
+      return;
+    }
+    if (t < 0) {
+      setMsg({ kind: "err", text: "电费提醒阈值不能为负数" });
+      return;
+    }
+    const next: NotificationSettings = {
+      ...settings,
+      infoColumns: infoOn ? settings.infoColumns : [],
+      todoEnabled: todoOn,
+      electricityEnabled: elecOn,
+      electricityThresholdYuan: t,
+    };
+    setSaving(true);
+    setMsg(null);
+    saveNotificationSettings(next).then((r) => {
+      if (r.success) {
+        setMsg({ kind: "ok", text: "通知设置已保存" });
+      } else {
+        setMsg({ kind: "err", text: r.message ?? "保存通知设置失败" });
+      }
+    }).finally(() => setSaving(false));
+  };
+
+  return (
+    <Surface className="px-4 py-4">
+      <p className="text-body font-medium text-text">通知</p>
+      <div className="mt-3 space-y-2">
+        <SetRow title="公告通知" desc="订阅栏目有新公告时提醒">
+          <ToggleSwitch ariaLabel="公告通知" checked={infoOn} onToggle={toggleInfo} />
+        </SetRow>
+        <SetRow title="待办通知" desc="办事大厅出现新待办时提醒">
+          <ToggleSwitch ariaLabel="待办通知" checked={todoOn} onToggle={toggleTodo} />
+        </SetRow>
+        <SetRow title="电费提醒" desc="绑定宿舍余额低于阈值时提醒（每天最多一次）">
+          <ToggleSwitch ariaLabel="电费提醒" checked={elecOn} onToggle={toggleElec} />
+        </SetRow>
+        <SetRow title="电费提醒阈值" desc="余额低于该值时提醒（元）">
+          <input
+            type="number"
+            min={0}
+            step={0.5}
+            value={thresholdText}
+            onChange={(e) => setThresholdText(e.target.value)}
+            aria-label="电费提醒阈值（元）"
+            className="tabular-num w-24 shrink-0 rounded-control border border-line bg-surface px-2 py-1.5 text-right text-body text-text outline-none transition-colors duration-[var(--dur-fast)] ease-out-soft focus:border-brand"
+          />
+        </SetRow>
+        {settings && (
+          <p className="tabular-num px-1 text-caption text-text-2">
+            检查频率：资讯每 {settings.infoIntervalMin} 分钟 · 待办每 {settings.todoIntervalMin} 分钟 ·
+            电费每 {settings.electricityIntervalMin} 分钟
+          </p>
+        )}
+        {msg && (
+          <p role={msg.kind === "err" ? "alert" : "status"} className={cn("px-1 text-caption", msg.kind === "ok" ? "text-wallet" : "text-alert")}>
+            {msg.text}
+          </p>
+        )}
+        <div className="flex justify-end pt-1">
+          <Button size="sm" disabled={saving} onClick={save}>
+            {saving ? "保存中…" : "保存通知设置"}
+          </Button>
+        </div>
+      </div>
+    </Surface>
+  );
+}
+
 export function SettingsPanel() {
   const status = useAuthStore((s) => s.status);
   const displayName = useAuthStore((s) => s.displayName);
@@ -85,9 +298,12 @@ export function SettingsPanel() {
               <p className="text-body text-text">深色模式</p>
               <p className="text-caption text-text-2">切换应用的深浅主题</p>
             </div>
-            <ToggleSwitch checked={theme === "dark"} onToggle={toggleTheme} />
+            <ToggleSwitch ariaLabel="深色模式" checked={theme === "dark"} onToggle={toggleTheme} />
           </div>
         </Surface>
+
+        {/* 通知 */}
+        <NotifSettingsCard />
 
         {/* 账号 */}
         <Surface className="px-4 py-4">

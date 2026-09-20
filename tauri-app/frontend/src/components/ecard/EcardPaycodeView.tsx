@@ -12,8 +12,10 @@ import type { EcardPaycode, EcardPaycodeSettings } from "@/shared/types";
  * 条码（canvas）+ 二维码（同串）+ 支付方式/余额 + 有效期倒计时（归零自动重取）
  * + 手动刷新 + 脱机二维码开关状态（只读展示，写操作下一批）。
  *
- * ⚠️ 编码格式待真机扫码验证：一期选 CODE128（JsBarcode 缺省）；POS 不识别时改
- * ITF / Code39 只需改下方 format 一行参数。
+ * 编码格式已取证（2026-09-20 官方 bundle `/plat/js/chunk-2d0ccb9c.ff1379f8.js`
+ * BarcodeComponent）：官方 JsBarcode 调用显式 `{format:"CODE128",margin:0,
+ * displayValue:!1,height:80}`——本页 CODE128 与官方同款；其余为排版参数自由度。
+ * `batchGetBarCodeGet` 请求参数 `{account,payacc,paytype}` 亦与官方逐字一致。
  *
  * 凭据红线：`barcode` 数字串是动态支付凭据——不写 console.log、不进 localStorage、
  * 不进错误文案 / aria-label；除条码图与「查看数字」主动展开的展示外不留存。
@@ -98,7 +100,7 @@ export function EcardPaycodeView() {
     if (phase !== "ready" || !data || !canvasRef.current) return;
     try {
       JsBarcode(canvasRef.current, data.barcode, {
-        format: "CODE128", // 编码格式待真机扫码验证；POS 不识别时改 ITF / Code39（一行参数）
+        format: "CODE128", // 官方 bundle 实证同款（BarcodeComponent 显式 format:"CODE128"）
         displayValue: false,
         height: 72,
         width: 1.8,
