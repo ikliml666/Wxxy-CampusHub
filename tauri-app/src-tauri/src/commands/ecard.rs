@@ -19,9 +19,6 @@
 //!   整串绝不落盘 / 落日志 / 透传前端（单测 [`tests::config_dto_leaks_no_private_material`] 钉死）。
 //! - 卡列表走 [`campus_synjones::ecard::fetch_cards_full`]（crate 层已脱敏：只给
 //!   `accountMasked` / `bankaccTail`，姓名/手机/证件/学号不解析）。
-//! - 转账账户（`queryCardByTransfer`）的 `name` 实测疑似持卡人姓名（live 探针按 PII 键打码、
-//!   与契约 §2.5「DTO 不含 name」冲突）——**不透出**，展示名由后端按 `code` 派生（见
-//!   [`TransferAccount::label`]）。
 //! - 安全键盘见 [`campus_synjones::ecard_ops`]：前端只拿 `padId`（进程随机 id），真实 uuid
 //!   绝不外泄；失败文案不含任何键盘内容。
 
@@ -32,7 +29,7 @@ use campus_synjones::ecard::{current_account, fetch_bank_number, CardDetail};
 use campus_synjones::ecard_ops::{
     bind_bank, bind_user, cancel_bank, check_pwd, fetch_secure_keyboard, find_pwd, KeyboardKind,
     lost_card, modify_pwd, send_bind_bank_code, send_bind_user_code, send_find_pwd_code,
-    set_autotrans, set_limits, transfer, unbind_user, unlost_card, PasswordInput, SecurePad,
+    set_autotrans, set_limits, unbind_user, unlost_card, PasswordInput, SecurePad,
 };
 use campus_synjones::ecard_stats::{
     fetch_stats_assort, fetch_stats_series, fetch_stats_summary, fetch_turnover_types,
@@ -304,92 +301,6 @@ pub async fn get_ecard_stats_assort(
         Ok(a) => CommandResult::ok(a),
         Err(e) => CommandResult::err(&err_text(&e)),
     })
-}
-
-/// 一个可转账账户（`queryCardByTransfer` 条目，`data` 是**数组**不是 `data.card`）。
-///
-/// ⚠️ 服务端 `name` 实测疑似持卡人姓名（live 探针按 PII 键打码）——**不透出**，
-/// 展示名 [`Self::label`] 由后端按 `code` 派生（`CARD`→卡账户 / `ACCOUNT`→电子账户）。
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferAccount {
-    /// 账户号（卡号/电子账户号原文：转账操作（批 4）需要前端原样回传，契约 §2.2 明确保留）。
-    pub account: String,
-    /// 支付账户标识（`payacc`，实测如 `"42940-000"`）。
-    pub pay_acc: String,
-    /// 账户类型码（`CARD` 卡账户 / `ACCOUNT` 电子账户）。
-    pub code: String,
-    /// 展示名（按 `code` 派生；未识别的 code 原样透出兜底）。
-    pub label: String,
-    /// 余额（元）：`db_balance + unsettle_amount + elec_accamt` 求和（实测两类账户各只填自己的）。
-    pub balance_yuan: f64,
-    /// 是否可转出（`canTransferOut == "1"`）。
-    pub can_transfer_out: bool,
-    /// 已挂失（`lostflag == 1`）。
-    pub lost_flag: bool,
-}
-
-/// `code` → 展示名（官方语义：两种账户）。
-fn account_label(code: &str) -> String {
-    match code {
-        "CARD" => "卡账户".to_string(),
-        "ACCOUNT" => "电子账户".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// 解析转账账户列表（纯函数，单测覆盖）。
-pub fn parse_transfer_accounts(v: &Value) -> Vec<TransferAccount> {
-    let int = |v: Option<&Value>| campus_synjones::ecard::int_of(v).unwrap_or(0);
-    v["data"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|it| {
-                    let code = text_of(it.get("code"));
-                    TransferAccount {
-                        account: text_of(it.get("account")),
-                        pay_acc: text_of(it.get("payacc")),
-                        label: account_label(&code),
-                        code,
-                        balance_yuan: campus_synjones::ecard::yuan(
-                            int(it.get("db_balance"))
-                                + int(it.get("unsettle_amount"))
-                                + int(it.get("elec_accamt")),
-                        ),
-                        can_transfer_out: text_of(it.get("canTransferOut")) == "1",
-                        lost_flag: int(it.get("lostflag")) == 1,
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 可转账账户列表（卡账户 ⇄ 电子账户转账页用；批 4 的写操作也用这里的 `account`）。
-#[tauri::command]
-pub async fn get_ecard_transfer_accounts(
-    state: State<'_, AppState>,
-) -> Result<CommandResult<Vec<TransferAccount>>, String> {
-    let Some(guard) = synjones_session(&state).await else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
-    };
-    let Some(sess) = guard.as_ref() else {
-        return Ok(CommandResult::err(ERR_NO_SESSION));
-    };
-    let v = match sess
-        .client
-        .get(
-            "/berserker-app/ykt/tsm/queryCardByTransfer",
-            &[],
-            Envelope::Berserker,
-        )
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return Ok(CommandResult::err(&err_text(&e))),
-    };
-    Ok(CommandResult::ok(parse_transfer_accounts(&v)))
 }
 
 /// 取一把安全键盘（前端渲染用；真实服务端 uuid 留在后端缓存，`padId` 是进程随机 id）。
@@ -673,33 +584,6 @@ pub async fn ecard_set_autotrans(
     })
 }
 
-/// 卡间转账（卡账户 ⇄ 电子账户；`src_acc_type`/`dst_acc_type`：`CARD`/`ACCOUNT`）。
-#[tauri::command]
-pub async fn ecard_transfer(
-    state: State<'_, AppState>,
-    dst_account: String,
-    src_account: String,
-    amount_yuan: f64,
-    src_acc_type: String,
-    dst_acc_type: String,
-) -> Result<CommandResult<()>, String> {
-    with_synjones!(state, |client| {
-        Ok(match transfer(
-            client,
-            &dst_account,
-            &src_account,
-            amount_yuan,
-            &src_acc_type,
-            &dst_acc_type,
-        )
-        .await
-        {
-            Ok(()) => CommandResult::ok(()),
-            Err(e) => CommandResult::err(&err_text(&e)),
-        })
-    })
-}
-
 /// 绑定银行卡-发验证码 → `{id}`（本校 `specialversion=0`，`phone`/`bankacc` 不传即不带）。
 #[tauri::command]
 pub async fn ecard_send_bind_bank_code(
@@ -913,37 +797,6 @@ mod tests {
         assert!(parse_enabled_apps(&json!({"code": 200})).is_empty());
     }
 
-    /// **实测样本**（A4 `queryCardByTransfer`）：`data` 是数组，CARD 行只填卡账户字段、
-    /// ACCOUNT 行只填电子账户字段（其余 null）→ 余额求和口径两类都对。
-    #[test]
-    fn transfer_accounts_read_live_sample() {
-        let v = json!({"code": 200, "data": [
-            {"code": "CARD", "account": "***", "payacc": "***", "db_balance": 0,
-             "elec_accamt": null, "unsettle_amount": 0, "canTransferOut": "1",
-             "lostflag": 0, "freezeflag": 0, "name": "某人", "userName": "某人", "sno": "20230000"},
-            {"code": "ACCOUNT", "account": "***", "payacc": "42940-000", "db_balance": null,
-             "elec_accamt": 7996, "unsettle_amount": 0, "canTransferOut": "1",
-             "lostflag": 0, "name": "某人"}
-        ]});
-        let accounts = parse_transfer_accounts(&v);
-        assert_eq!(accounts.len(), 2);
-        let card = &accounts[0];
-        assert_eq!(card.code, "CARD");
-        assert_eq!(card.label, "卡账户", "展示名按 code 派生");
-        assert_eq!(card.balance_yuan, 0.0);
-        assert!(card.can_transfer_out);
-        assert!(!card.lost_flag);
-        let account = &accounts[1];
-        assert_eq!(account.label, "电子账户");
-        assert_eq!(account.balance_yuan, 79.96, "7996 分 → 79.96 元");
-        // PII：name / userName / sno 一律不透出
-        let text = serde_json::to_string(&accounts).unwrap();
-        for leaked in ["某人", "20230000", "\"name\"", "userName", "sno"] {
-            assert!(!text.contains(leaked), "不得透出 {leaked}：{text}");
-        }
-        assert!(parse_transfer_accounts(&json!({"code": 200})).is_empty());
-    }
-
     /// 命令面 IPC 契约：全 camelCase（前端 `types.ts` 按这些键名取值，改键名即破坏前端）。
     #[test]
     fn command_dtos_are_camel_case() {
@@ -963,17 +816,6 @@ mod tests {
         ] {
             assert!(cfg.get(k).is_some(), "缺 {k}：{cfg}");
         }
-
-        let accounts = serde_json::to_value(parse_transfer_accounts(&json!({"data": [
-            {"code": "ACCOUNT", "account": "A1", "payacc": "42940-000", "elec_accamt": 100,
-             "canTransferOut": "1", "lostflag": 0}
-        ]})))
-        .unwrap();
-        let a = &accounts[0];
-        for k in ["account", "payAcc", "code", "label", "balanceYuan", "canTransferOut", "lostFlag"] {
-            assert!(a.get(k).is_some(), "缺 {k}：{a}");
-        }
-        assert_eq!(a["balanceYuan"], 1.0);
 
         let overview = serde_json::to_value(EcardOverview {
             cards: Vec::new(),

@@ -1,6 +1,5 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  ArrowLeftRight,
   ArrowRight,
   BarChart3,
   CreditCard,
@@ -55,12 +54,6 @@ const TILES: Tile[] = [
     label: "卡设置",
     hint: "挂失 · 密码 · 限额 · 圈存",
     icon: Settings2,
-  },
-  {
-    id: "transfer",
-    label: "账户转账",
-    hint: "卡账户 ↔ 电子账户",
-    icon: ArrowLeftRight,
   },
   {
     // 本校 getAllApps 清单含 yinhangka / bind-bank-card ⇒ 显示；两者都缺则隐藏。

@@ -29,7 +29,6 @@ const ECARD_VIEWS: readonly EcardView[] = [
   "recharge",
   "power",
   "cardops",
-  "transfer",
   "bank",
   "face",
 ] as const;

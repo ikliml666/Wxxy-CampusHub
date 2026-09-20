@@ -1,5 +1,12 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 13：官方一卡通全站逐界面扫描——删除「账户转账」（官方无此功能）+ 功能对照清单
+
+- **模块**：`crates/campus-synjones/src/ecard_ops.rs`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/EcardHome.tsx`、`tauri-app/frontend/src/panels/EcardsPanel.tsx`、`tauri-app/frontend/src/{shared/types.ts,stores/uiStore.ts}`（删除 `EcardTransferView.tsx`）
+- **转账功能删除（用户确认官方找不到卡转系统，扫描实证后删除）**：官方 h5 全站遍历（首页宫格 / 大厅应用全集 / 卡包 / 卡片设置 / 支付设置 / 我的 / 设置 / 账单 / 统计 / 消费记录 / 挂失解挂 / 卡片充值 / 修改银行卡 / 校园卡解绑 / 付款码，逐按钮逐界面）——**没有任何转账操作界面**；卡设置里的「转账标识」只是圈存档位弹层（只允许自助转账 / 自助及自动转账）。结合此前 cardTransfer API 四变体全 400 + bundle 零调用，判定该功能对校内用户不存在，删除整个「账户转账」：前端 tile/子页/路由值/类型，后端 `transfer`/`EP_CARD_TRANSFER`/`parse_transfer_accounts`/`get_ecard_transfer_accounts`/`ecard_transfer` 及单测；live 探针历史取证保留。**圈存（自动转账标识/金额/限额）保留**——官方有对应设置界面且可用
+- **功能对照结论（写入 wiki `decisions/ecard-transfer-removed.md`）**：官方功能我们已全覆盖（卡包/卡片信息/消费记录/卡片设置/挂失解挂/账单/统计/银行卡/卡片充值/人脸采集/电费）；未做项的取舍——付款码体系（条码/二维码/脱机开关/付款顺序）桌面端无场景不做，plat 账号体系设置（个人资料/安全/设备管理/通用/校园卡解绑）不适用；小差异留档：账单搜索框、统计支出排行榜、卡片信息开户时间/有效期
+- **验证**：cargo test 120 通过（删转账单测后）、tsc 零错误；应用内回归——一卡通宫格「账户转账」消失、其余功能完整
+
 ## 2026-09-20 · M4.5 批 12：安全键盘「伪字符映射协议」逆转——密码输错根因修复 + 查看卡号官方三步弹窗
 
 - **模块**：`crates/campus-synjones/src/{ecard_ops.rs,ecard.rs}`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardBankView,EcardCardOpsView}.tsx`

@@ -234,7 +234,6 @@ pub const EP_SEND_FIND_PWD_VER: &str = "/berserker-app/ykt/tsm/sendfindPwdVer";
 pub const EP_FIND_PWD: &str = "/berserker-app/ykt/tsm/findPwd";
 pub const EP_PAY_LIMITE_MODIFY: &str = "/berserker-app/ykt/tsm/payLimiteModify";
 pub const EP_MODIFY_ACC: &str = "/berserker-app/ykt/tsm/modifyAcc";
-pub const EP_CARD_TRANSFER: &str = "/berserker-app/ykt/tsm/cardTransfer";
 pub const EP_SEND_BIND_BANK_VER: &str = "/berserker-app/ykt/tsm/sendBindBankVer";
 pub const EP_BUILD_BANK_RELATION: &str = "/berserker-app/ykt/tsm/buildBankCardRelation";
 pub const EP_CANCEL_BANK: &str = "/berserker-app/ykt/tsm/cancelBankCardRelation";
@@ -484,37 +483,6 @@ pub async fn set_autotrans(
     }
     let v = client
         .post_json_vals(EP_MODIFY_ACC, &form, Envelope::Berserker)
-        .await?;
-    require_retcode_ok(&v)
-}
-
-/// 卡间转账（卡账户 ⇄ 电子账户）。
-///
-/// ⚠️ **`tranamt` 是元、且不乘 100**——官方前端逐字是
-/// `tranamt: this.amountValue.number`（bundle offset 258896，用户输入框的原值），
-/// 与限额/圈存那两处 `×100` 不同（那两处服务端要分）。这里若按分处理会把金额放大 100 倍
-/// 并得到通用失败 `code=400 操作失败`（2026-09-19 真机实测踩过）。
-pub async fn transfer(
-    client: &SynjonesClient,
-    dst_account: &str,
-    src_account: &str,
-    amount_yuan: f64,
-    src_acctype: &str,
-    dst_acctype: &str,
-) -> Result<(), CampusSynjonesError> {
-    let amount = serde_json::Number::from_f64(amount_yuan)
-        .map(serde_json::Value::Number)
-        .ok_or_else(|| CampusSynjonesError::Parse("转账金额不是有效数字".to_string()))?;
-    let form = [
-        ("dstCardAccount", serde_json::json!(dst_account)),
-        ("srcCardAccount", serde_json::json!(src_account)),
-        // 金额传 JSON number（官方 `tranamt: this.amountValue.number`）
-        ("tranamt", amount),
-        ("src_acctype", serde_json::json!(src_acctype)),
-        ("dst_acctype", serde_json::json!(dst_acctype)),
-    ];
-    let v = client
-        .post_json_vals(EP_CARD_TRANSFER, &form, Envelope::Berserker)
         .await?;
     require_retcode_ok(&v)
 }

@@ -13,7 +13,6 @@ import { EcardHome } from "@/components/ecard/EcardHome";
 import { EcardPowerView } from "@/components/ecard/EcardPowerView";
 import { EcardRechargeView } from "@/components/ecard/EcardRechargeView";
 import { EcardStatsView } from "@/components/ecard/EcardStatsView";
-import { EcardTransferView } from "@/components/ecard/EcardTransferView";
 import { useAuthStore } from "@/stores/authStore";
 import { useUiStore } from "@/stores/uiStore";
 import { invokeCommand } from "@/shared/tauriApi";
@@ -32,7 +31,6 @@ const SUB_TITLES: Record<Exclude<EcardView, "home">, string> = {
   recharge: "一卡通充值",
   power: "宿舍电费",
   cardops: "卡设置",
-  transfer: "账户转账",
   bank: "银行卡",
   face: "人脸采集",
 };
@@ -173,9 +171,6 @@ export function EcardsPanel() {
           onRetry={() => setTick((t) => t + 1)}
           onChanged={() => setTick((t) => t + 1)}
         />
-      )}
-      {view === "transfer" && (
-        <EcardTransferView onChanged={() => setTick((t) => t + 1)} />
       )}
       {view === "bank" && (
         <EcardBankView

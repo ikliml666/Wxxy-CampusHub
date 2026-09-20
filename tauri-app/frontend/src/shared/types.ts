@@ -950,7 +950,6 @@ export type EcardView =
   | "recharge"
   | "power"
   | "cardops"
-  | "transfer"
   | "bank"
   | "face";
 
@@ -982,20 +981,6 @@ export interface EcardStatsAssortItem {
   turnoverType: string;
   nameEn: string;
   amountYuan: number;
-}
-
-/** `get_ecard_transfer_accounts` → 项（卡账户↔电子账户转账的可用账户）。 */
-export interface EcardTransferAccount {
-  /** 账户原号（转账提交时原样回传） */
-  account: string;
-  payAcc: string;
-  /** `CARD`（卡账户）/ `ACCOUNT`（电子账户） */
-  code: string;
-  /** 后端派生中文名（卡账户 / 电子账户） */
-  label: string;
-  balanceYuan: number;
-  canTransferOut: boolean;
-  lostFlag: boolean;
 }
 
 /**

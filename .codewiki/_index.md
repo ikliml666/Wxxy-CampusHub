@@ -16,6 +16,7 @@
 - [[decisions\timetable-block-granularity|课表网格保持大节行粒度（P0 样式对齐否决小节行方案）]]
 - [[decisions\timetable-view-contract|课表视图契约（TimetableView 下发 slots 与 currentWeek）]]
 - [[decisions\timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]
+- [[decisions\ecard-transfer-removed|账户转账功能删除决策（官方全站无转账操作界面）]]
 ## Learning
 
 - [[learnings\cas-sso-plaintext-redirect|CAS SSO 回跳的三处坑：重定向中断、明文落点、探测误判]]
