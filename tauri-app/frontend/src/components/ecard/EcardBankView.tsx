@@ -13,9 +13,10 @@ import type { EcardCard, EcardCheckResult, EcardCodeSent } from "@/shared/types"
  * - 已绑定显示「尾号 xxxx」（`bankaccTail`）；未绑定走绑定流程：
  *   卡号 → `ecard_send_bind_bank_code`（本校 `specialversion=0`，`bankacc` 不随发码带上）
  *   → 短信验证码 → `SecureKeypad`（查询密码）→ `ecard_bind_bank`。
- * - 「查看卡号」：`SecureKeypad` → `ecard_check_pwd` → 通过后展示返回的 `bankCardNo`。
- *   **本校后端恒返回 null**（学校未提供该能力）——此时如实提示「学校未返回卡号」，
- *   绝不伪造号码、不显示脱敏假数据。
+ * - 「查看卡号」官方同款三步（2026-09-20 逆向官方 bundle 对齐）：`SecureKeypad` 输密码
+ *   → `ecard_check_pwd` 通过 → **底部弹窗**（只显前 4 位 + 通栏「查看卡号」按钮）→
+ *   点按钮才显完整卡号（4 位一组）。全号数据源 = 本人卡列表 `bankacc`（后端校验通过
+ *   后回读）；学校未下发时如实提示，绝不伪造号码。
  * - 本校 `enabledApps` 清单没有 `bind-campus-card` ⇒ 不做多卡绑定/解绑入口
  *   （后端 `ecard_bind_user`/`ecard_unbind_user` 存在但本页不渲染）。
  * - `account` 一律不传（后端解析「当前卡」）；密码只走 `padId + positions`。
@@ -255,7 +256,6 @@ function BankBindSection({
           {codeId !== "" && vercode.trim() !== "" && (
             <div className="mt-3">
               <SecureKeypad
-                kind="standard"
                 title="输入查询密码完成绑定"
                 busy={busy}
                 error={padErr}
@@ -304,34 +304,37 @@ function BankBindSection({
 
 // ---------------- 查看卡号 ----------------
 
+/** 银行卡号 4 位一组（官方 `bankNumber` computed 同款排版）。 */
+const group4 = (s: string) =>
+  s.replace(/\s/g, "").replace(/(.{4})/g, "$1 ").trim();
+
 function RevealCardNoSection() {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [padErr, setPadErr] = useState("");
-  /** 校验通过后的结果：卡号或「学校未返回」；null = 还没查 */
-  const [result, setResult] = useState<string | null>(null);
+  /** 校验通过 → 底部弹窗（官方同款）：先只显前 4 位，点「查看卡号」按钮才显全号。 */
+  const [popupOpen, setPopupOpen] = useState(false);
+  const [cardNo, setCardNo] = useState("");
+  const [revealed, setRevealed] = useState(false);
   const [schoolNoCardNo, setSchoolNoCardNo] = useState(false);
 
   const check = async (v: KeypadInput) => {
     setBusy(true);
     setPadErr("");
-    const r =
-      v.mode === "plain"
-        ? await invokeCommand<EcardCheckResult>("ecard_check_pwd_plain", {
-            password: v.plain,
-          })
-        : await invokeCommand<EcardCheckResult>("ecard_check_pwd", {
-            padId: v.padId,
-            positions: v.positions,
-          });
+    const r = await invokeCommand<EcardCheckResult>("ecard_check_pwd", {
+      padId: v.padId,
+      positions: v.positions,
+    });
     setBusy(false);
     if (r.success && r.data) {
       if (r.data.bankCardNo) {
-        setResult(r.data.bankCardNo);
+        setCardNo(r.data.bankCardNo);
         setSchoolNoCardNo(false);
+        setOpen(false);
+        setRevealed(false);
+        setPopupOpen(true);
       } else {
-        // 本校后端恒 null（学校未提供校验密码查卡号能力）：如实提示，不伪造号码
-        setResult(null);
+        // 校验通过但学校未下发 bankacc（未绑卡等）：如实提示，不伪造号码
         setSchoolNoCardNo(true);
       }
     } else {
@@ -349,7 +352,6 @@ function RevealCardNoSection() {
       {open ? (
         <div className="mt-3">
           <SecureKeypad
-            kind="standard"
             title="输入查询密码以查看卡号"
             busy={busy}
             error={padErr}
@@ -367,7 +369,6 @@ function RevealCardNoSection() {
             size="sm"
             disabled={busy}
             onClick={() => {
-              setResult(null);
               setSchoolNoCardNo(false);
               setOpen(true);
             }}
@@ -378,15 +379,43 @@ function RevealCardNoSection() {
         </div>
       )}
 
-      {result !== null && (
-        <p className="tabular-num mt-3 text-body font-medium text-text">
-          卡号：{result}
-        </p>
-      )}
       {schoolNoCardNo && (
         <p className="mt-3 text-caption text-text-2" role="status">
           查询密码校验通过，但学校未返回卡号。
         </p>
+      )}
+
+      {popupOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setPopupOpen(false);
+          }}
+        >
+          {/* 官方 van-popup bottom 同款：底部滑出、min-height 36%、通栏按钮 */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="查看银行卡号"
+            className="w-full rounded-t-[var(--radius-card)] bg-surface px-4 pb-6 pt-5 shadow-lg"
+            style={{ minHeight: "36vh" }}
+          >
+            <p className="text-center text-body font-medium text-text">查看卡号</p>
+            <p className="tabular-num mt-7 text-center text-title text-text">
+              {revealed ? group4(cardNo) : group4(cardNo.slice(0, 4))}
+            </p>
+            <p className="mt-2 text-center text-caption text-text-2">
+              {revealed ? "请妥善保管，勿泄露给他人" : "点击下方按钮查看完整卡号"}
+            </p>
+            <Button
+              className="mt-7 w-full"
+              disabled={revealed}
+              onClick={() => setRevealed(true)}
+            >
+              {revealed ? "已显示完整卡号" : "查看卡号"}
+            </Button>
+          </div>
+        </div>
       )}
     </Surface>
   );

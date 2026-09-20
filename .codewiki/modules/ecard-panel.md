@@ -47,8 +47,8 @@ tags:
 - **电费** `EcardPowerView.tsx`：**原 PowerPanel 电费内容整体搬入**（级联查询/常用房间/结果卡/三张数据卡均未动），页面壳换成子页形态；原文章细节见 [[modules/electricity-panel|电费页]]（其 `source_files` 已同步指向本文件）。
 - **卡务操作** `EcardCardOpsView.tsx`（M4.5 批 4 新增）：挂失·解挂（挂失分区按 `config.showLost` 门控）/ 修改密码三段式（旧密 + 新密 + 确认新密，**三把键盘各领各的**）/ 短信找回密码 / 免密与限额设置 / 圈存转账标识。
 - **转账** `EcardTransferView.tsx`（批 4 新增）：卡账户 ⇄ 电子账户互转，金额前端校验**不得超转出账户余额**。
-- **银行卡** `EcardBankView.tsx`（批 4 新增）：绑定/解绑银行卡（短信验证码流程）、查看绑定卡号（走**查询密码校验**）；宫格入口按 `config.enabledApps` 含 `yinhangka`/`bind-bank-card` 门控。
-- **安全键盘** `SecureKeypad.tsx`（批 4 新增，通用组件）：调 `get_ecard_secure_keyboard` 拿 `keys` 渲染，**只记录用户点击的位置下标序列**（明文不进前端），点满 6 位自动回调提交；占位符只显示已输位数，`aria-label` 只写「第 N 键」——**绝不把键位字符回显到无障碍文本**。
+- **银行卡** `EcardBankView.tsx`（批 4 新增）：绑定/解绑银行卡（短信验证码流程）、查看绑定卡号（走**查询密码校验**）；宫格入口按 `config.enabledApps` 含 `yinhangka`/`bind-bank-card` 门控。「查看卡号」为**官方同款三步**（2026-09-20）：键盘输密码 → 校验通过后**底部弹窗**（只显前 4 位 + 通栏「查看卡号」按钮）→ 点按钮显完整卡号（4 位一组）——全号由后端 `fetch_bank_number` 校验通过后回读 `getCampusCards.bankacc`（官方同款数据源，`checkPwd` 只是显示闸门）。
+- **安全键盘** `SecureKeypad.tsx`（批 4 新增，2026-09-20 修正键面形态，通用组件）：调 `get_ecard_secure_keyboard` 拿键盘，**键面渲染官方 `images` 图片九宫格**（图片画的才是数字；`keys` 是伪字符数组、绝不渲染成键面文字——协议见 [[learnings/ecard-keyboard-pseudochar-protocol|安全键盘伪字符映射协议]]），**只记录用户点击的位置下标序列**（明文不进前端），点满 6 位自动回调提交；占位符只显示已输位数，`aria-label` 只写「第 N 键」——**绝不把键位字符回显到无障碍文本**。系统键盘明文直输模式已删（协议上不可行：脱离批次的明文服务端还原必 60005）。
 
 ## 命令面清单（`commands/ecard.rs`，2026-09-19 新增 7 条，全部**只读**）
 
@@ -72,7 +72,7 @@ tags:
 |---|---|---|---|
 | `ecard_lost` | `account?` | 挂失（**免密**）；前端二次确认后才发 | `ecard.rs:470` |
 | `ecard_unlost` | `account?`, `padId?/positions?` | 解挂；本校无 `unlockFlag` ⇒ 服务端默认需密码，`optional_pad` 要求密码参数**要么都给要么都不给**（`ecard.rs:455`） | `ecard.rs:489` |
-| `ecard_check_pwd` | `account?`, `padId/positions` | 校验查询密码，返回 `{ok, bankCardNo}`；本校 `bankCardNo` 恒 null（前端如实提示「学校未返回卡号」） | `ecard.rs:514` |
+| `ecard_check_pwd` | `account?`, `padId/positions` | 校验查询密码，通过后回读本人卡列表 `bankacc` 返回 `{ok, bankCardNo}`（未绑定/学校未下发 → null） | `ecard.rs:515` |
 | `ecard_modify_pwd` | `account?`, 三组 `padId/positions` | 改密三段式（`oldpw`/`newpw`/`renewpw` 各自消耗一把键盘） | `ecard.rs:536` |
 | `ecard_send_find_pwd_code` | `account?` | 发验证码，回 `data.account` 作后续会话 id | `ecard.rs:566` |
 | `ecard_find_pwd` | `account?`, `padId/positions`×2, `vercode`, `id` | 凭短信验证码设新密（免旧密） | `ecard.rs:585` |
