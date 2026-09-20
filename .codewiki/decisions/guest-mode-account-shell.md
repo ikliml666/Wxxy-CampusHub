@@ -37,7 +37,7 @@ tags:
 
 **取舍——为什么不引 Radix DropdownMenu / @radix-ui dialog 依赖**：项目现有 shadcn 入库组件只有 button/card/input/tooltip 四件，弹层类组件尚未入库；账号菜单需要的能力（点外关闭、Esc、aria 属性、reduced-motion 降级）手写不过百行，且 framer-motion 已在依赖里（菜单进出动画复用同一套 spring）。引一整套 Radix 只为一处下拉/两个弹层，依赖收益不成比例；后续若接入命令面板等更复杂浮层，再统一升级 shadcn dialog/dropdown 不迟。
 
-**取舍——为什么登录弹层不持久化开关状态**：`loginDialogOpen/avatarDialogOpen` 属一次性 UI 状态，`partialize` 排除在 persist 外（`uiStore.ts:39`）；重启后恢复一个开着的登录弹层是反直觉的。
+**取舍——为什么登录弹层不持久化开关状态**：`loginDialogOpen/avatarDialogOpen` 属一次性 UI 状态，`partialize` 排除在 persist 外（`uiStore.ts:87`；2026-09-20 核对，M5 后 persist 版本已至 v4、结构未变）。重启后恢复一个开着的登录弹层是反直觉的。
 
 ## D3：头像三态（本地 > 官方 > 首字默认）
 

@@ -1,5 +1,35 @@
 # 更新日志
 
+## 2026-09-20 · M5 通知中心：通知基建 + 三源后台轮询 + 应用内通知页 + 托盘常驻
+
+- **模块**：`tauri-app/src-tauri/src/{infra/notification.rs(新),commands/notification.rs(新),app_tray.rs(新),lib.rs,Cargo.toml}`、`tauri-app/frontend/src/{panels/{NotificationsPanel(新),SettingsPanel}.tsx,components/{AppShell,DockNav}.tsx,stores/uiStore.ts,shared/{types.ts,tauriApi.ts}}`
+- **通知基建**：`notification_state.json`（未读上限 200 + 每源已见 id 队列上限 100 + `baselined_sources` 显式基线 + 电费 24h 节流）与 `notification_settings.json`（8 字段全 serde default：默认 7 栏订阅、门户/待办 10 分钟、电费 30 分钟、阈值 10 元），损坏回退默认不删坏文件；去重/节流/校验全纯函数 + 单测
+- **poll_tick 单循环**：门户 7 栏 / 待办 / 电费三源合一（启动即检查，间隔热读设置）；无会话静默跳过（绝不拉起登录）、单源失败不影响其他源、失败指数退避 ×2 封顶 2h；系统通知 Rust 侧 `NotificationExt`（标题「锡院助手」，内容只含 kind+标题——token/票据/户号不进通知）；命令 4 条 `get_notifications` / `mark_notifications_read` / `get_notification_settings` / `save_notification_settings`
+- **前端**：PanelId 第 9 项「通知」（persist v3→v4 迁移、旧值原样保留）、`NotificationsPanel` 四态 + 分类徽标 + 点击跳对应面板 + 全部标为已读；顶栏 Bell 去占位（挂载/切面板刷新未读数、不额外轮询）；设置面板新增「通知」分区（三源开关 + 电费阈值 clamp + 频率展示）
+- **托盘常驻**：tauri features `tray-icon/image-ico` + `app_tray.rs`（菜单「显示主窗口/退出」、左键唤起）；**关窗 = 隐藏到托盘**，托盘未建成（TRAY_READY AtomicBool）不拦关窗走默认退出
+- **交叉复核修复（deepseek-flash，全部属实）**：P0「已读复活」——轮询快照在 await 前取、落盘整份回写，窗口期用户已读被覆盖 ⇒ 落盘前重读 `load_state` 只追加本轮增量；P1「首条待办被吞」——游标为空≠未基线 ⇒ `baselined_sources` 显式标志（serde default 迁移旧文件）；P1 托盘失败锁死；P2 阈值 clamp（负值按默认）+ 网关登录失败 60s 负缓存
+- **验证**：`cargo test -p campus-hub --lib` **155 passed / 0 failed**（含新增 19）、`tsc --noEmit` 零错、`npm run build` 通过；CDP 真机点验——Dock 第 9 项与空态、设置分区完整、阈值 8 保存后 `notification_settings.json` 落盘再还原、**poll_tick 启动即建 7 栏真实公告基线**（state.json 游标为真实文章 id）、Bell 无未读徽标正确
+- **未验证**：WinRT 系统通知弹窗（dev 模式不可靠，需 NSIS 打包版验收）、托盘图标肉眼确认（失败已有不锁死兜底）
+
+## 2026-09-20 · M4 网络智能路由：深澜 WebVPN 全链路打通（加密破解 + 会话 + 路由接入）
+
+- **模块**：`crates/campus-webvpn/`（新：`crypto.rs/wrap.rs/session.rs/route.rs` + live 探针）、`crates/campus-synjones/src/{client,sso,charge,recharge,ecard_face}.rs`、`tauri-app/src-tauri/src/{infra/net_zone.rs(新),commands/{synjones,electricity}.rs}`；`docs/cas-recon/REPORT.md` 样本复用
+- **深澜（Srun）URL 加密破解（deepseek-flash 调研 + golden 向量实证）**：AES-128-CFB128，key=IV=`wrdvpnisthebest!`（16 字节 ASCII）、流式无 padding（密文长度=host 字节）、输出 `hex(IV)+hex(密文)`；**本校 key/IV 均为默认值**（REPORT.md 两条活样本逐字节吻合）；实现由 KEY 派生 IV 前缀、禁止硬编码 `7772…`；6 条 golden 向量全过（含预测 `10.3.100.110` → `a1a70fcf…`，后被 live 证实）
+- **live 实锤（最大风险排除）**：WebVPN 登录链真实走通（CAS TGT 换 ST → 深澜 5 cookie 种下 → is_alive=true），`http://10.3.100.110/charge/feeitem` 经包装 URL 通过网关返回 **HTTP 200 + 真实电费片区数据（16101 字节）**——「网关是否代理内网 IP」此前不可验证，本轮实锤可用
+- **校园网检测 `net_zone.rs`**：主判据 UDP `connect("10.3.100.110:80")` 取 `local_addr` 源 IP（不发包、微秒级）∈10/8 → Campus；辅判据 netsh 枚举接口 10/8 + SSID 佐证；60s TTL 缓存；纯函数 `classify` 单测。**本机实测坑**：代理 TUN 网卡（198.18.0.0/15）抢占默认路由致源 IP 误判 OffCampus——netsh 辅判据救回（详见 wiki `learnings/srun-webvpn-crypto.md`）
+- **会话层 `session.rs`**：三步登录 + `is_alive`（GET / 不落 /login）+ `wrapped_client`；取舍=不落盘内存持有、失效凭 TGT 静默重登（多域 cookie 恢复牵动 DPAPI/session.json 破坏面大，注释写明）
+- **路由接入**：`route.rs` 纯函数决策表（Campus/Unknown→Direct；OffCampus×内网×有会话→Wrapped 幂等；×无会话→NeedLogin；**公网域名永不包装**）；`SynjonesClient` 加 `base_override/vpn` 字段、**全部 base 拼接收口**（grep `10.3.100.110` 非测试代码无遗漏）；SSO 桥换票不包装、回跳 302 链逐跳先判后包（token 提取同源）；命令层 `WEBVPN_SESSION` static（TTL 30 分钟 + 失败 60s 负缓存）+ `synjones_session_routed` 接线
+- **红线**：充值/电费**写路径校外失败绝不自动重试**（直接中文报错提示走官网，杜绝重复扣款面）；CAS `targetUrl`/service 保留内网原值（CAS 注册语义）；token/cookie 不进日志
+- **验证**：`cargo test -p campus-webvpn` 29、`-p campus-synjones` 97、workspace 全绿；live 探针如上。**未验证（需用户配合）**：校外真机（手机热点断校园网）端到端查电费、带 `synjones-auth` 头的 berserker API 与 POST JSON 经网关透传、深澜对 10.3.100.110 的代理授权长期稳定性
+
+## 2026-09-20 · 一卡通遗留小项：plat 设备写操作（下线/移除授权）+ 付款码条码格式取证定案
+
+- **模块**：`crates/campus-synjones/src/plat.rs`、`tauri-app/src-tauri/src/commands/ecard.rs`、`tauri-app/frontend/src/components/ecard/EcardProfileView.tsx`、`lib.rs`
+- **设备管理写操作（官方 bundle 取证背书）**：官方 `searcher.89d412b9.js` 实证下线/移除授权端点 `POST /berserker-base/equipment/{offlineEquipmentByUser,removeEquipmentByUser}`、body `{"equipmentUserBh":"<设备条目id>"}`、成功判定仅 `code===200` ⇒ `plat_offline_device` / `plat_remove_device` 两命令（复用 plat 鉴权链与 `Envelope::Berserker`）+ `clean_equipment_bh` 信任边界（只放行纯数字，单测钉死）+ 设备行「下线/移除」按钮（`window.confirm` 二次确认、busy 防重复、就地中文报错）。**按红线未真发**（会真踢用户设备），首次真发由用户在应用内触发
+- **付款码条码格式定案（不改）**：官方 plat bundle 四层拆链（app → paycode chunk → PayCodeComponent → BarcodeComponent）拿到决定性证据 `JsBarcode(..., {format:"CODE128", margin:0, height:80})`——官方显式 CODE128，本仓同款 ⇒ 批 14「POS 不识别改 ITF」的猜测作废，证据不足不改（取证链见 wiki `learnings/paycode-barcode-format-evidence.md`）
+- **证据不足未做**：改手机号/改密码（涉短信验证码流程）、脱机开关切换、付款顺序调整、`barcodeDel`（bundle 参数形态未完整取证）
+- **验证**：`cargo test -p campus-synjones -p campus-hub` 全绿、`tsc --noEmit` 零错；live 探针 `plat_device_write_probe_live.rs` 标 `#[ignore]`（只枚举+打印请求构造，绝不真发）
+
 ## 2026-09-20 · M4.5 批 14：付款码 + 个人中心（plat 只读面）+ 官方对齐三小项——为安卓版铺路
 
 - **模块**：`crates/campus-synjones/src/{plat.rs(新),ecard.rs}`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{EcardPaycodeView(新),EcardProfileView(新),EcardHome,EcardBalanceView,EcardBillView,EcardStatsView}.tsx`、`tauri-app/frontend/src/{shared/types.ts,stores/uiStore.ts,panels/EcardsPanel.tsx}`

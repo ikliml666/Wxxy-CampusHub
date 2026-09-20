@@ -55,8 +55,14 @@ PC token 的会话（浏览器实验与应用真机回归均证）。
   命令层 `commands/ecard.rs` 的 `get_plat_*` 四条。
 - PII：`bandacc` 是**绑定银行卡全号**——付款码相关 DTO 若透出必须脱敏或剔除；
   user_profile 的 `idNumber` 服务端已掩码可透传（本人查看本人资料）。
-- 写操作（下线设备/解绑校园卡/改手机/改密码/付款顺序调整/脱机开关切换）一律由用户
-  显式触发，不在只读面顺路提供。
+- 写操作由用户显式触发。**2026-09-20 批 15 起设备写操作两条已提供**（本文早前
+  「写操作一律不在只读面顺路提供」的约定收窄）：`plat.rs::offline_device` /
+  `remove_device`（`POST /berserker-base/equipment/{offlineEquipmentByUser,
+  removeEquipmentByUser}`，body `{"equipmentUserBh": id}`，官方 bundle
+  `searcher.*.js` 取证，成功判定仅 `code===200` 无第二层 retcode）+
+  `commands/ecard.rs` 的 `plat_offline_device` / `plat_remove_device`
+  （`equipmentUserBh` 纯数字信任边界）。改手机号/改密码涉短信验证码流程仍不实现；
+  写端点按红线未真发，live 验证只到参数构造（`tests/plat_device_write_probe_live.rs`）。
 
 ## 相关
 

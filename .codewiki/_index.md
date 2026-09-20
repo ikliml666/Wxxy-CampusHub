@@ -5,6 +5,7 @@
 - [[concepts\domain-color-system|域色编码系统（domain-color-system）]]
 ## Decision
 
+- [[decisions\webvpn-route-design|WebVPN 路由设计决策（包装范围、会话 TTL 与写路径红线）]]
 - [[decisions\ecard-panel-merge|一卡通面板合并决策（钱包 + 电费 → ecard）]]
 - [[decisions\timetable-editable-slots|作息时间表可编辑（save_time_slots 与 effective_slots 单点取值）]]
 - [[decisions\recording-jar-session|决策记录 - RecordingJar 自实现与会话持久化]]
@@ -26,6 +27,7 @@
 - [[learnings\plat-api-same-token|plat 体系鉴权与 API 清单（token 同源直调）]]
 - [[learnings\ecard-write-protocol-json-body|一卡通写操作协议实测（JSON body / 双层判定 / 三套金额单位）与转账结论]]
 - [[learnings\ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘机制]]
+- [[learnings\paycode-barcode-format-evidence|付款码条码格式取证（CODE128 实锤，「改 ITF」猜测作废）]]
 - [[learnings\meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]
 - [[learnings\history-dedupe-not-by-adjacent-sort|历史去重不能靠「排序后看相邻」（同 id 会被别的房间插在中间）]]
 - [[learnings\ecard-keyboard-pseudochar-protocol|安全键盘伪字符映射协议（键面必须渲染图片）]]
@@ -37,7 +39,9 @@
 - [[learnings\zhengfang-tiaoxiu-swap-entries|教务调休条目形态与公告置换冗余]]
 - [[learnings\zhengfang-kblist-multi-section-per-jxb|正方 kbList 同一教学班按多时段拆多条——diff 匹配键必须含时段]]
 - [[learnings\jwglxt-sso-chain|正方教务 SSO 链与课表接口取证（ST 绑定 service / TGT 不落 cookie / 901 会话特征）]]
+- [[learnings\srun-webvpn-crypto|深澜 WebVPN 加密算法与网络归属探测（IV 派生与 TUN 抢路由坑）]]
 - [[learnings\kaptcha-arithmetic-five-roots|算术验证码识别：从 2.9% 到 100% 的五个根因]]
+- [[learnings\notification-baseline-race|通知基线与已读竞态教训（P0 已读复活 / P1 首条被吞 / P1 托盘锁死）]]
 - [[learnings\error-text-url-credentials|错误文案回显 URL 凭据——reqwest 错误串泄票据与 redact_secrets 脱敏]]
 - [[learnings\portal-session-expiry-200-envelope|门户会话失效是 HTTP 200 信封而非错误码（误分类成「解析失败」的连锁）]]
 - [[learnings\portal-block-periods-and-school-timetable|门户大节语义与校本作息（14:50 误报教训）]]
@@ -45,10 +49,12 @@
 ## Module
 
 - [[modules\campus-auth|CAS 协议核心（campus-auth）]]
+- [[modules\webvpn-routing|WebVPN 校外路由（campus-webvpn 与注入点全景）]]
 - [[modules\ecard-panel|一卡通页（前端 + 命令面，M4.5）]]
 - [[modules\frontend-shell|前端外壳（frontend-shell）]]
 - [[modules\campus-synjones|慧新E校协议核心（campus-synjones）]]
 - [[modules\campus-hub-tauri|接线层（campus-hub src-tauri）]]
 - [[modules\electricity-panel|电费页（前端）]]
 - [[modules\campus-schedule|课表核心（campus-schedule）]]
+- [[modules\notification-center|通知中心（三源轮询 + 托盘常驻 + 前端面板）]]
 - [[modules\campus-portal|门户业务协议核心（campus-portal）]]

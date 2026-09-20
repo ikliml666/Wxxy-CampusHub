@@ -59,6 +59,8 @@ tags:
 | 修改银行卡（换绑） | 绑定/解绑可组合 | 不做快捷换绑 |
 | plat 体系设置（个人资料/安全/设备管理/通用/校园卡解绑） | 无 | **不适用**：plat 是官方 APP 的账号会话体系，与桌面应用登录形态无关 |
 
+**⚠️ 表中两条已被批 14 推翻（2026-09-20 更正，决策本身不变）**：①「付款码不做」——用户裁决接入，`get_ecard_paycode` 等命令与 `EcardPaycodeView` 已落地，条码格式经官方 bundle 取证与官方同款 CODE128（[[learnings/paycode-barcode-format-evidence|付款码条码格式取证]]）；②「plat 不适用」——plat API 与我们 PC 落点 token **同源直调**（[[learnings/plat-api-same-token|plat 体系鉴权与 API 清单]]），个人中心（`get_plat_*` 只读 4 条）与设备写操作（`plat_offline_device`/`plat_remove_device`）已接入。转账删除决策本身不受影响：`cardTransfer` 400 与官方全站无转账界面两条证据仍未被推翻。
+
 ## 相关
 
 - [[learnings/ecard-write-protocol-json-body|一卡通写操作协议实测]] — cardTransfer 400 取证
