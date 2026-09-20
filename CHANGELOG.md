@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-19 · M4.5 批 3 补验：写操作子页真机验证 + 两处修复（查询密码键盘选型、进页自动弹键盘）
+
+- **模块**：`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardCardOpsView,EcardBankView}.tsx`（仅前端）
+- **背景**：批 3 交付时校园网断开，写操作子页只验证到「能进 + 错误态正确」。本次校园网恢复（本机 10.2.65.46）后补验
+- **真机补验结果（逐页截图）**：登录后首页显示真实余额 **￥79.96**（电子账户）+ 卡账户 ￥0.00 · 正常 · `4****40` · 本科生卡；**银行卡**页「已绑定 · 尾号 5158」+ 解绑（告警色）；**账户转账**页真实两账户与余额（卡账户 ￥0.00 / 电子账户 ￥79.96）；**卡设置**页真实限额（单日/免密/单笔均「未设置」）与圈存（开启 · 每次圈 ￥50.00 · 余额下限 ￥20.00，与探针实测的 `autotrans_amt=5000`/`limite=2000` 分吻合）；**安全键盘真实取到并渲染**（91 键）。写路径仍按红线未提交（挂失/改密/转账/绑卡一个都没发）
+- **修复 1（可用性缺陷，实证驱动）**：原先查询密码用的是 `kind="number"` 键盘，实测该请求返回的是 **10 个随机字符**（某次 10 键里只有 2 个数字），**输不进「身份证后六位」这类固定数字密码**；且我校查询密码规则 `passwordRule = A/a/Num/#/leng_6` 本身含字母与符号。改为 `kind="standard"`（实测 91 键 = 数字 10 + 大写 26 + 小写 26 + 符号 32，其中**数字区是完整的 0-9 乱序**）⇒ 任意密码可输入。`SecureKeypad` 的全键盘同步改为**按字符类型分四区渲染**（数字/大写/小写/符号，每键仍携带**全局下标**——后端只按 `positions` 反查 `keys[i]`，分区纯属呈现层，不改提交语义）
+- **修复 2（交互缺陷）**：进入「卡设置」页会**立即弹出**密码键盘（旧实现由 `step = inputs.findIndex(null)` 推出，初始必为 0），用户只是想看限额/圈存时也被要求输密码。改为显式「修改密码」按钮启动（新增 `started` 状态，取消/重置时归位）；文案同步改为「6 位（默认身份证后六位，可含字母与符号）」
+- **验证**：`tsc --noEmit` 零错误；真机 CDP 点验两处修复（进页无键盘 → 点「修改密码」弹 91 键分区键盘、数字区完整）
+
 ## 2026-09-19 · M4.5 批 3：一卡通写操作（挂失·解挂 / 改密 / 限额 / 圈存 / 转账 / 银行卡）+ 错误文案凭据脱敏（安全修复）
 
 - **模块**：`crates/campus-synjones/src/{ecard_ops,ecard,lib,client,charge,recharge,sso}.rs`、`tauri-app/src-tauri/src/commands/{ecard,synjones}.rs` + `src/lib.rs`、`tauri-app/frontend/src/{components/ecard/{SecureKeypad,EcardCardOpsView,EcardTransferView,EcardBankView}.tsx, components/ecard/{EcardHome}.tsx, panels/EcardsPanel.tsx, shared/types.ts, stores/uiStore.ts}`

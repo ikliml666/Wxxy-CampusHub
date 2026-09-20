@@ -255,7 +255,7 @@ function BankBindSection({
           {codeId !== "" && vercode.trim() !== "" && (
             <div className="mt-3">
               <SecureKeypad
-                kind="number"
+                kind="standard"
                 title="输入查询密码完成绑定"
                 busy={busy}
                 error={padErr}
@@ -344,7 +344,7 @@ function RevealCardNoSection() {
       {open ? (
         <div className="mt-3">
           <SecureKeypad
-            kind="number"
+            kind="standard"
             title="输入查询密码以查看卡号"
             busy={busy}
             error={padErr}

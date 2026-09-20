@@ -178,7 +178,7 @@ function LostSection({
       ) : keypadOpen ? (
         <div className="mt-3">
           <SecureKeypad
-            kind="number"
+            kind="standard"
             title="输入查询密码以解挂"
             busy={busy}
             error={padErr}
@@ -223,6 +223,8 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
 
   /** change 模式：旧 / 新 / 确认 三段依次采集，收集完一次性提交 */
   const [inputs, setInputs] = useState<(KeypadInput | null)[]>([null, null, null]);
+  /** 是否已点「修改密码」开始（进页面不主动弹密码键盘——用户可能只是来看限额/圈存的） */
+  const [started, setStarted] = useState(false);
   /** reset 模式：验证码 + 新 / 确认 两段 */
   const [resetId, setResetId] = useState("");
   const [vercode, setVercode] = useState("");
@@ -330,12 +332,13 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
     setErr("");
     setPadErr("");
     setMsg("");
+    setStarted(false);
   };
 
   return (
     <Section title="修改查询密码">
       <p className="text-caption text-text-2">
-        查询密码为 6 位数字（默认身份证后六位），密码键盘点满自动进入下一步。
+        查询密码为 6 位（默认身份证后六位，可含字母与符号），密码键盘点满自动进入下一步。
       </p>
 
       {msg && <OpLine ok text={msg} />}
@@ -343,10 +346,16 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
 
       {mode === "change" ? (
         <>
-          {step >= 0 ? (
+          {!started ? (
+            <div className="mt-3">
+              <Button size="sm" disabled={busy} onClick={() => setStarted(true)}>
+                修改密码
+              </Button>
+            </div>
+          ) : step >= 0 ? (
             <div className="mt-3">
               <SecureKeypad
-                kind="number"
+                kind="standard"
                 title={`请输入${PWD_STEPS[step]}`}
                 busy={busy}
                 error={padErr}
@@ -412,7 +421,7 @@ function PwdChangeSection({ onChanged }: { onChanged: () => void }) {
               {resetStep >= 0 ? (
                 <div className="mt-3">
                   <SecureKeypad
-                    kind="number"
+                    kind="standard"
                     title={`请输入${RESET_STEPS[resetStep]}`}
                     busy={busy}
                     error={padErr}

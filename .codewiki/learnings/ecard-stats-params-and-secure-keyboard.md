@@ -44,7 +44,7 @@ tags:
 官方 `berserker-secure` 键盘的协议形态：
 
 - 取键盘 `GET /berserker-secure/keyboard?type=Number|Standard`（信封 `Berserker`），返回 **`numberKeyboard` 乱序键位串 + 键盘图片 + `uuid`**。乱序串与 uuid 绑定：服务端知道该 uuid 下每个**显示位置**对应的真实字符。
-- 提交密码的官方格式：**`pwd = "1$1$" + 键位下标序列 + "$1$" + uuid`**——提交的是**点击位置的下标序列**而不是字符本身（与 `/charge` 充值密码盘的「位置编码」同一思想，见 [[modules/campus-synjones|慧新E校协议核心]] §五安全红线）。
+- 提交密码的官方格式：**`pwd = "1$1$" + <载荷> + "$1$" + uuid`**（附 `pwdType: "1"`）。`<载荷>` 是**键位字符**还是**点击位置的下标序列**，bundle 反查给出的是**字符**（官方组件把用户点击映射回 `numberKeyboard[i]` 后 emit `input(字符, uuid)`），本项目按此实现（`ecard_ops.rs::build_pwd`）。**两种形态无法 live 验证**（写路径红线：挂失/改密一旦发出即不可逆），因此 `build_pwd` 是**单一改动点**——若真机首次写操作报密码错误，第一个要换的就是这里（改传 `positions`）。
 
 **本项目选用的方案：前端只传位置下标，后端拼装**。后端取键盘后把 `uuid → 键位映射` 存**进程级缓存**（`ecard_ops.rs`：TTL 300 秒、至多 8 把、随机 `padId`、`take_pad` **取走即删**，`:109-158`），只给前端回**打乱的展示键位**与 `padId`；将来写操作（挂失/改密/转账）时前端只上报用户点的**位置下标**，由后端按下标从映射还原成官方 `pwd` 格式提交。收益与 `/charge` 侧同款：客户端全程**不接触、不落盘、不打日志**真实键盘映射（不落盘不入日志是模块头注红线 1，`ecard_ops.rs:17`），前端也拿不到可还原的密钥材料。
 
@@ -55,3 +55,23 @@ tags:
 `GET /berserker-app/frontInfo?type=pc` 的 `getFrontConfig` **JSON 字符串里含学校侧下发的 `privateKey`**（PEM 形态）。这是官方前端要用的私钥被直接塞进了配置串——对自研客户端意味着：该串**绝不能整串透传、落盘或打日志**，解析必须走**键白名单**（`commands/ecard.rs::parse_client_config`，白名单之外一个键都不读）。同串的 `getEcardConfig`/`getFrontConfig` 其余键（`recharge=401`、`scan=407`、`passwordRule` 等）已提炼进 `EcardClientConfig` 白名单。
 
 附带实测事实：`frontInfo?type=pc` 与 `?type=app` **响应完全相同**（本校口径可通用，取 `pc`）；本校 `getEcardConfig = {freezeRecharge:0, showSno:1, type:1, showLost:1, manageFee:1, msCardFlag:0}`（`type=1` ⇒ 主余额口径 = 电子账户）；`getAllApps` 19 项里没有 `bind-campus-card` ⇒ 多卡绑定入口不显示。
+
+## 四、键盘选型：查询密码必须用 `Standard`，不能用 `Number`（2026-09-19 真机实测）
+
+这是**踩过并修掉**的坑：一开始查询密码（解挂/改密/找回/查看卡号/绑卡）都用了 `type=Number`，真机点开才发现根本输不进密码。
+
+| `type` 参数 | 实测返回 | 能否输入任意密码 |
+|---|---|---|
+| `Number` | **10 个随机字符**（某次 10 键里只有 2 个数字、3 个字母、5 个符号；两次取回字符集不同） | ❌ 输不进「身份证后六位」这类固定数字密码 |
+| `Standard` | **91 键**（数字 10 + 大写 26 + 小写 26 + 符号 32），其中**数字区是完整 `0-9` 的乱序** | ✅ 任意密码可输入 |
+
+本校 `passwordRule = "A/a/Num/#/leng_6"`（含字母与符号）⇒ 查询密码一律 `kind="standard"`。
+前端 `SecureKeypad` 把 91 键**按字符类型分四区**渲染（数字/大写/小写/符号），但每个键携带的仍是**全局下标**——
+后端只按 `positions` 反查 `keys[i]`，分区是纯呈现层的分块，**不改提交语义**。
+
+推论（对后续维护有用）：`type=Number` 的那 10 个随机字符**不可能是**「用户密码字符 + 干扰字符」的集合
+（本校密码是 6 位数字，而实测两次取回的数字位都只有 2 个），所以「官方数字键盘」并非用于输入用户自设密码；
+凡是要用户输入**自己设的密码**的场景，都用 `Standard`。
+
+另一处同批修掉的交互问题：写操作页原先**进入即弹出密码键盘**（旧实现由 `step = inputs.findIndex(x => x === null)`
+推出，初始必为 0），用户只想看限额时也被要求输密码。现在改为显式「修改密码」按钮启动。

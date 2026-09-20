@@ -29,6 +29,28 @@ export interface KeypadInput {
   keysFingerprint: string;
 }
 
+/**
+ * 全键盘（91 键）按字符类型分桶，便于用户找字符。
+ *
+ * ⚠️ 每个键携带的 `i` 是**全局下标**——后端只按 `positions` 反查 `keys[i]`，
+ * 分组纯粹是呈现层的分块，不改变提交语义。
+ */
+function standardGroups(
+  keys: string[],
+): { label: string; items: { k: string; i: number }[] }[] {
+  const buckets = [
+    { label: "数字", items: [] as { k: string; i: number }[] },
+    { label: "大写字母", items: [] as { k: string; i: number }[] },
+    { label: "小写字母", items: [] as { k: string; i: number }[] },
+    { label: "符号", items: [] as { k: string; i: number }[] },
+  ];
+  keys.forEach((k, i) => {
+    const idx = /[0-9]/.test(k) ? 0 : /[A-Z]/.test(k) ? 1 : /[a-z]/.test(k) ? 2 : 3;
+    buckets[idx].items.push({ k, i });
+  });
+  return buckets.filter((b) => b.items.length > 0);
+}
+
 export function SecureKeypad({
   kind = "number",
   length = 6,
@@ -192,43 +214,48 @@ export function SecureKeypad({
         </div>
       )}
 
-      {phase === "ready" && pad && (
-        <div
-          className={cn(
-            "mt-3 grid gap-1.5",
-            kind === "number"
-              ? "max-w-[17rem] grid-cols-3"
-              : "grid-cols-4 sm:grid-cols-6",
-          )}
-        >
-          {kind === "number" ? (
-            <>
-              {/* 官方数字键盘布局：前 9 键 3×3，第 10 键前留一空格，末格删除 */}
-              {pad.keys.slice(0, 9).map((k, i) => renderKey(k, i))}
-              {pad.keys.length > 9 && <span aria-hidden />}
-              {pad.keys.slice(9).map((k, i) => renderKey(k, 9 + i))}
-              <button
-                type="button"
-                className={keyCls}
-                disabled={busy}
-                onClick={() => setPositions((s) => s.slice(0, -1))}
-              >
-                删除
-              </button>
-            </>
-          ) : (
-            <>
-              {pad.keys.map((k, i) => renderKey(k, i))}
-              <button
-                type="button"
-                className={cn(keyCls, "col-span-2")}
-                disabled={busy}
-                onClick={() => setPositions((s) => s.slice(0, -1))}
-              >
-                删除
-              </button>
-            </>
-          )}
+      {phase === "ready" && pad && kind === "number" && (
+        <div className="mt-3 grid max-w-[17rem] grid-cols-3 gap-1.5">
+          {/* 官方数字键盘布局：前 9 键 3×3，第 10 键前留一空格，末格删除 */}
+          {pad.keys.slice(0, 9).map((k, i) => renderKey(k, i))}
+          {pad.keys.length > 9 && <span aria-hidden />}
+          {pad.keys.slice(9).map((k, i) => renderKey(k, 9 + i))}
+          <button
+            type="button"
+            className={keyCls}
+            disabled={busy}
+            onClick={() => setPositions((s) => s.slice(0, -1))}
+          >
+            删除
+          </button>
+        </div>
+      )}
+
+      {phase === "ready" && pad && kind !== "number" && (
+        <div className="mt-3">
+          {/* 全键盘实测 91 键（数字 9 + 字母 50 + 符号 32）——按字符类型分区呈现，
+              但每个键携带的仍是**全局下标**（后端按 positions 反查 keys[i]，分区只影响显示）。
+              为什么不给用户「数字键盘」：实测 `type=Number` 返回的是 10 个**随机**字符
+              （某次 10 键里只有 2 个数字），输不进「身份证后六位」这类固定数字密码，
+              而校区密码规则本身是 A/a/Num/#（含字母符号）⇒ 全键盘是唯一能输全的选择。 */}
+          {standardGroups(pad.keys).map((g) => (
+            <div key={g.label} className="mt-2 first:mt-0">
+              <p className="mb-1 text-caption text-text-2">{g.label}</p>
+              <div className="grid grid-cols-6 gap-1.5 sm:grid-cols-8">
+                {g.items.map(({ k, i }) => renderKey(k, i))}
+              </div>
+            </div>
+          ))}
+          <div className="mt-2">
+            <button
+              type="button"
+              className={cn(keyCls, "w-full")}
+              disabled={busy}
+              onClick={() => setPositions((s) => s.slice(0, -1))}
+            >
+              删除
+            </button>
+          </div>
         </div>
       )}
 
