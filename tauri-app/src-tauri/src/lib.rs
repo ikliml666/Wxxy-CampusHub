@@ -117,6 +117,16 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 commands::electricity_history::startup_snapshot(handle).await;
             });
+            // 每日自动同步（2026-09-20）：启动即检查一次，此后每小时检查（覆盖
+            // 长开跨天）。教务课表为准 + 法定节假日刷新，闸与护栏见
+            // commands::timetable::auto_sync_tick。不弹窗、失败静默重试。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    commands::timetable::auto_sync_tick(handle.clone()).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

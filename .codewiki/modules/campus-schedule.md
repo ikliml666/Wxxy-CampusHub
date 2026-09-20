@@ -8,6 +8,7 @@ source_files:
   - crates/campus-schedule/src/timeslots.rs
   - crates/campus-schedule/src/zhengfang.rs
   - crates/campus-schedule/src/diff.rs
+  - crates/campus-schedule/src/holiday.rs
   - crates/campus-schedule/src/notice.rs
   - crates/campus-schedule/src/occurrence.rs
   - crates/campus-schedule/src/lib.rs
@@ -24,7 +25,7 @@ tags:
 
 # 课表核心（campus-schedule）
 
-`crates/campus-schedule`：课表领域核心，算法与数据模型移植自 shiguangschedule（Kotlin → Rust，Apache-2.0；`model.rs:1-5` 文件头注明来源与修改），新增课程来源隔离与正方教务解析器。依赖仅 serde / serde_json / chrono / thiserror（`Cargo.toml`），与 [[modules/campus-auth|CAS 协议核心]] 同为「协议单点」、无 Tauri 依赖。
+`crates/campus-schedule`：课表领域核心，算法与数据模型移植自 shiguangschedule（Kotlin → Rust，Apache-2.0；`model.rs:1-5` 文件头注明来源与修改），新增课程来源隔离、正方教务解析器与法定节假日解析合并。依赖仅 serde / serde_json / chrono / thiserror（`Cargo.toml`），与 [[modules/campus-auth|CAS 协议核心]] 同为「协议单点」、无 Tauri 依赖。
 
 ## 数据模型（model.rs）
 
@@ -81,6 +82,11 @@ tags:
 - **复活语义**：disabled 旧课再次匹配到 → `disabled=false` 并计入 changed（单测 `diff_revives_disabled_course`）。
 - 匹配成功时**整条采用 incoming 数据但 id 沿用旧库**（`diff.rs:160-165`）——调课 override 挂在 `course_id` 上，id 必须稳定（class_id 缺失退化匹配时 incoming 的 `<table_id>-<空 jxb_id>` id 可能不同，取舍见 [[decisions/timetable-diff-manual-and-ics|课表 diff、手动课程与 ICS 导出决策]]）。
 - `format_weeks`（`diff.rs:103`）：周次列表连续区间合并成紧凑文案（`1,2,3,7,8` → `1-3,7-8`）。
+
+## 法定节假日解析与合并（holiday.rs，2026-09-20 节假日轮）
+
+- `parse_timor_year(json) -> Vec<NamedDate>`：解析 timor.tech `holiday/year/{year}` 响应（`{"holiday":{"MM-DD":{holiday,name,date,…}}}`），只取 `holiday=true`（放假）——`false` 是调休补班日照常上课；升序去重，坏条目跳过，非 JSON 报 Err。拉取请求在 tauri 层（timor 是公网 API、与校园会话无关，需浏览器 UA 否则被 Cloudflare 拦），本 crate 保持零网络依赖。
+- `merge_holidays(skipped, named, fresh) -> (skipped, named)`：先从 `skipped_dates` 剔除旧自动假日（`holiday_names` 是「自动假日」的唯一记录），再并入新集——官方修订取消的假日自动退场，用户手动停课日不受影响；`holiday_names` 整体替换（名随官方修订）。合并语义被 `merge_sorts_and_dedups` 等单测钉住。
 
 ## 调课通知 L1/L2 解析（notice.rs，M2.5 批次 3，本项目原创）
 

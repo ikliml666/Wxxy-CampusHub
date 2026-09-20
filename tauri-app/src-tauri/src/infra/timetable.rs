@@ -37,6 +37,8 @@ pub fn empty_timetable() -> Timetable {
             holiday_names: vec![],
             slot_rules: Vec::new(),
             show_non_current_week: false,
+            last_auto_import: None,
+            last_holiday_fetch: None,
         },
         courses: Vec::new(),
         overrides: Vec::new(),

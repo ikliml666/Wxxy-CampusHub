@@ -7,6 +7,17 @@
 - **功能对照结论（写入 wiki `decisions/ecard-transfer-removed.md`）**：官方功能我们已全覆盖（卡包/卡片信息/消费记录/卡片设置/挂失解挂/账单/统计/银行卡/卡片充值/人脸采集/电费）；未做项的取舍——付款码体系（条码/二维码/脱机开关/付款顺序）桌面端无场景不做，plat 账号体系设置（个人资料/安全/设备管理/通用/校园卡解绑）不适用；小差异留档：账单搜索框、统计支出排行榜、卡片信息开户时间/有效期
 - **验证**：cargo test 120 通过（删转账单测后）、tsc 零错误；应用内回归——一卡通宫格「账户转账」消失、其余功能完整
 
+## 2026-09-20 · 课表节假日轮：每日自动导入教务课表（教务为准）+ 公告置换辅助化 + 法定节假日跳过
+
+- **模块**：`crates/campus-schedule/src/{holiday.rs(新),diff.rs,model.rs,lib.rs}`、`tauri-app/src-tauri/src/{commands/timetable.rs,infra/timetable.rs,lib.rs}`；前端零改动
+- **背景与取证**：用户报教务系统引入调休功能后与公告解析冲突、「同一门课挤在同一格」。复用 restore_session 拉当前 kbList 取证（临时 example 用完即删）：**教务以「新增同教学班条目」表达调休**（信息隐藏同 jxb_id 一条周一原课 + 一条 `xqj=7, zcd=2周` 调休条目），教务已把补课排进周日列；kbList 的 `date` 字段是查询日时间戳、非逐条上课日期。公告置换（swap_days）与教务调休是同一事实的两份表达，并存即冲突。取证结论见 wiki `learnings/zhengfang-tiaoxiu-swap-entries`
+- **每日自动导入（教务为准）**：lib.rs setup spawn 后台循环，启动即检查 + 每小时检查（覆盖长开跨天）。`auto_sync_tick`：① 法定节假日刷新（timor.tech，无需会话，闸 `last_holiday_fetch`）② 教务课表导入（闸 `last_auto_import`，手动导入也写闸→当天不重复）。护栏：无会话静默跳过（绝不后台拉起登录顶掉用户会话）、失败只 warn 下小时重试、不弹窗不阻塞启动
+- **导入内核抽取 + 教务为准清理**：`import_timetable` 命令体抽为 `run_timetable_import(client, tgt, portal)`（命令与后台共用）；落库前清理——① `weekday_covered` 判定「置换日所在教学周该星期已有导入课」的 swap_days 条目删除（教务已表达调休，置换冗余）② `redundant_extra_override_ids` 删除与教务条目完全重合（同名+jxb 一致+同星期同节次+周次全覆盖）的旧逐课 extra override（同格重复渲染的根源）③ 置换日不在学期内不自动清、原课已删的 override 保守保留
+- **公告辅助化**：`apply_swap_day` 采纳前同判定拦截——教务已表达则 err「教务课表已包含 X（周Y）的调休安排，以教务为准，无需采纳该置换」（前端 noticeMsg 展示，文案路径已有）
+- **法定节假日跳过**：timor.tech `holiday/year/{当年+次年}`（跨年学期；需浏览器 UA 否则被 Cloudflare 拦）→ 新 `campus_schedule::holiday` 模块 `parse_timor_year`（只取 `holiday=true` 放假日，补班日忽略）+ `merge_holidays`（先剔旧自动假日再并入新集，官方修订自动退场，手动停课日不动）→ 并入 `config.skipped_dates` + 节日名写 `holiday_names`。渲染「休+节日名」列、ICS 剔除、今日页 skipped 全部复用既有消费方（`holidayNames` 字段与渲染上轮已预留），前端零改动。`fetch_holidays` 命令改调共享内核（原内联解析删除，顺修「未返回 {year} 年放假数据」字面量不插值 bug）；`save_skipped_dates` 手动编辑不再冲掉自动假日
+- **新增 config 字段**：`last_auto_import` / `last_holiday_fetch`（Option\<NaiveDate\>，serde default，旧文件兼容）
+- **验证**：`cargo test --workspace` 22 目标全过、0 失败（新增 holiday 4 测 + diff `weekday_covered`/`redundant_extra_requires_exact_overlap` 2 测，campus-hub 121 过）；`npm run build`（tsc+vite）通过；timor API 真实形态与 kbList 调休条目形态均实拉验证
+- **未验证**：后台自动导入的真机实际触发（需重启应用观察日志 `[auto-sync]`）；用户库里是否真有旧 extra override 残留待导入后清理
 ## 2026-09-20 · M4.5 批 12：安全键盘「伪字符映射协议」逆转——密码输错根因修复 + 查看卡号官方三步弹窗
 
 - **模块**：`crates/campus-synjones/src/{ecard_ops.rs,ecard.rs}`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardBankView,EcardCardOpsView}.tsx`
