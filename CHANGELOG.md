@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 3 补验二：写操作协议实测修正（form→JSON body）+ 限额真机打通 + 限额不回显的界面修复 + 转账结论
+
+- **模块**：`crates/campus-synjones/src/{client,ecard_ops}.rs`、`tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx`（本轮 Rust 改动仅前两个文件）
+- **背景**：校园网恢复后补验批 3 的写路径。用户以 AskUserQuestion 明确授权三项真机验证：**限额设置**、**0.01 元转账（含转回）**、**查看卡号（用户自己点，密码不经过我）**
+- **根因修复（本批最关键）**：批 3 的 15 个写端点全部返回 `code=400 业务异常`，根因是**请求体编码错了**——实现用了 form-urlencoded，而官方 axios 实例默认 **JSON body**。新增 `SynjonesClient::post_json`（值全字符串）与 `post_json_vals`（值可为 number），14 处写端点从 `post_form` 切到 JSON（`synAccessSource` 合并进 JSON body 并保留同名头）。切到 JSON 后错误码随之为业务级（`retcode`/`code` 有具体语义），不再是无信息的「业务异常」
+- **限额设置真机打通（首个 live 通过的写操作）**：`set500 ok=true` + `reset0 ok=true`。同时修掉第二个协议错：`acctype` 需按 `-` 拆分（官方 `acctype.split("-")[0]/[1]`），整串传会报 `code=60006 电子账户信息不存在`。这一条同时证明了 JSON body、acctype 拆分、`retcode` 双层判定三条链路正确
+- **新发现：学校侧不回显限额（⇒ 界面修复）**：写入成功后重取卡信息，`dayCostLimitYuan` 等**仍是旧值**——与官方前端靠 `sessionStorage` 本地回写的行为一致，不是我们的 bug。但旧界面保存成功后 `onChanged()` 重取概览会把输入框与「当前」刷回旧值，**看着像没生效**。`EcardCardOpsView` 的限额区改为保存成功后记住本次提交值（`saved` 状态优先于学校侧值展示）并标注「（本次提交值）」，文案同时说明「学校系统不回显限额」。这是本轮唯一的前端改动
+- **金额单位三套口径（本批易错点，已写入 wiki）**：一卡通读类（`ecard.rs`）一律**分**；`/charge/*`（充值/电费）一律**元**；写操作内部也不统一——限额与圈存的三个字段是**分**（官方 `100*x`），而**卡间转账的 `tranamt` 是元且不乘 100**（官方 `tranamt: amountValue.number` 原值直传）。转账若按分处理会把金额放大 100 倍
+- **转账仍未通过（如实结论）**：三次真机尝试（0.01 元字符串 / 0.01 元 JSON number / 1 元 JSON number）均返回 `慧新E校接口错误（code=400）：操作失败`，**账户余额与流水零变化（无副作用）**。已逐项核对与官方 bundle **逐字一致**：端点 `/berserker-app/ykt/tsm/cardTransfer`、5 个字段名与取值来源（`dstCardAccount`/`srcCardAccount` 取账户的 `account`、`src/dst_acctype` 取 `payacc`）、`tranamt` 单位与类型、以及**官方该页面不含任何 `pwd`/`password`/`checkPwd` 字段**（正则确认）。据此判定为**服务端侧拒绝**（该校未开通此功能，或存在 bundle 不可见的前置条件），非客户端实现缺陷；代码保留官方形态并在函数注释标注该结论
+- **用户账户状态**：所有验证均在授权范围内且**已还原**——限额最终为 `0/0/0`（`ecard_set_limits` 返回 `success:true`）、余额与流水无任何变动；「查看卡号」留待用户本人在应用内操作（查询密码不经过我）
+- **验证**：`cargo test --lib` **91 passed / 0 failed**、`tsc --noEmit` 零错误；真机 CDP 点验限额保存成功且新文案「（本次提交值）」「已提交。学校系统不回显限额…」渲染正常（该次提交值为幂等的 0）。**未点验部分如实说明**：非零限额提交后的显示保持、以及其它密码类写操作（改密/挂失/解挂/绑卡）的端到端行为未做真机点验——前者受 CDP 输入注入在本环境不稳定所限，后者需用户本人操作密码键盘
+
 ## 2026-09-19 · M4.5 批 3 补验：写操作子页真机验证 + 两处修复（查询密码键盘选型、进页自动弹键盘）
 
 - **模块**：`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardCardOpsView,EcardBankView}.tsx`（仅前端）

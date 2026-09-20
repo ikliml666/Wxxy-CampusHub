@@ -64,7 +64,9 @@ tags:
 
 流水查询在 `commands/synjones.rs::get_ecard_transactions`（`:153`）**原地扩参**：`account?/page/size?/type?/typeId?/info?/orderId?`，映射到协议层 `TurnoverFilter`（`ecard.rs:391`；`build_turnover_params` 保证**未传的可选参数不进 query**）。
 
-## 写操作命令清单（`commands/ecard.rs`，2026-09-19 批 4 新增 15 条；⚠️ **全部未 live 验证**——写路径红线：开发/点验阶段绝不真发写请求，只能由用户在真机上显式触发，与 `submit_pay` 同口径，见 [[modules/campus-synjones|慧新E校协议核心]] §五「未验证项」）
+## 写操作命令清单（`commands/ecard.rs`，2026-09-19 批 4 新增 15 条）
+
+> **live 验证状态（2026-09-20 更新）**：**`ecard_set_limits` 已真机验证通过**（写入 `ok=true`、还原 `ok=true`），这是首个 live 通过的写操作；其余 14 条仍**未经 live 验证**（写路径红线：开发/点验阶段绝不真发写请求，只能由用户在真机上显式触发，与 `submit_pay` 同口径，见 [[modules/campus-synjones|慧新E校协议核心]] §五「未验证项」）。其中 `ecard_transfer` 已按官方形态逐字对齐仍被服务端以 `code=400 操作失败` 拒绝（无副作用），判定为该校未开通，详见 [[learnings/ecard-write-protocol-json-body|一卡通写操作协议实测]]。
 
 | 命令 | 关键参数 | 说明 | 位置 |
 |---|---|---|---|
@@ -74,9 +76,9 @@ tags:
 | `ecard_modify_pwd` | `account?`, 三组 `padId/positions` | 改密三段式（`oldpw`/`newpw`/`renewpw` 各自消耗一把键盘） | `ecard.rs:536` |
 | `ecard_send_find_pwd_code` | `account?` | 发验证码，回 `data.account` 作后续会话 id | `ecard.rs:566` |
 | `ecard_find_pwd` | `account?`, `padId/positions`×2, `vercode`, `id` | 凭短信验证码设新密（免旧密） | `ecard.rs:585` |
-| `ecard_set_limits` | `account?`, `acctype`, 日/免密/单笔限额（**元**） | 后端 `yuan_to_fen_str` ×100 转分（`ecard_ops.rs:292`） | `ecard.rs:614` |
+| `ecard_set_limits` | `account?`, `acctype`, 日/免密/单笔限额（**元**） | 后端 `yuan_to_fen_str` ×100 转分（`ecard_ops.rs:292`）；**`acctype` 必须按 `-` 拆成 `account`/`acctype` 两个字段**（官方 `split("-")`，整串传报 `code=60006`）——✅ **2026-09-20 live 通过** | `ecard.rs:614` |
 | `ecard_set_autotrans` | `account?`, `flag`, 金额（元）, `limite?` | 圈存转账标识（`autotransFlag/Amt/Limite`） | `ecard.rs:646` |
-| `ecard_transfer` | `srcAccount`, `dstAccount`, `srcAcctype`, 金额（元） | 卡间转账；**唯一必须由前端回传账户原号的写命令**（账户来自 `get_ecard_transfer_accounts`） | `ecard.rs:668` |
+| `ecard_transfer` | `srcAccount`, `dstAccount`, `srcAcctype`, 金额（元） | 卡间转账；**唯一必须由前端回传账户原号的写命令**（账户来自 `get_ecard_transfer_accounts`）；`tranamt` 传**元且不乘 100**（官方 `amountValue.number`）；⚠️ 参数与官方逐字一致仍被服务端拒绝 `code=400`，见 learning | `ecard.rs:668` |
 | `ecard_send_bind_bank_code` | `account?` | 绑定银行卡-发验证码 | `ecard.rs:695` |
 | `ecard_bind_bank` | `account?`, 银行卡号, `vercode` | 建立银行卡绑定关系 | `ecard.rs:716` |
 | `ecard_cancel_bank` | `account?` | 解绑银行卡 | `ecard.rs:741` |
@@ -87,6 +89,10 @@ tags:
 **账号来源（批 4 关键设计）**：除 `ecard_transfer` 外，这 15 条命令的 `account` 参数都是 `Option<String>`——因为**卡号原号不暴露给前端**（`CardDetail` 只有 `account_masked`，见下「脱敏策略」），缺省时由后端 helper `resolve_account`（`ecard.rs:440`）调 crate 层新增的 `ecard::current_account`（`ecard.rs:392`，内部走 `getCampusCards` 取本人当前卡）解析。这与「电费房间上下文串由后端合成」（`third_party_for_room`）是同一取舍：**凡是前端拿不到/不该拿的数据，由后端在命令边界现解析**。
 
 **密码协议链路（安全键盘消费）**：前端 `SecureKeypad.tsx` 只提交 `padId`（本进程随机 id，真实 uuid 不出后端）+ 用户点击的**位置下标序列** → 后端 `ecard_ops::assemble_pwd`（`ecard_ops.rs:284`）经 `take_pad`（取走即删）取回键盘映射，纯函数 `build_pwd`（`ecard_ops.rs:263`）按下标翻译成字符拼 `pwd = "1$1$" + 明文 + "$1$" + keyboardUuid`（`pwdType:"1"`），**明文只在后端内存中出现、拼完即弃**——与电费充值 `passwordMap` 同构的红线（[[learnings/ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘]]、[[modules/campus-synjones|慧新E校协议核心]] §五安全红线）。
+
+**请求体必须是 JSON（2026-09-20 真机根因）**：15 个写端点用 form-urlencoded 会**全部**返回 `code=400 业务异常`（服务端只按 JSON 解析，连业务层都没进）。实现改走 `SynjonesClient::post_json`（`client.rs:233`，值全字符串）与 `post_json_vals`（`client.rs:251`，值可为 JSON number，金额类字段用），`synAccessSource` 合并进 JSON body、同名头保留。**看到 `400 业务异常` 这种无信息量错误码，先怀疑报文编码而非参数值。**
+
+**写成功 ≠ 读回一致**：学校侧卡信息接口**不回显限额**（与官方前端靠 `sessionStorage` 本地回写一致）⇒ 前端 `EcardCardOpsView` 限额区在保存成功后用 `saved` 状态优先展示本次提交值并标注「（本次提交值）」，否则重取概览会把界面刷回旧值、看着像没生效。
 
 **双层成功判定**：写操作不能只看信封 `code==200`。`require_retcode_ok`（`ecard_ops.rs:302`）要求**axios 层 `code==200` 且业务层 `data.retcode=="0"`**，失败取 `data.errmsg`、回落顶层 `msg` 组装中文错误。既有单测 `retcode_double_layer_judgement` 钉住该口径（`ecard_ops.rs:750`）。
 

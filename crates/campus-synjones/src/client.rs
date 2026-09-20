@@ -225,6 +225,57 @@ impl SynjonesClient {
         .await
     }
 
+    /// POST **JSON** 业务接口（值全为字符串）：body 是对象（`synAccessSource` 合并进去）+ 统一头组。
+    ///
+    /// 与 [`Self::post_form`] 的区别只有 body 编码。**写操作（挂失/解挂/改密/限额/圈存/
+    /// 转账/绑卡）实测只认 JSON**：官方 axios 实例默认 JSON body，用 form 提交同样参数会得到
+    /// `code=400 业务异常`（2026-09-19 真机验证：限额与转账三个写端点全 400，改 JSON 后限额通过）。
+    pub async fn post_json(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        kind: Envelope,
+    ) -> Result<Value, CampusSynjonesError> {
+        let vals: Vec<(&str, Value)> = form
+            .iter()
+            .map(|(k, v)| (*k, Value::String(v.clone())))
+            .collect();
+        self.post_json_vals(path, &vals, kind).await
+    }
+
+    /// POST JSON 业务接口（值可为字符串/**数字**/布尔）。
+    ///
+    /// 金额类字段传 JSON **number** 而不是字符串——官方前端就是直接传 number
+    /// （如转账的 `tranamt: this.amountValue.number`）；字符串形态在部分端点被拒
+    /// （`code=400 操作失败`）。
+    pub async fn post_json_vals(
+        &self,
+        path: &str,
+        form: &[(&str, Value)],
+        kind: Envelope,
+    ) -> Result<Value, CampusSynjonesError> {
+        let mut obj = serde_json::Map::with_capacity(form.len() + 1);
+        obj.insert(
+            "synAccessSource".to_string(),
+            Value::String(SYN_ACCESS_SOURCE.to_string()),
+        );
+        for (k, v) in form {
+            obj.insert((*k).to_string(), v.clone());
+        }
+        let body = Value::Object(obj);
+        self.send(kind, |token| {
+            Self::with_headers(
+                self.cas
+                    .http_client()
+                    .post(format!("{}{path}", self.base))
+                    .timeout(REQUEST_TIMEOUT)
+                    .json(&body),
+                token,
+            )
+        })
+        .await
+    }
+
     /// 发送 + 会话失效静默重进（首次 NotLogin → `reenter` → 重试一次 → 仍失败归一 NotLogin）。
     async fn send(
         &self,

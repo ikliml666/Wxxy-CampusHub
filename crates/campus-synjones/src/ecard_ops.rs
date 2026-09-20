@@ -333,7 +333,7 @@ pub async fn lost_card(
     account: &str,
 ) -> Result<(), CampusSynjonesError> {
     let v = client
-        .post_form(EP_LOST, &[("account", account.to_string())], Envelope::Berserker)
+        .post_json(EP_LOST, &[("account", account.to_string())], Envelope::Berserker)
         .await?;
     require_retcode_ok(&v)
 }
@@ -350,7 +350,7 @@ pub async fn unlost_card(
         form.push(("pwd", assemble_pwd(pad)?));
         form.push(("pwdType", PWD_TYPE.to_string()));
     }
-    let v = client.post_form(EP_UNLOST, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_UNLOST, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
@@ -385,7 +385,7 @@ pub async fn modify_pwd(
         ("newpw", assemble_pwd(new)?),
         ("renewpw", assemble_pwd(renew)?),
     ];
-    let v = client.post_form(EP_MODIFY_PWD, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_MODIFY_PWD, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
@@ -395,7 +395,7 @@ pub async fn send_find_pwd_code(
     account: &str,
 ) -> Result<String, CampusSynjonesError> {
     let v = client
-        .post_form(EP_SEND_FIND_PWD_VER, &[("account", account.to_string())], Envelope::Berserker)
+        .post_json(EP_SEND_FIND_PWD_VER, &[("account", account.to_string())], Envelope::Berserker)
         .await?;
     require_retcode_ok(&v)?;
     data_text(&v, "account", "找回密码会话 id")
@@ -417,11 +417,16 @@ pub async fn find_pwd(
         ("vercode", vercode.to_string()),
         ("id", id.to_string()),
     ];
-    let v = client.post_form(EP_FIND_PWD, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_FIND_PWD, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
 /// 限额设置（`daycostlimit`/`nonpwdlimit`/`singlelimit` 一律**分**；前端传元，此处 ×100）。
+///
+/// `acc_type` 来自卡上 `accinfos[].type`，形态是 `<卡号>-<子账户码>`（实测 `42940-000`）。
+/// **必须拆开**：官方前端是 `account: accType.split("-")[0]` + `acctype: accType.split("-")[1]`
+/// （bundle 反查 offset 221394）。整串塞给 `acctype` 会得到 `code=60006 电子账户信息不存在`
+/// （2026-09-19 真机实测踩过）。
 pub async fn set_limits(
     client: &SynjonesClient,
     account: &str,
@@ -430,14 +435,19 @@ pub async fn set_limits(
     nonpwd_yuan: f64,
     single_yuan: f64,
 ) -> Result<(), CampusSynjonesError> {
+    let (acc, acct) = match acc_type.split_once('-') {
+        Some((a, b)) => (a.to_string(), b.to_string()),
+        // 无 `-` 的形态（服务端若改口径）：account 回落到调用方给的卡号，acctype 原样
+        None => (account.to_string(), acc_type.to_string()),
+    };
     let form = [
-        ("account", account.to_string()),
-        ("acctype", acc_type.to_string()),
+        ("account", acc),
+        ("acctype", acct),
         ("daycostlimit", yuan_to_fen_str(day_yuan)),
         ("nonpwdlimit", yuan_to_fen_str(nonpwd_yuan)),
         ("singlelimit", yuan_to_fen_str(single_yuan)),
     ];
-    let v = client.post_form(EP_PAY_LIMITE_MODIFY, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_PAY_LIMITE_MODIFY, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
@@ -457,11 +467,16 @@ pub async fn set_autotrans(
     if let Some(l) = limite_yuan {
         form.push(("autotransLimite", yuan_to_fen_str(l)));
     }
-    let v = client.post_form(EP_MODIFY_ACC, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_MODIFY_ACC, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
-/// 卡间转账（卡账户 ⇄ 电子账户；`tranamt` **分**）。
+/// 卡间转账（卡账户 ⇄ 电子账户）。
+///
+/// ⚠️ **`tranamt` 是元、且不乘 100**——官方前端逐字是
+/// `tranamt: this.amountValue.number`（bundle offset 258896，用户输入框的原值），
+/// 与限额/圈存那两处 `×100` 不同（那两处服务端要分）。这里若按分处理会把金额放大 100 倍
+/// 并得到通用失败 `code=400 操作失败`（2026-09-19 真机实测踩过）。
 pub async fn transfer(
     client: &SynjonesClient,
     dst_account: &str,
@@ -470,14 +485,20 @@ pub async fn transfer(
     src_acctype: &str,
     dst_acctype: &str,
 ) -> Result<(), CampusSynjonesError> {
+    let amount = serde_json::Number::from_f64(amount_yuan)
+        .map(serde_json::Value::Number)
+        .ok_or_else(|| CampusSynjonesError::Parse("转账金额不是有效数字".to_string()))?;
     let form = [
-        ("dstCardAccount", dst_account.to_string()),
-        ("srcCardAccount", src_account.to_string()),
-        ("tranamt", yuan_to_fen_str(amount_yuan)),
-        ("src_acctype", src_acctype.to_string()),
-        ("dst_acctype", dst_acctype.to_string()),
+        ("dstCardAccount", serde_json::json!(dst_account)),
+        ("srcCardAccount", serde_json::json!(src_account)),
+        // 金额传 JSON number（官方 `tranamt: this.amountValue.number`）
+        ("tranamt", amount),
+        ("src_acctype", serde_json::json!(src_acctype)),
+        ("dst_acctype", serde_json::json!(dst_acctype)),
     ];
-    let v = client.post_form(EP_CARD_TRANSFER, &form, Envelope::Berserker).await?;
+    let v = client
+        .post_json_vals(EP_CARD_TRANSFER, &form, Envelope::Berserker)
+        .await?;
     require_retcode_ok(&v)
 }
 
@@ -496,7 +517,7 @@ pub async fn send_bind_bank_code(
     if let Some(b) = bankacc {
         form.push(("bankacc", b.to_string()));
     }
-    let v = client.post_form(EP_SEND_BIND_BANK_VER, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_SEND_BIND_BANK_VER, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)?;
     data_text(&v, "account", "绑卡会话 id")
 }
@@ -518,7 +539,7 @@ pub async fn bind_bank(
         ("pwd", assemble_pwd(pad)?),
         ("pwdType", PWD_TYPE.to_string()),
     ];
-    let v = client.post_form(EP_BUILD_BANK_RELATION, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_BUILD_BANK_RELATION, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
@@ -528,7 +549,7 @@ pub async fn cancel_bank(
     account: &str,
 ) -> Result<(), CampusSynjonesError> {
     let v = client
-        .post_form(EP_CANCEL_BANK, &[("account", account.to_string())], Envelope::Berserker)
+        .post_json(EP_CANCEL_BANK, &[("account", account.to_string())], Envelope::Berserker)
         .await?;
     require_retcode_ok(&v)
 }
@@ -539,7 +560,7 @@ pub async fn send_bind_user_code(
     account: &str,
 ) -> Result<String, CampusSynjonesError> {
     let v = client
-        .post_form(EP_SEND_BIND_USER_VER, &[("account", account.to_string())], Envelope::Berserker)
+        .post_json(EP_SEND_BIND_USER_VER, &[("account", account.to_string())], Envelope::Berserker)
         .await?;
     require_retcode_ok(&v)?;
     data_text(&v, "account", "绑校园卡会话 uuid")
@@ -561,7 +582,7 @@ pub async fn bind_user(
         ("pwd", assemble_pwd(pad)?),
         ("pwdType", PWD_TYPE.to_string()),
     ];
-    let v = client.post_form(EP_BIND_USER, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_BIND_USER, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 
@@ -579,7 +600,7 @@ pub async fn unbind_user(
         ("pwd", assemble_pwd(pad)?),
         ("pwdType", PWD_TYPE.to_string()),
     ];
-    let v = client.post_form(EP_UNBIND_USER, &form, Envelope::Berserker).await?;
+    let v = client.post_json(EP_UNBIND_USER, &form, Envelope::Berserker).await?;
     require_retcode_ok(&v)
 }
 

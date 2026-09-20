@@ -483,13 +483,20 @@ function LimitsSection({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  // 学校侧的卡信息接口**不回显**限额（官方前端同样靠 sessionStorage 本地回写），
+  // 所以保存成功后必须自己记住本次提交值，否则重取概览会把界面刷回旧值、看着像没生效。
+  const [saved, setSaved] = useState<{
+    day: number;
+    nonpwd: number;
+    single: number;
+  } | null>(null);
 
   // 概览刷新（onChanged 后容器重取）时同步学校侧最新值
   useEffect(() => {
-    setDaycost(String(card.dayCostLimitYuan));
-    setNonpwd(String(card.nonpwdLimitYuan));
-    setSingle(String(card.singleLimitYuan));
-  }, [card]);
+    setDaycost(String(saved ? saved.day : card.dayCostLimitYuan));
+    setNonpwd(String(saved ? saved.nonpwd : card.nonpwdLimitYuan));
+    setSingle(String(saved ? saved.single : card.singleLimitYuan));
+  }, [card, saved]);
 
   if (!acc) {
     return (
@@ -526,19 +533,30 @@ function LimitsSection({
     });
     setBusy(false);
     if (r.success) {
-      setMsg("已提交：限额设置已更新。");
+      setSaved({
+        day: yuanNum(daycost),
+        nonpwd: yuanNum(nonpwd),
+        single: yuanNum(single),
+      });
+      setMsg("已提交。学校系统不回显限额，下方「当前」为本次提交值。");
       onChanged();
     } else {
       setErr(r.message ?? "限额设置失败");
     }
   };
 
+  const shown = saved ?? {
+    day: card.dayCostLimitYuan,
+    nonpwd: card.nonpwdLimitYuan,
+    single: card.singleLimitYuan,
+  };
+
   return (
     <Section title="免密与限额">
       <p className="text-caption text-text-2">
-        当前：单日消费 {yuanText(card.dayCostLimitYuan)} · 免密{" "}
-        {yuanText(card.nonpwdLimitYuan)} · 单笔 {yuanText(card.singleLimitYuan)}
-        （填 0 表示不限制）
+        当前：单日消费 {yuanText(shown.day)} · 免密 {yuanText(shown.nonpwd)} · 单笔{" "}
+        {yuanText(shown.single)}（填 0 表示不限制）
+        {saved ? "（本次提交值）" : ""}
       </p>
       <div className="mt-3 flex flex-wrap gap-3">
         {fields.map((f) => (
