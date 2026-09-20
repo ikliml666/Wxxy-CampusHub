@@ -39,6 +39,7 @@ use campus_synjones::ecard_stats::{
     StatsAssortItem, StatsPoint, StatsSummary, TurnoverType,
 };
 use campus_synjones::client::Envelope;
+use campus_synjones::ecard_face;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -1035,4 +1036,57 @@ mod tests {
             }
         }
     }
+}
+
+// ---------------- 人脸采集（fapi 智慧校园服务；官方 overLightMobileH5 复刻） ----------------
+
+/// `ecard_face_detail` → data：人脸采集状态与基础信息。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetailDto {
+    pub name: String,
+    pub number: String,
+    pub school_name: String,
+    /// 是否已采集（学校侧 `avatar` 非空）。
+    pub collected: bool,
+}
+
+/// 读人脸采集状态（零写副作用；H5 账号用官方 autoLogin 固定密码登录）。
+#[tauri::command]
+pub async fn ecard_face_detail(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<FaceDetailDto>, String> {
+    with_synjones!(state, |client| {
+        Ok(match ecard_face::face_detail(client).await {
+            Ok(d) => CommandResult::ok(FaceDetailDto {
+                collected: d.avatar_path.is_some(),
+                name: d.name,
+                number: d.number,
+                school_name: d.school_name,
+            }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 上传人脸照片（**写操作**：写入学校人脸库；前端必须已让用户选照片并二次确认）。
+/// `photo_base64`：前端 FileReader 读出的 dataURL base64 部分。
+#[tauri::command]
+pub async fn ecard_face_upload(
+    state: State<'_, AppState>,
+    photo_base64: String,
+) -> Result<CommandResult<()>, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(photo_base64.trim())
+        .map_err(|e| format!("照片数据解码失败：{e}"))?;
+    if bytes.is_empty() {
+        return Ok(CommandResult::err("照片数据为空"));
+    }
+    with_synjones!(state, |client| {
+        Ok(match ecard_face::replace_face(client, &bytes).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
 }

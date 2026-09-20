@@ -6,6 +6,7 @@ import {
   CreditCard,
   Landmark,
   Receipt,
+  ScanFace,
   Settings2,
   Zap,
 } from "lucide-react";
@@ -71,6 +72,12 @@ const TILES: Tile[] = [
     visible: (config) =>
       config.enabledApps.includes("yinhangka") ||
       config.enabledApps.includes("bind-bank-card"),
+  },
+  {
+    id: "face",
+    label: "人脸采集",
+    hint: "上传 / 更换刷脸照片",
+    icon: ScanFace,
   },
 ];
 

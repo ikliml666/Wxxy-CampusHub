@@ -119,6 +119,16 @@ pub struct SynjonesClient {
 }
 
 impl SynjonesClient {
+    /// 共享 HTTP 客户端（fapi 人脸采集等旁路请求复用连接池）。
+    pub fn http_client(&self) -> &reqwest::Client {
+        self.cas.http_client()
+    }
+
+    /// 当前 synjones token 快照（人脸采集要解 JWT 里的学号；None = 尚未登录）。
+    pub fn token_snapshot(&self) -> Option<SynjonesToken> {
+        self.token.lock().ok().and_then(|g| g.clone())
+    }
+
     /// 构造：`token` 为 None 时首次业务请求会先走 SSO 桥取票。
     pub fn new(cas: CasClient, tgt: Option<String>, token: Option<SynjonesToken>) -> Self {
         Self {

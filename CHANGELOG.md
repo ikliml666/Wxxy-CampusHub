@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 5：人脸采集接入（官方 fapi 链复刻 + 真机打通）+ 设置项取舍结论
+
+- **模块**：`crates/campus-synjones/src/{ecard_face.rs(新),client.rs,lib.rs}`、`Cargo.toml`（rsa/md-5/base64/multipart）、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}` + `Cargo.toml`、`tauri-app/frontend/src/{components/ecard/EcardFaceView.tsx(新),components/ecard/EcardHome.tsx,panels/EcardsPanel.tsx,shared/types.ts,stores/uiStore.ts}`
+- **功能**：一卡通宫格新增「人脸采集」子页（`EcardView` 十值）——显示姓名/学工号/学校/采集状态，选择照片（JPEG/PNG ≤8MB，预览）→ 二次确认 → 上传学校人脸库（食堂/门禁刷脸）
+- **协议复刻（deepseek-flash 对官方 overLightMobileH5 bundle 全量取证 + live 实测）**：`GET /fapi/img/code/public/key`（RSA 公钥**每次不同**，即取即用）→ JSEncrypt 等价 **RSA PKCS#1 v1.5** 加密密码 → `POST oauth/token`（form；`client_id=client_core`、**client_secret=123456 官方 autoLogin 写死**、`isThird=true` 自动开设账号）→ `GET oauth/detail?userId=`（实测仅 userId 必需）→ `POST meeting/largeScreen/replaceFace/{userId}`（multipart part 名 `avatar`，formData 仅 userId）。sign 头 `md5("/path-@-ts")` 照源码实现（服务端当前不校验，防收紧）。学分母：官方 `faceAcquisition`（分数检测）在本 build 是死代码，主流程只需 replaceFace
+- **真机验证**：`ecard_face_detail` 返回真实数据 `{name:林博乐, number:24385214, schoolName:无锡学院, collected:false}`；子页 UI 渲染完整。**上传未自动验证**（写人脸库，留用户在应用内显式确认后操作）
+- **红线**：照片 base64 只在内存流转（FileReader→IPC→multipart），不落盘、不进日志；上传前 window.confirm 二次确认
+- **设置项取舍（YAGNI 记录）**：官方「我的-设置」其余选项不搬——脱机二维码开关/付款码支付顺序服务于本应用没有的付款码功能；安全设置（手机号/登录密码）属 plat 账号体系另一条鉴权链；换账号/退出/关于已由应用外壳提供
+- **验证**：`cargo build` 通过、`tsc --noEmit` 零错误、真机 CDP 读链路与 UI 点验通过
 ## 2026-09-20 · M4.5 批 3 补验四：转账「未开通」复核（app 来源四变体全 400）、查询密码 60005 实证、限额本地持久化
 
 - **模块**：`tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx`（唯一代码改动）+ wiki/CHANGELOG

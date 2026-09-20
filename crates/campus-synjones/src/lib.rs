@@ -31,6 +31,7 @@
 pub mod charge;
 pub mod client;
 pub mod ecard;
+pub mod ecard_face;
 pub mod ecard_ops;
 pub mod ecard_stats;
 pub mod recharge;
@@ -89,6 +90,9 @@ pub enum CampusSynjonesError {
     /// 响应解析失败（信封缺失/字段类型不符）。
     #[error("慧新E校响应解析失败：{0}")]
     Parse(String),
+    /// 人脸采集（fapi 智慧校园服务）失败。
+    #[error("人脸采集失败：{0}")]
+    Face(String),
 }
 
 /// 慧新E校访问令牌。

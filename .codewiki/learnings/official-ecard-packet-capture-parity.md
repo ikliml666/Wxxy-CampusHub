@@ -58,7 +58,11 @@ modifyPwd: POST .../modifyPwd（错误密码 → code=1008 两次输入的密码
 
 **限额不回显的唯一可行解**：学校卡信息接口读回恒为旧值（官方也只本地回写 sessionStorage）⇒ 应用侧把最近提交值持久化 localStorage（键 `campushub-ecard-limits-local`，按 acctype），展示标注「（本地记录）」。
 
-## 六、未实现（留待后续，接口已考察）
+## 六、人脸采集已实现（批 5）与设置项取舍
+
+人脸采集（批 5）完整复刻：fapi 登录链（RSA 公钥即取即用 → PKCS#1 v1.5 → oauth/token，client_secret=123456 为官方 autoLogin 约定）+ oauth/detail + replaceFace multipart。实现见 `ecard_face.rs` 与 [[modules/ecard-panel|一卡通页]]。设置项**不搬**的部分：脱机二维码开关/付款码支付顺序（服务于本应用没有的付款码功能）、安全设置（plat 账号体系另一条鉴权链）——避免为不存在的功能建配置。
+
+## 七、未实现（留待后续，接口已考察）
 
 - **人脸采集**：独立 H5 `/overLightMobileH5`（uni-app）。表单=姓名/手机/学工号只读 + 照片上传 + 确认；接口 `POST /fapi/meeting/largeScreen/faceAcquisition/{userId}`（multipart 字段 `avatar`）与 `.../replaceFace/{userId}`，前置 `checkFaceScore` 检测人脸分数；token 是 H5 自有体系（对接需先验证鉴权链是否认 synjones token）。
 - **「我的-设置」**（`/plat/user/setup`）：个人资料、安全设置（手机号+登录密码）、支付设置（脱机二维码开关 `getUserOfflienSwitch`、付款码支付顺序、校园卡支付设置=转账标识+限额【我们已有】）、设备管理、通用、关于、换账号、清缓存、退出。

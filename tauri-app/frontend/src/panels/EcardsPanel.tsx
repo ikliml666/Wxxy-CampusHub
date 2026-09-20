@@ -6,6 +6,7 @@ import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { EcardBalanceView } from "@/components/ecard/EcardBalanceView";
 import { EcardBankView } from "@/components/ecard/EcardBankView";
+import { EcardFaceView } from "@/components/ecard/EcardFaceView";
 import { EcardBillView } from "@/components/ecard/EcardBillView";
 import { EcardCardOpsView } from "@/components/ecard/EcardCardOpsView";
 import { EcardHome } from "@/components/ecard/EcardHome";
@@ -33,6 +34,7 @@ const SUB_TITLES: Record<Exclude<EcardView, "home">, string> = {
   cardops: "卡设置",
   transfer: "账户转账",
   bank: "银行卡",
+  face: "人脸采集",
 };
 
 /** 充值片区兜底值：实测该校 `frontConfig.recharge = 401`（配置拿不到时仍能进充值页）。 */
@@ -184,6 +186,7 @@ export function EcardsPanel() {
           onChanged={() => setTick((t) => t + 1)}
         />
       )}
+      {view === "face" && <EcardFaceView onChanged={() => setTick((t) => t + 1)} />}
     </section>
   );
 }

@@ -951,7 +951,8 @@ export type EcardView =
   | "power"
   | "cardops"
   | "transfer"
-  | "bank";
+  | "bank"
+  | "face";
 
 /** 流水分类字典（`get_ecard_types` → 项；id 语义实测 1 消费 2 充值 3 退款 4 扫码付 5 补贴）。 */
 export interface EcardTurnoverType {
@@ -1026,4 +1027,15 @@ export interface EcardCheckResult {
 export interface EcardCodeSent {
   /** 学校侧 `data.account`，后续提交命令（`ecard_find_pwd` / `ecard_bind_bank`）原样回传的 `id` */
   id: string;
+}
+
+/**
+ * `ecard_face_detail` → data：人脸采集状态与基础信息（fapi 智慧校园服务）。
+ */
+export interface EcardFaceDetail {
+  name: string;
+  number: string;
+  schoolName: string;
+  /** 是否已采集（学校侧头像非空） */
+  collected: boolean;
 }

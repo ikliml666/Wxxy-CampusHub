@@ -31,6 +31,7 @@ const ECARD_VIEWS: readonly EcardView[] = [
   "cardops",
   "transfer",
   "bank",
+  "face",
 ] as const;
 
 export const useUiStore = create<{
