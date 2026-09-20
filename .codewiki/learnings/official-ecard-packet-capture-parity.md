@@ -62,7 +62,22 @@ modifyPwd: POST .../modifyPwd（错误密码 → code=1008 两次输入的密码
 
 人脸采集（批 5）完整复刻：fapi 登录链（RSA 公钥即取即用 → PKCS#1 v1.5 → oauth/token，client_secret=123456 为官方 autoLogin 约定）+ oauth/detail + replaceFace multipart。实现见 `ecard_face.rs` 与 [[modules/ecard-panel|一卡通页]]。设置项**不搬**的部分：脱机二维码开关/付款码支付顺序（服务于本应用没有的付款码功能）、安全设置（plat 账号体系另一条鉴权链）——避免为不存在的功能建配置。
 
-## 七、未实现（留待后续，接口已考察）
+## 七、查询密码 60005 的穷举取证（2026-09-20 三轮，应用侧无解的证据链）
+
+在官方页面上下文（官方 token/官方来源）穷举提交「证件后六位 190453」：
+
+| 变体 | 结果 |
+|---|---|
+| Number uuid + 卡号 42940 + app | 60005 |
+| Standard uuid + 卡号 + app | 60005 |
+| Number uuid + 卡号 + **h5** | 60005 |
+| account=学工号 24385214 | **4000 不允许越权操作数据**（account 形态被校验，卡号是唯一合法值） |
+
+且官方 `myCampusCard` 静态溯源＝`getCampusCards` 卡的 `account`（与我们的取值一致）；h5/app 来源的 Number 键盘**都是随机字符**（实测 `Bi3xtq-:l{` / `SnLFuKdRy*`，数字占比≈1/9 随机水平）——**官方 Number 键盘根本输不出固定的 6 位数字密码**，这与其「官方系统里默认密码能用」的说法矛盾，指向该校查询密码实际值并非证件后六位（统一初始化为其它值/已被修改）。
+
+结论：客户端（无论官方还是我们）对该卡提交 190453 一律 60005，**唯一出路是短信找回重设**（不依赖旧密码）。不要再试密码（每次尝试都被服务端计数）。
+
+## 八、未实现（留待后续，接口已考察）
 
 - **人脸采集**：独立 H5 `/overLightMobileH5`（uni-app）。表单=姓名/手机/学工号只读 + 照片上传 + 确认；接口 `POST /fapi/meeting/largeScreen/faceAcquisition/{userId}`（multipart 字段 `avatar`）与 `.../replaceFace/{userId}`，前置 `checkFaceScore` 检测人脸分数；token 是 H5 自有体系（对接需先验证鉴权链是否认 synjones token）。
 - **「我的-设置」**（`/plat/user/setup`）：个人资料、安全设置（手机号+登录密码）、支付设置（脱机二维码开关 `getUserOfflienSwitch`、付款码支付顺序、校园卡支付设置=转账标识+限额【我们已有】）、设备管理、通用、关于、换账号、清缓存、退出。
