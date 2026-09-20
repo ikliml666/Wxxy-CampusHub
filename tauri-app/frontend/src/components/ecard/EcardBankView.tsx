@@ -315,10 +315,15 @@ function RevealCardNoSection() {
   const check = async (v: KeypadInput) => {
     setBusy(true);
     setPadErr("");
-    const r = await invokeCommand<EcardCheckResult>("ecard_check_pwd", {
-      padId: v.padId,
-      positions: v.positions,
-    });
+    const r =
+      v.mode === "plain"
+        ? await invokeCommand<EcardCheckResult>("ecard_check_pwd_plain", {
+            password: v.plain,
+          })
+        : await invokeCommand<EcardCheckResult>("ecard_check_pwd", {
+            padId: v.padId,
+            positions: v.positions,
+          });
     setBusy(false);
     if (r.success && r.data) {
       if (r.data.bankCardNo) {

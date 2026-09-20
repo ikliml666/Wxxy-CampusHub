@@ -26,6 +26,13 @@ export interface KeypadInput {
   padId: string;
   positions: number[];
   keysFingerprint: string;
+  /**
+   * `plain` 模式：用户选择**系统键盘**直接输入明文（官方乱序键盘的反直觉体验，
+   * 用户显式要求）。`padId`/`positions` 为空串/空数组，提交走对应的 `*_plain` 命令。
+   */
+  mode?: "positions" | "plain";
+  /** plain 模式的明文密码（只在本机内存与 IPC 流转，不落盘不进日志） */
+  plain?: string;
 }
 
 /**
@@ -159,6 +166,9 @@ export function SecureKeypad({
   const [loadErr, setLoadErr] = useState("");
   /** 父组件错误与本地取键盘错误合并展示；重新获取键盘后清掉（已换新键盘，旧错误不再适用） */
   const [shownErr, setShownErr] = useState("");
+  /** 系统键盘明文输入模式（用户显式切换；官方乱序键盘难以输入固定顺序密码） */
+  const [altMode, setAltMode] = useState(false);
+  const [plain, setPlain] = useState("");
 
   const refetch = useCallback(async () => {
     setPhase("loading");
@@ -254,6 +264,17 @@ export function SecureKeypad({
             <RefreshCw aria-hidden className="size-3" />
             重新获取键盘
           </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={busy}
+            onClick={() => {
+              setAltMode((m) => !m);
+              setPlain("");
+            }}
+          >
+            {altMode ? "用安全键盘" : "用系统键盘"}
+          </Button>
           <Button variant="ghost" size="xs" disabled={busy} onClick={onCancel}>
             取消
           </Button>
@@ -285,6 +306,50 @@ export function SecureKeypad({
         <p className="mt-2 text-caption text-alert">{shownErr || loadErr}</p>
       )}
 
+      {altMode ? (
+        <div className="mt-3">
+          <input
+            type="password"
+            className="h-10 w-full rounded-control border border-line bg-surface px-3 text-body text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-wallet)]"
+            value={plain}
+            disabled={busy}
+            placeholder={`输入 ${length} 位密码`}
+            autoComplete="off"
+            onChange={(e) => setPlain(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && plain.length >= 4 && !busy) {
+                onDone({
+                  mode: "plain",
+                  padId: "",
+                  positions: [],
+                  keysFingerprint: "",
+                  plain,
+                });
+              }
+            }}
+          />
+          <Button
+            className="mt-2 w-full"
+            size="sm"
+            disabled={busy || plain.trim().length < 4}
+            onClick={() =>
+              onDone({
+                mode: "plain",
+                padId: "",
+                positions: [],
+                keysFingerprint: "",
+                plain,
+              })
+            }
+          >
+            提交密码
+          </Button>
+          <p className="mt-1.5 text-caption text-text-2">
+            明文仅在本机内存中拼装提交，不经日志；官方乱序键盘无法输入时用这个。
+          </p>
+        </div>
+      ) : (
+        <>
       {phase === "loading" && (
         <p className="mt-3 text-caption text-text-2" aria-busy>
           正在获取安全键盘…
@@ -331,6 +396,8 @@ export function SecureKeypad({
             清空重输
           </Button>
         </div>
+      )}
+        </>
       )}
     </div>
   );

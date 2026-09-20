@@ -104,7 +104,14 @@ export function EcardTransferView({ onChanged }: { onChanged: () => void }) {
       onChanged();
     } else {
       setConfirming(false);
-      setErr(r.message ?? "转账失败");
+      const m = r.message ?? "转账失败";
+      // 该校服务端对卡间转账四变体（正/反向、整数/小数、新旧端点）均报 400，
+      // 官方手机版也无此入口——大概率学校未开通。失败文案后追加可操作说明。
+      setErr(
+        /操作失败|业务异常/.test(m)
+          ? `${m}。多次尝试均失败时，可能是学校未开通卡间转账（官方手机版也无此入口），请改用卡片充值或到校服务终端办理。`
+          : m,
+      );
     }
   };
 

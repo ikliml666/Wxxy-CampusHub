@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 6：密码支持系统键盘明文输入（用户要求）+ 转账失败说明文案
+
+- **模块**：`crates/campus-synjones/src/ecard_ops.rs`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{SecureKeypad,EcardCardOpsView,EcardBankView,EcardTransferView}.tsx`
+- **功能（用户点名）**：所有查询密码弹层新增「用系统键盘」切换——不再强制官方乱序键盘，用户用本机键盘直接输密码（Enter 或「提交密码」按钮）。后端新增 `fresh_keyboard_uuid`（取键盘只为 uuid，乱序键位一律丢弃、不进缓存）与 `plain_pwd`（`"1$1$"+明文+"$1$"+uuid`），命令 `ecard_check_pwd_plain` / `ecard_unlost_plain`（解挂）。明文只在本机前端内存与 IPC 流转，不落盘不进日志（错误构造点仍过 redact_secrets）。安全键盘模式保留可随时切回
+- **真机验证**：`ecard_check_pwd_plain` 用错误密码探针返回业务错误 `60005 账户密码错误`——「取 uuid→明文拼串→checkPwd」全链通、格式被业务层接受，正确密码即可通过。**两次独立实证（官方上下文+本应用）都证明 60005 是密码值本身不对**：该校查询密码不是证件后六位/已被修改，请用「卡设置 → 忘记旧密码？用短信验证码找回」重设，重设后用明文输入一定能过
+- **转账失败文案**：`code=400 操作失败/业务异常` 时追加说明「可能是学校未开通卡间转账（官方手机版也无此入口），请改用卡片充值或到校服务终端办理」——该校服务端四变体穷举均 400，官方移动壳无转账入口
+- **限额「不显示」说明**：学校接口不回显限额（官方也只本地回写），981b5cd 起保存成功后显示「（本地记录）」；此前构建无此功能，更新后重新提交一次即见
+- **验证**：`tsc --noEmit` 零错误、真机 CDP 明文链路探针通过
 ## 2026-09-20 · M4.5 批 5：人脸采集接入（官方 fapi 链复刻 + 真机打通）+ 设置项取舍结论
 
 - **模块**：`crates/campus-synjones/src/{ecard_face.rs(新),client.rs,lib.rs}`、`Cargo.toml`（rsa/md-5/base64/multipart）、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}` + `Cargo.toml`、`tauri-app/frontend/src/{components/ecard/EcardFaceView.tsx(新),components/ecard/EcardHome.tsx,panels/EcardsPanel.tsx,shared/types.ts,stores/uiStore.ts}`

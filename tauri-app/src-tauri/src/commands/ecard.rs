@@ -40,6 +40,7 @@ use campus_synjones::ecard_stats::{
 };
 use campus_synjones::client::Envelope;
 use campus_synjones::ecard_face;
+use campus_synjones::ecard_ops::{check_pwd_plain, unlost_card_plain};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -1085,6 +1086,43 @@ pub async fn ecard_face_upload(
     }
     with_synjones!(state, |client| {
         Ok(match ecard_face::replace_face(client, &bytes).await {
+            Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+/// 校验查询密码（**系统键盘明文输入版**；密码明文只在 IPC 与后端内存出现，不进日志）。
+#[tauri::command]
+pub async fn ecard_check_pwd_plain(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    password: String,
+) -> Result<CommandResult<CheckPwdResult>, String> {
+    with_synjones!(state, |client| {
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match check_pwd_plain(client, &account, &password).await {
+            Ok(()) => CommandResult::ok(CheckPwdResult { ok: true, bank_card_no: None }),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 解挂（**系统键盘明文输入版**）。
+#[tauri::command]
+pub async fn ecard_unlost_plain(
+    state: State<'_, AppState>,
+    account: Option<String>,
+    password: String,
+) -> Result<CommandResult<()>, String> {
+    with_synjones!(state, |client| {
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        Ok(match unlost_card_plain(client, &account, &password).await {
             Ok(()) => CommandResult::ok(()),
             Err(e) => CommandResult::err(&err_text(&e)),
         })

@@ -105,6 +105,8 @@ pub fn run() {
             commands::ecard::ecard_transfer,
             commands::ecard::ecard_face_detail,
             commands::ecard::ecard_face_upload,
+            commands::ecard::ecard_check_pwd_plain,
+            commands::ecard::ecard_unlost_plain,
             commands::ecard::ecard_send_bind_bank_code,
             commands::ecard::ecard_bind_bank,
             commands::ecard::ecard_cancel_bank,

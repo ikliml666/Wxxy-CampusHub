@@ -107,10 +107,13 @@ function LostSection({
     setBusy(true);
     setErr("");
     setMsg("");
-    const r = await invokeCommand("ecard_unlost", {
-      padId: v.padId,
-      positions: v.positions,
-    });
+    const r =
+      v.mode === "plain"
+        ? await invokeCommand("ecard_unlost_plain", { password: v.plain })
+        : await invokeCommand("ecard_unlost", {
+            padId: v.padId,
+            positions: v.positions,
+          });
     setBusy(false);
     if (r.success) {
       setKeypadOpen(false);
