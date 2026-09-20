@@ -10,6 +10,8 @@ import { EcardFaceView } from "@/components/ecard/EcardFaceView";
 import { EcardBillView } from "@/components/ecard/EcardBillView";
 import { EcardCardOpsView } from "@/components/ecard/EcardCardOpsView";
 import { EcardHome } from "@/components/ecard/EcardHome";
+import { EcardPaycodeView } from "@/components/ecard/EcardPaycodeView";
+import { EcardProfileView } from "@/components/ecard/EcardProfileView";
 import { EcardPowerView } from "@/components/ecard/EcardPowerView";
 import { EcardRechargeView } from "@/components/ecard/EcardRechargeView";
 import { EcardStatsView } from "@/components/ecard/EcardStatsView";
@@ -32,6 +34,8 @@ const SUB_TITLES: Record<Exclude<EcardView, "home">, string> = {
   power: "宿舍电费",
   cardops: "卡设置",
   bank: "银行卡",
+  paycode: "付款码",
+  profile: "个人中心",
   face: "人脸采集",
 };
 
@@ -181,6 +185,8 @@ export function EcardsPanel() {
           onChanged={() => setTick((t) => t + 1)}
         />
       )}
+      {view === "paycode" && <EcardPaycodeView />}
+      {view === "profile" && <EcardProfileView />}
       {view === "face" && <EcardFaceView onChanged={() => setTick((t) => t + 1)} />}
     </section>
   );

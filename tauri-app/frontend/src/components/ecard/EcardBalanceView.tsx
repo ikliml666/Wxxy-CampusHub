@@ -185,6 +185,14 @@ export function EcardBalanceView({
         {card.expDate && (
           <p className="mt-1 text-caption text-text-2">有效期至 {card.expDate}</p>
         )}
+        {card.openDate && (
+          <p className="mt-1 text-caption text-text-2">开户时间 {card.openDate}</p>
+        )}
+        {card.dayCostAmtYuan !== null && (
+          <p className="mt-1 text-caption text-text-2">
+            当日已消费 ¥ {card.dayCostAmtYuan.toFixed(2)}
+          </p>
+        )}
       </Surface>
 
       {/* 子账户明细（accinfo[]） */}

@@ -10,6 +10,10 @@ source_files:
   - tauri-app/frontend/src/components/ecard/EcardPowerView.tsx
   - tauri-app/frontend/src/components/ecard/EcardRechargeView.tsx
   - tauri-app/frontend/src/components/ecard/SecureKeypad.tsx
+  - tauri-app/frontend/src/components/ecard/EcardPaycodeView.tsx
+  - tauri-app/frontend/src/components/ecard/EcardProfileView.tsx
+  - crates/campus-synjones/src/plat.rs
+  - crates/campus-synjones/tests/plat_sso_probe_live.rs
   - tauri-app/frontend/src/components/ecard/EcardCardOpsView.tsx
   - tauri-app/frontend/src/components/ecard/EcardBankView.tsx
   - tauri-app/frontend/src/components/ecard/MiniLine.tsx
@@ -40,11 +44,13 @@ tags:
 
 - **首页** `EcardHome.tsx`：顶部**主余额带**（主余额口径 = 电子账户，由 `config.balanceShowsElectronic` 决定）+ 功能宫格。
 - **余额** `EcardBalanceView.tsx`：`get_ecard_overview` 的 `cards[]`（`getCampusCards` 全卡列表）逐卡渲染。
-- **账单** `EcardBillView.tsx`：`get_ecard_transactions` 分页流水 + `get_ecard_types` 分类字典筛选。
-- **统计** `EcardStatsView.tsx`：`get_ecard_stats_summary`（今日/区间收支合计）+ `get_ecard_stats_series`（日期序列，`MiniLine.tsx` 手绘 SVG 折线）+ `get_ecard_stats_assort`（分类占比）。
+- **账单** `EcardBillView.tsx`：`get_ecard_transactions` 分页流水 + `get_ecard_types` 分类字典筛选；关键词搜索为 **300ms 防抖**（输入停稳即应用、清空即去参，回车仍可立即应用），placeholder「搜索消费明细」（2026-09-20 对齐官方 H5）。
+- **统计** `EcardStatsView.tsx`：`get_ecard_stats_summary`（今日/区间收支合计）+ `get_ecard_stats_series`（日期序列，`MiniLine.tsx` 手绘 SVG 折线）+ `get_ecard_stats_assort`（分类占比）+ **支出排行榜**（2026-09-20 新增，官方 chart 页同款：仅月维度显示，`get_ecard_transactions type="2" size=200` 拉最近支出——流水协议无时间范围参数——前端按月份前缀过滤后单笔金额降序取前 10；年视图隐藏）。
 - **充值** `EcardRechargeView.tsx`：一卡通充值（片区 401），复用 [[modules/campus-synjones|慧新E校协议核心]] §五 的 `RechargeFlow` 支付链路，建单带 `noContext: true`（见下「命令面」）。
 - **电费** `EcardPowerView.tsx`：**原 PowerPanel 电费内容整体搬入**（级联查询/常用房间/结果卡/三张数据卡均未动），页面壳换成子页形态；原文章细节见 [[modules/electricity-panel|电费页]]（其 `source_files` 已同步指向本文件）。
 - **卡务操作** `EcardCardOpsView.tsx`（M4.5 批 4 新增）：挂失·解挂（挂失分区按 `config.showLost` 门控）/ 修改密码三段式（旧密 + 新密 + 确认新密，**三把键盘各领各的**）/ 短信找回密码 / 免密与限额设置 / 圈存转账标识。
+- **付款码** `EcardPaycodeView.tsx`（批 14 新增，对齐官方 `/plat/pay`）：`get_ecard_paycode`（后端取 `codebarPayinfo` 选 `status==1 && code=="ACCOUNT"` 项 → `batchGetBarCodeGet` 取码，**双层判定 retcode=="0"**；DTO 结构面不含 `bandacc` 银行卡全号——PII 堵在解析层）→ 前端 jsbarcode CODE128 条码 + react-qr-code 二维码（同串）+「查看数字」+ 有效期倒计时 + 手动刷新 + 脱机开关只读展示。**待确认点**：条码编码格式 CODE128 未经真机扫码验证（POS 不识别时改 ITF/Code39 一行参数）；官方二维码由 websocket 实时推流，一期用 batchGet 串静态渲染。
+- **个人中心** `EcardProfileView.tsx`（批 14 新增，对齐官方 `/plat/wode`+`/plat/user/*`）：`get_plat_profile`（资料卡+字段格）+ `get_plat_equipment`（已登录/已授权设备）+ `get_plat_login_logs`（日志）——`Promise.allSettled` 四路并行逐路兜底。**一期只读**：设备下线/解绑/改手机/改密码等写操作待后续单独提供。
 - **银行卡** `EcardBankView.tsx`（批 4 新增）：绑定/解绑银行卡（短信验证码流程）、查看绑定卡号（走**查询密码校验**）；宫格入口按 `config.enabledApps` 含 `yinhangka`/`bind-bank-card` 门控。「查看卡号」为**官方同款三步**（2026-09-20）：键盘输密码 → 校验通过后**底部弹窗**（只显前 4 位 + 通栏「查看卡号」按钮）→ 点按钮显完整卡号（4 位一组）——全号由后端 `fetch_bank_number` 校验通过后回读 `getCampusCards.bankacc`（官方同款数据源，`checkPwd` 只是显示闸门）。
 - **安全键盘** `SecureKeypad.tsx`（批 4 新增，2026-09-20 修正键面形态，通用组件）：调 `get_ecard_secure_keyboard` 拿键盘，**键面渲染官方 `images` 图片九宫格**（图片画的才是数字；`keys` 是伪字符数组、绝不渲染成键面文字——协议见 [[learnings/ecard-keyboard-pseudochar-protocol|安全键盘伪字符映射协议]]），**只记录用户点击的位置下标序列**（明文不进前端），点满 6 位自动回调提交；占位符只显示已输位数，`aria-label` 只写「第 N 键」——**绝不把键位字符回显到无障碍文本**。系统键盘明文直输模式已删（协议上不可行：脱离批次的明文服务端还原必 60005）。
 
@@ -58,6 +64,9 @@ tags:
 | `get_ecard_stats_series` | `EcardStatsPoint[]`（后端已转**按 key 升序**数组、零值保留） | `ecard.rs:243` |
 | `get_ecard_stats_assort` | `EcardStatsAssortItem[]`（`{amount, typeId, turnoverType}`） | `ecard.rs:268` |
 | `get_ecard_secure_keyboard` | `EcardSecurePad{ padId, keys[] }`（**写操作的预备件**，见 learning） | `ecard.rs:376` |
+| `get_ecard_paycode` | `account?` | 付款码（`codebarPayinfo`+`batchGetBarCodeGet`，双层判定）→ `{barcode, expires, payName, balanceYuan}` | `ecard.rs:1037` |
+| `get_ecard_paycode_settings` | — | `{offlineSwitch}`（脱机开关只读） | `ecard.rs:1096` |
+| `get_plat_profile` / `get_plat_equipment` / `get_plat_login_logs` / `get_plat_offline_switch` | 见签名 | plat 只读面（资料/设备/日志/开关），鉴权与一卡通同 token，见 [[learnings/plat-api-same-token|plat 体系鉴权与 API 清单]] | `ecard.rs:1110+` |
 
 流水查询在 `commands/synjones.rs::get_ecard_transactions`（`:153`）**原地扩参**：`account?/page/size?/type?/typeId?/info?/orderId?`，映射到协议层 `TurnoverFilter`（`ecard.rs:391`；`build_turnover_params` 保证**未传的可选参数不进 query**）。
 
@@ -107,6 +116,10 @@ tags:
 ## 单位口径（一卡通侧 vs `/charge` 侧）
 
 一卡通侧（`berserker-*`/`berserker-search`）一切金额字段是**分**，由协议层 `ecard::yuan()`（`ecard.rs:132`）统一换算成元下发前端（`StatsSummary.expensesYuan` 等）；`/charge` 侧（电费账单/订单）是**元**——跨源聚合时两者口径不可混用，完整红线见 [[modules/campus-synjones|慧新E校协议核心]] §三 与 [[learnings/synjones-charge-yuan-vs-fen-and-pending-orders|元/分口径]]。
+
+## 卡片信息可选字段（2026-09-20 扩展）
+
+`CardDetail` 新增 `open_date`（开户时间）与 `day_cost_amt_yuan`（当天支付累计，元）两个 **Option 字段**：原始键名未经 live 单独证实（`daycostamt` 此前仅在子账户级 `accinfo[]` 实测过），按 `cdate` → `opendate` → `openDate` 回落探测、`int_of` 命中才 Some——**缺失即 None，前端该行不显示、不臆造**。展示位在 `EcardBalanceView.tsx` 主余额卡（`有效期至` 行下方）。真机若发现官方实际键名不同，按本段回落链补键名即可。
 
 ## 脱敏策略（契约 §2.5）
 

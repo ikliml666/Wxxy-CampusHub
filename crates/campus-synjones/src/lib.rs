@@ -34,6 +34,7 @@ pub mod ecard;
 pub mod ecard_face;
 pub mod ecard_ops;
 pub mod ecard_stats;
+pub mod plat;
 pub mod recharge;
 pub mod sso;
 pub mod turnover;

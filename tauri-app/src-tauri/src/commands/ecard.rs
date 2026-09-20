@@ -25,7 +25,7 @@
 use super::auth::CommandResult;
 use super::synjones::{err_text, synjones_session, ERR_NO_SESSION};
 use crate::infra::state::AppState;
-use campus_synjones::ecard::{current_account, fetch_bank_number, CardDetail};
+use campus_synjones::ecard::{current_account, fetch_bank_number, int_of, yuan, CardDetail};
 use campus_synjones::ecard_ops::{
     bind_bank, bind_user, cancel_bank, check_pwd, fetch_secure_keyboard, find_pwd, KeyboardKind,
     lost_card, modify_pwd, send_bind_bank_code, send_bind_user_code, send_find_pwd_code,
@@ -37,6 +37,7 @@ use campus_synjones::ecard_stats::{
 };
 use campus_synjones::client::Envelope;
 use campus_synjones::ecard_face;
+use campus_synjones::plat;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -937,6 +938,167 @@ pub async fn ecard_face_upload(
     with_synjones!(state, |client| {
         Ok(match ecard_face::replace_face(client, &bytes).await {
             Ok(()) => CommandResult::ok(()),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+// ---------------- plat（移动服务平台）只读面（批 14；鉴权与一卡通同源，见 plat.rs） ----------------
+
+/// 用户资料（`/berserker-base/user`）。本人查看本人资料，`Value` 原样透传（服务端
+/// `idNumber` 已掩码）；**绝不进日志**。
+#[tauri::command]
+pub async fn get_plat_profile(state: State<'_, AppState>) -> Result<CommandResult<Value>, String> {
+    with_synjones!(state, |client| {
+        Ok(match plat::user_profile(client).await {
+            Ok(v) => CommandResult::ok(v),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 绑定设备列表（`status`: `"1"` 已登录在线 / `"0"` 已授权手机设备）。
+#[tauri::command]
+pub async fn get_plat_equipment(
+    state: State<'_, AppState>,
+    status: String,
+) -> Result<CommandResult<Value>, String> {
+    with_synjones!(state, |client| {
+        Ok(match plat::equipment(client, &status).await {
+            Ok(v) => CommandResult::ok(v),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 登录日志（分页）。
+#[tauri::command]
+pub async fn get_plat_login_logs(
+    state: State<'_, AppState>,
+    page: u32,
+    size: u32,
+) -> Result<CommandResult<Value>, String> {
+    with_synjones!(state, |client| {
+        Ok(match plat::login_logs(client, page, size).await {
+            Ok(v) => CommandResult::ok(v),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 脱机二维码开关状态（付款码页用；写端点由用户显式触发，不在本命令面）。
+#[tauri::command]
+pub async fn get_plat_offline_switch(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<bool>, String> {
+    with_synjones!(state, |client| {
+        Ok(match plat::offline_switch(client).await {
+            Ok(b) => CommandResult::ok(b),
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+// ---------------- 付款码（一期；官方 H5 plat/pay 对齐，协议与红线见 plat.rs） ----------------
+
+/// `get_ecard_paycode` → data。
+///
+/// **红线**：`codebarPayinfo` 项里的 `bandacc`（绑定银行卡全号）在此路径上**根本不解析**
+/// ——DTO 结构面上就不存在该字段（同 [`parse_client_config`] 对 `privateKey` 的「不取」口径）；
+/// `barcode` 是动态支付凭据，前端不得落日志 / localStorage / 错误文案。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcardPaycode {
+    /// 条码内容（一期取官方 `barcode` 数组首段，20 位数字串；条码与二维码同串）。
+    pub barcode: String,
+    /// 官方 `expires` 原样透传（秒级时间戳或有效期秒数，前端兼容判定；缺失/异常为 0
+    /// ⇒ 前端不显示倒计时、不自动重取，只保留手动刷新）。
+    pub expires: i64,
+    /// 支付方式名（实测「一卡通电子钱包」）。
+    pub pay_name: String,
+    /// 三账户合计余额（元）：`elec_accamt + db_balance + unsettle_amount`（分→元）。
+    pub balance_yuan: f64,
+    /// 取码账号（当前卡原号；仅 IPC 内存在、不落日志——同 `get_ecard_transactions` 口径）。
+    pub account: String,
+    pub payacc: String,
+    pub paytype: String,
+}
+
+/// `get_ecard_paycode_settings` → data（脱机二维码开关状态，一期只读展示）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcardPaycodeSettings {
+    pub offline_switch: bool,
+}
+
+/// 付款码：解析「当前卡」→ 查支付方式（`status==1 && code=="ACCOUNT"` 的电子账户项）
+/// → 用其 `payacc`/`paytype` 取动态条码。取不到可用支付方式时报可读错误，不猜参数。
+#[tauri::command]
+pub async fn get_ecard_paycode(
+    state: State<'_, AppState>,
+    account: Option<String>,
+) -> Result<CommandResult<EcardPaycode>, String> {
+    with_synjones!(state, |client| {
+        // 卡号原号不透出前端（前端只持脱敏号）：缺省时由后端取「当前卡」
+        let account = match resolve_account(client, account).await {
+            Ok(a) => a,
+            Err(msg) => return Ok(CommandResult::err(&msg)),
+        };
+        let info = match plat::codebar_payinfo(client).await {
+            Ok(v) => v,
+            Err(e) => return Ok(CommandResult::err(&err_text(&e))),
+        };
+        let Some(pick) = info.as_array().and_then(|a| {
+            a.iter()
+                .find(|it| flag_of(it.get("status")) && text_of(it.get("code")) == "ACCOUNT")
+        }) else {
+            return Ok(CommandResult::err("无可用支付方式"));
+        };
+        let payacc = text_of(pick.get("payacc"));
+        let paytype = text_of(pick.get("paytype"));
+        Ok(match plat::pay_code(client, &account, &payacc, &paytype).await {
+            Ok(data) => {
+                // 官方一次给多段（页面轮换），一期取首段
+                let barcode = data
+                    .get("barcode")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if barcode.is_empty() {
+                    CommandResult::err("学校未返回条码内容")
+                } else {
+                    // 余额口径 = 电子账户 + 卡账户两块之和（均分），统一 yuan() 转元
+                    let fen = ["elec_accamt", "db_balance", "unsettle_amount"]
+                        .iter()
+                        .map(|k| int_of(pick.get(k)).unwrap_or(0))
+                        .sum::<i64>();
+                    CommandResult::ok(EcardPaycode {
+                        barcode,
+                        expires: int_of(data.get("expires")).unwrap_or(0),
+                        pay_name: text_of(pick.get("name")),
+                        balance_yuan: yuan(fen),
+                        account,
+                        payacc,
+                        paytype,
+                    })
+                }
+            }
+            Err(e) => CommandResult::err(&err_text(&e)),
+        })
+    })
+}
+
+/// 付款码页设置：脱机二维码开关状态（`getUserOfflienSwitch`，只读）。
+#[tauri::command]
+pub async fn get_ecard_paycode_settings(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<EcardPaycodeSettings>, String> {
+    with_synjones!(state, |client| {
+        Ok(match plat::offline_switch(client).await {
+            Ok(b) => CommandResult::ok(EcardPaycodeSettings { offline_switch: b }),
             Err(e) => CommandResult::err(&err_text(&e)),
         })
     })

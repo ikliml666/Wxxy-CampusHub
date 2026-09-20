@@ -130,6 +130,18 @@ export function EcardBillView({
     setRecords([]);
   };
 
+  // 关键词防抖（300ms）：输入停稳才应用，清空即去掉 info 参数；与已应用值相同不触发。
+  // 回车仍走 form onSubmit 立即应用——应用后 keyword 变化会让本 effect 重判一次（相同即跳过）。
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (keywordText.trim() !== keyword) {
+        applyFilter(() => setKeyword(keywordText.trim()));
+      }
+    }, 300);
+    return () => clearTimeout(t);
+    // applyFilter 每次渲染重建，但只包稳定 setter，语义依赖就这两个输入
+  }, [keywordText, keyword]);
+
   const clearFilters = () =>
     applyFilter(() => {
       setDirection("all");
@@ -235,7 +247,7 @@ export function EcardBillView({
           >
             <Input
               value={keywordText}
-              placeholder="搜摘要 / 地点，回车筛选"
+              placeholder="搜索消费明细"
               aria-label="关键词筛选"
               className="min-w-0"
               onChange={(e) => setKeywordText(e.target.value)}

@@ -891,6 +891,10 @@ export interface EcardCard {
   frozen: boolean;
   accStatus: number | null;
   expDate: string;
+  /** 开户时间（后端多键名回落探测，未命中为 null ⇒ 该行不显示） */
+  openDate: string | null;
+  /** 当天支付累计（卡级 daycostamt，未下发为 null ⇒ 该行不显示） */
+  dayCostAmtYuan: number | null;
   /** 自动转账（圈存）开关（官方档位 1/2 都算开启） */
   autotransFlag: boolean;
   /** 圈存档位原值（0=禁止 1=只允许自助 2=自助及自动） */
@@ -951,6 +955,8 @@ export type EcardView =
   | "power"
   | "cardops"
   | "bank"
+  | "paycode"
+  | "profile"
   | "face";
 
 /** 流水分类字典（`get_ecard_types` → 项；id 语义实测 1 消费 2 充值 3 退款 4 扫码付 5 补贴）。 */
@@ -1023,4 +1029,63 @@ export interface EcardFaceDetail {
   schoolName: string;
   /** 是否已采集（学校侧头像非空） */
   collected: boolean;
+}
+
+/**
+ * `get_ecard_paycode` → data：动态付款码（一期，对齐官方 H5 plat/pay）。
+ *
+ * 红线：`barcode` 是**动态支付凭据**——不写 console.log、不进 localStorage、
+ * 不进错误文案 / aria-label；除条码图与「查看数字」主动展开外不留存。
+ */
+export interface EcardPaycode {
+  /** 条码内容（官方 barcode 数组首段，20 位数字串；条码图与二维码同串） */
+  barcode: string;
+  /**
+   * 官方 `expires` 原样透传：**秒级时间戳或有效期秒数**（前端兼容判定）；
+   * `<= 0` = 未拿到 ⇒ 不显示倒计时、不自动重取，只保留手动刷新。
+   */
+  expires: number;
+  /** 支付方式名（实测「一卡通电子钱包」） */
+  payName: string;
+  /** 电子账户 + 卡账户合计余额（元，后端已换算） */
+  balanceYuan: number;
+}
+
+/** `get_ecard_paycode_settings` → data（脱机二维码开关状态，一期只读展示）。 */
+export interface EcardPaycodeSettings {
+  offlineSwitch: boolean;
+}
+
+
+/** `get_plat_profile` → data（plat 用户资料；`idNumber` 服务端已掩码，未列出的键前端不消费）。 */
+export interface PlatProfile {
+  account: string;
+  sno: string;
+  name: string;
+  identityName: string;
+  departmentName: string;
+  sex: string;
+  /** 头像 URL（plat 资源地址，可能为空串） */
+  avatar: string;
+  mobile: string | null;
+  email: string;
+}
+
+/** `get_plat_equipment` → 项（plat 绑定设备；`status="1"` 在线 / `"0"` 已授权）。 */
+export interface PlatDevice {
+  id: string;
+  name: string | null;
+  type: string | null;
+  status: number;
+  createTime: string;
+  updateTime: string;
+}
+
+/** `get_plat_login_logs` → data（MyBatis-Plus 分页；本校实测恒空列表）。 */
+export interface PlatLoginLogs {
+  records: { id: string | null; createTime: string | null; ip: string | null }[];
+  total: number;
+  size: number;
+  current: number;
+  pages: number;
 }

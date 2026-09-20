@@ -1,4 +1,4 @@
-import { BarChart3, RefreshCw } from "lucide-react";
+import { BarChart3, RefreshCw, ShoppingBag } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "@/components/EmptyState";
 import { Surface } from "@/components/Surface";
@@ -11,6 +11,8 @@ import type {
   EcardStatsAssortItem,
   EcardStatsPoint,
   EcardStatsSummary,
+  EcardTransaction,
+  EcardTransactions,
   EcardTurnoverType,
 } from "@/shared/types";
 
@@ -90,6 +92,11 @@ function trimFuture(points: EcardStatsPoint[]): EcardStatsPoint[] {
   return cut === -1 ? points : points.slice(0, cut);
 }
 
+/** "YYYY-MM-DD HH:MM:SS" → "MM-DD HH:MM"（当月排行榜行内保持紧凑）。 */
+function shortTime(t: string): string {
+  return t.slice(5, 16);
+}
+
 export function EcardStatsView() {
   const [mode, setMode] = useState<Mode>("month");
   const [customMonth, setCustomMonth] = useState(currentYm);
@@ -103,11 +110,17 @@ export function EcardStatsView() {
   const [assort, setAssort] = useState<EcardStatsAssortItem[]>([]);
   /** 分类中文名（get_ecard_types 字典；失败静默降级用 nameEn / typeId）。 */
   const [typeNames, setTypeNames] = useState<Map<string, string>>(new Map());
+  /** 支出排行榜（仅月维度）：当月单笔金额降序前 10；null = 在取。 */
+  const [rank, setRank] = useState<EcardTransaction[] | null>(null);
+  const [rankError, setRankError] = useState("");
 
   const range = useMemo(
     () => (mode === "year" ? yearRange(String(new Date().getFullYear())) : monthRange(customMonth)),
     [mode, customMonth],
   );
+
+  /** 排行榜月份前缀：月维度才有；年视图官方无排行榜，隐藏该区块。 */
+  const rankYm = mode === "year" ? null : range.timeFrom.slice(0, 7);
 
   useEffect(() => {
     let alive = true;
@@ -168,6 +181,36 @@ export function EcardStatsView() {
       alive = false;
     };
   }, [range, tick]);
+
+  // 支出排行榜：流水命令无时间范围参数（TurnoverFilter 只有方向/分类/关键词），拉最近
+  // 200 条支出（服务端时间倒序，当月流水必在前排）后前端按月份前缀过滤、单笔金额降序取前 10。
+  useEffect(() => {
+    if (rankYm === null) return;
+    let alive = true;
+    setRank(null);
+    setRankError("");
+    invokeCommand<EcardTransactions>("get_ecard_transactions", {
+      page: 1,
+      size: 200,
+      type: "2",
+    }).then((r) => {
+      if (!alive) return;
+      if (r.success && r.data) {
+        setRank(
+          r.data.records
+            .filter((t) => t.time.startsWith(rankYm))
+            .sort((a, b) => Math.abs(b.amountYuan) - Math.abs(a.amountYuan))
+            .slice(0, 10),
+        );
+      } else {
+        setRankError(r.message ?? "支出排行获取失败");
+        setRank([]);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [rankYm, tick]);
 
   /** 分类聚合的渲染数据：条宽 = 该分类 / 最大分类；百分比 = 占总额（1 位小数）。 */
   const assortRows = useMemo(() => {
@@ -341,6 +384,57 @@ export function EcardStatsView() {
               </ul>
             )}
           </Surface>
+
+          {/* 支出排行榜：当月单笔金额降序前 10（官方 chart 页同款；流水接口无时间参数，
+              拉最近 200 条支出后前端按月份过滤）。年视图无此区块。 */}
+          {rankYm !== null && (
+            <Surface className="px-4 py-4">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-body font-medium text-text">支出排行榜</p>
+                <span className="text-caption text-text-2">{rangeLabel}</span>
+              </div>
+              {rankError ? (
+                <p className="mt-3 text-caption text-text-2">获取失败：{rankError}</p>
+              ) : rank === null ? (
+                <div aria-hidden className="mt-3 space-y-2">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="h-10 animate-pulse rounded bg-line" />
+                  ))}
+                </div>
+              ) : rank.length === 0 ? (
+                <p className="mt-3 text-caption text-text-2">
+                  {mode === "month" ? "本月暂无支出" : "该月暂无支出"}
+                </p>
+              ) : (
+                <ul className="mt-2 divide-y divide-line">
+                  {rank.map((t, i) => (
+                    <li
+                      key={`${t.time}-${t.orderId || i}`}
+                      className="flex items-center gap-3 py-2.5"
+                    >
+                      <span
+                        aria-hidden
+                        className="flex size-8 shrink-0 items-center justify-center rounded-full bg-wallet/10 text-wallet"
+                      >
+                        <ShoppingBag className="size-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-body text-text">
+                          {typeNames.get(t.turnoverType) || t.payName || t.summary || "消费"}
+                        </span>
+                        <span className="mt-0.5 block text-caption text-text-2">
+                          {shortTime(t.time)}
+                        </span>
+                      </span>
+                      <span className="tabular-num shrink-0 text-body text-text">
+                        ¥ {Math.abs(t.amountYuan).toFixed(2)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Surface>
+          )}
         </>
       )}
     </div>

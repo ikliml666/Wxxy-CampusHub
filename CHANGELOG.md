@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-09-20 · M4.5 批 14：付款码 + 个人中心（plat 只读面）+ 官方对齐三小项——为安卓版铺路
+
+- **模块**：`crates/campus-synjones/src/{plat.rs(新),ecard.rs}`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/{EcardPaycodeView(新),EcardProfileView(新),EcardHome,EcardBalanceView,EcardBillView,EcardStatsView}.tsx`、`tauri-app/frontend/src/{shared/types.ts,stores/uiStore.ts,panels/EcardsPanel.tsx}`
+- **plat 体系鉴权突破（关键前提）**：探针实证 plat API（`/plat/*` 背后的 `/berserker-base|app` 接口）用 **`synjones-auth` 头**——与一卡通现有 token **同源直调**，无需第二套会话（官方「统一身份认证」的 plat JWT 获取链已逆向记录但不需要）。取证见 wiki `learnings/plat-api-same-token.md` 与探针 `tests/plat_sso_probe_live.rs`
+- **付款码（新增，官方 `/plat/pay` 同款）**：`codebarPayinfo` 选电子账户支付方式 → `batchGetBarCodeGet` 取动态码（双层判定 retcode=="0"）；前端 jsbarcode CODE128 条码 + react-qr-code 二维码 +「查看数字」+ 有效期倒计时 + 手动刷新 + 脱机开关只读。**PII 红线**：绑定银行卡全号（bandacc）在 DTO 结构面上不存在；动态码不落日志/localStorage。待确认：条码编码格式（POS 不识别改 ITF 一行）；官方二维码 websocket 实时推流为二期
+- **个人中心（新增，官方「我的/设置」只读面）**：`get_plat_profile`（资料卡）/`get_plat_equipment`（已登录/已授权设备）/`get_plat_login_logs`（日志）/`get_plat_offline_switch`；`Promise.allSettled` 逐路兜底。一期只读，设备下线/解绑/改手机等写操作待后续单独提供
+- **官方对齐三小项**：账单搜索改 300ms 防抖（「搜索消费明细」）；统计页新增**支出排行榜**（月维度、官方 chart 页同款，当月数据与官方一致）；账户详情补「开户时间/当日已消费」（Option 字段命中才展示，不臆造）
+- **验证**：cargo test 120 通过、tsc 零错误、npm build 通过；CDP 真机全流程点验——付款码页真实出码（余额 ¥70.46 / 倒计时 / 脱机开关已开启 / 查看数字 20 位 4 组）、个人中心资料设备日志全渲染、排行榜与官方同序、账单搜索过滤生效
+
 ## 2026-09-20 · M4.5 批 13：官方一卡通全站逐界面扫描——删除「账户转账」（官方无此功能）+ 功能对照清单
 
 - **模块**：`crates/campus-synjones/src/ecard_ops.rs`、`tauri-app/src-tauri/src/{commands/ecard.rs,lib.rs}`、`tauri-app/frontend/src/components/ecard/EcardHome.tsx`、`tauri-app/frontend/src/panels/EcardsPanel.tsx`、`tauri-app/frontend/src/{shared/types.ts,stores/uiStore.ts}`（删除 `EcardTransferView.tsx`）

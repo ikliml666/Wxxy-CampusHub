@@ -258,6 +258,12 @@ pub struct CardDetail {
     pub acc_status: Option<i64>,
     /// 卡有效期（`expdate` 原文）。
     pub exp_date: String,
+    /// 开户时间（原始键名未经 live 单独证实，按 `cdate` → `opendate` → `openDate` 回落探测；
+    /// 全部未命中 → None，前端不显示该行、不臆造）。
+    pub open_date: Option<String>,
+    /// 当天支付累计（元，卡级 `daycostamt`——同名字段在子账户级 `accinfo[]` 实测存在；
+    /// 卡级键命中才有值，缺失 → None）。
+    pub day_cost_amt_yuan: Option<f64>,
     /// 自动转账（圈存）开关（**非 0 即开启**——官方真机实测档位 `2` 也表示开启）。
     pub autotrans_flag: bool,
     /// 圈存档位原值（0=禁止 1=只允许自助 2=自助及自动；官方 setCard 页按此显示）。
@@ -291,6 +297,11 @@ pub fn parse_card_detail(v: &Value) -> CardDetail {
         frozen: int_of(v.get("freezeflag")) == Some(1),
         acc_status: int_of(v.get("acc_status")),
         exp_date: text_of(v.get("expdate")),
+        open_date: ["cdate", "opendate", "openDate"]
+            .iter()
+            .map(|k| text_of(v.get(k)))
+            .find(|s| !s.is_empty()),
+        day_cost_amt_yuan: int_of(v.get("daycostamt")).map(yuan),
         // ⚠️ 官方真机 queryCard 卡级 `autotrans_flag: 2` 表示「自助及自动转账」——
         // 旧实现 `== Some(1)` 把它读成 false，圈存写入成功后界面仍显示「关闭」。
         autotrans_flag: int_of(v.get("autotrans_flag")).unwrap_or(0) != 0,
@@ -759,6 +770,23 @@ mod tests {
         assert_eq!(c.acc_infos.len(), 1);
         assert_eq!(c.acc_infos[0].kind, "42940-000");
         assert_eq!(c.acc_infos[0].balance_yuan, 79.96);
+        // fixture 无 cdate/daycostamt ⇒ 两个可选字段必须是 None（不下发就不展示）
+        assert_eq!(c.open_date, None);
+        assert_eq!(c.day_cost_amt_yuan, None);
+    }
+
+    /// 开户时间 / 当天支付累计：原始键名未经 live 单独证实，命中才下发（缺失 → None）。
+    #[test]
+    fn card_detail_open_date_and_day_cost_hit_only_when_present() {
+        let c = parse_card_detail(&json!({
+            "account": "0000000000",
+            "cdate": "2024-09-01 10:00:00",
+            "daycostamt": 1250
+        }));
+        assert_eq!(c.open_date.as_deref(), Some("2024-09-01 10:00:00"));
+        assert_eq!(c.day_cost_amt_yuan, Some(12.5), "卡级 daycostamt 分→元");
+        let c = parse_card_detail(&json!({"account": "0000000000", "cdate": ""}));
+        assert_eq!(c.open_date, None, "空串不算命中");
     }
 
     /// PII 红线：卡详情 DTO 不得含姓名 / 手机号 / 证件 / 学号 / 原始卡号 / 银行卡全号。

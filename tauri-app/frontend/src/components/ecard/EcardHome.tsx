@@ -4,9 +4,11 @@ import {
   BarChart3,
   CreditCard,
   Landmark,
+  QrCode,
   Receipt,
   ScanFace,
   Settings2,
+  UserRound,
   Zap,
 } from "lucide-react";
 import { Surface } from "@/components/Surface";
@@ -65,6 +67,24 @@ const TILES: Tile[] = [
     visible: (config) =>
       config.enabledApps.includes("yinhangka") ||
       config.enabledApps.includes("bind-bank-card"),
+  },
+  {
+    // 付款码属 plat 体系页面（官方 H5 /plat/pay），实测一卡通服务大厅 getAllApps 清单
+    // （docs/superpowers/plans/2026-09-19-ecard-full-replica.md §1.6，19 项）无付款码相关
+    // appCode ⇒ 门控无据可依，一期常显（待确认点：若学校清单后续出现
+    // fukuandiaoma / pay-code 再接 enabledApps 门控）。
+    id: "paycode",
+    label: "付款码",
+    hint: "扫码支付 · 脱机开关",
+    icon: QrCode,
+  },
+  {
+    // plat 体系（官方 APP「我的-设置」）的只读面：资料 / 设备 / 登录日志；
+    // 写操作（下线设备 / 解绑等）待后续单独提供。
+    id: "profile",
+    label: "个人中心",
+    hint: "资料 · 设备 · 日志",
+    icon: UserRound,
   },
   {
     id: "face",

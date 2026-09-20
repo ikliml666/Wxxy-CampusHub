@@ -23,6 +23,7 @@
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
 - [[learnings\tauri-multiwindow-cdp-verification|Tauri 多窗口应用的 CDP 点验：必须按 URL 选 target（附非主窗口 IPC 权限验证法）]]
 - [[learnings\tauri-webview-ui-verification|Tauri/WebView2 真机 UI 验收：vite 供旧模块与点击注入失效的可用替代路径]]
+- [[learnings\plat-api-same-token|plat 体系鉴权与 API 清单（token 同源直调）]]
 - [[learnings\ecard-write-protocol-json-body|一卡通写操作协议实测（JSON body / 双层判定 / 三套金额单位）与转账结论]]
 - [[learnings\ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘机制]]
 - [[learnings\meeting-proxy-week-title-and-observable-degradation|会议代理端点与静默降级可观测化]]
