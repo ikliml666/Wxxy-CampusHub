@@ -230,8 +230,14 @@ export function SchedulePanel() {
     invokeCommand<ScheduleClassify[]>("get_schedule_classify").then((r) => {
       if (!alive) return;
       if (r.success && r.data) {
-        setClassify({ phase: "ready", data: r.data });
-        setSelectedCodes(r.data.map((c) => c.code));
+        // 课程类分类整个剔除（2026-09-21 用户裁决：日程页不出现课表，chip 一并
+        // 去掉——对面 UI 轮只剔了事件，chip 残留点击即空列表）；事件侧剔除见
+        // isCourseEvent（三处入桶前），此处判据与之一致按 name/code 双保险。
+        const visible = r.data.filter(
+          (c) => !c.name.includes("课表") && !c.code.toLowerCase().includes("course"),
+        );
+        setClassify({ phase: "ready", data: visible });
+        setSelectedCodes(visible.map((c) => c.code));
       } else {
         setClassify({ phase: "error", message: r.message ?? "日程分类获取失败" });
       }

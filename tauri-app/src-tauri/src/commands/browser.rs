@@ -33,12 +33,16 @@
 //! invoke Tauri 命令），注入脚本只做页面侧治理，宿主通信只走 Rust 侧回调。
 
 use serde_json::json;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Webview,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, State, Webview,
     WebviewUrl, WebviewBuilder,
 };
 
+use campus_auth::cas::{CasClient, CAS_BASE};
 use super::auth::CommandResult;
+use crate::infra::state::AppState;
 
 // ---------------- 打开去向决策层（Task 2） ----------------
 
@@ -81,6 +85,62 @@ pub(crate) fn decide_open(url: &str) -> OpenDecision {
     } else {
         OpenDecision::External
     }
+}
+
+// ---------------- 免密补票（CAS 登录页拦截 → TGT 换 ST 带票回跳） ----------------
+
+/// 校 CAS 为**无 cookie 设计**（`CasClient::sso_ticket` 实测：登录后 jar 为空，
+/// 会话复用全靠客户端 TGT）——Rust jar 的登录态无法以任何 cookie 形态进入
+/// WebView，各应用的免密只能各自换票：拦下「302 链终点的 CAS 登录页」→ 用
+/// URL query 里的 `service` 现换 ST → 带票回跳该 service（应用验票后建自己域
+/// 的会话，cookie 正常种进 WebView）。真机实证 CAS 登录页 URL 携带 service
+/// 参数经过 on_navigation（tauri-dev2 日志 2026-09-21）。
+///
+/// 解析 CAS 登录页 URL 的 service 参数（percent-decode 后）；非 CAS 登录页
+/// 或无 service → None。
+fn cas_login_service(url: &tauri::Url) -> Option<String> {
+    if url.host_str() != Some("wxcas.cwxu.edu.cn") || !url.path().starts_with("/lyuapServer/login")
+    {
+        return None;
+    }
+    url.query_pairs()
+        .find(|(k, _)| k == "service")
+        .map(|(_, v)| v.into_owned())
+}
+
+/// 带票回跳 URL（`campus-webvpn::session::login_redirect_url` 同款拼法）：
+/// service 自带 query（如 WEBVPN_SERVICE 的 `?cas_login=true`）用 `&` 追加。
+fn ticket_redirect(service: &str, st: &str) -> String {
+    if service.contains('?') {
+        format!("{service}&ticket={st}")
+    } else {
+        format!("{service}?ticket={st}")
+    }
+}
+
+/// 防补票循环护栏：ST 被拒（service 不匹配等）时应用会再次 302 回 CAS 登录页，
+/// 不设限就无限换票。同 service 8s 内只补一次（窗口外视为新的登录流）。
+const RETICKET_COOLDOWN: Duration = Duration::from_secs(8);
+
+/// spawn 内导航副 webview（`app_browser_navigate` 同款 eval 实现；webview 可能在
+/// 换票期间被用户关闭 → 静默放弃）。
+async fn reticket_navigate(app: &AppHandle, target: &str) {
+    let Some(wv) = app.get_webview(BROWSER_LABEL) else {
+        return;
+    };
+    let js = format!("location.href={};", json!(target));
+    if let Err(e) = wv.eval(&js) {
+        log::warn!("[browser] 补票导航失败：{e}");
+    }
+}
+
+/// 锁内克隆登录会话的 (客户端, TGT)（锁纪律：clone 廉价，drop guard 后再 await）；
+/// 未登录或 TGT 缺失 → None（免密补票关闭，登录页手登降级）。
+async fn session_cas(state: &State<'_, AppState>) -> Option<(CasClient, String)> {
+    let guard = state.session.lock().await;
+    let s = guard.as_ref()?;
+    let tgt = s.tgt.clone()?;
+    Some((s.client.clone(), tgt))
 }
 
 // ---------------- webview 生命周期命令（Task 3） ----------------
@@ -163,9 +223,14 @@ async fn close_stale_child(app: &AppHandle) {
 /// 统一 close_stale + 重建是杜绝 label 冲突的确定路径（控制器裁决 4）；
 /// 「单 webview、无多标签」契约语义不变。调用方自行保证 url 已过
 /// [`decide_open`]（InApp 分支）。
+///
+/// `cas` = 登录会话的 (客户端, TGT)：有的话启用免密补票（CAS 登录页拦截换票
+/// 回跳，见 [`cas_login_service`] 模块注释）；None（未登录/TGT 缺失）= 现状，
+/// 应用 302 到 CAS 登录页由用户手登。
 pub(crate) async fn open_url_inapp(
     app: AppHandle,
     url: String,
+    cas: Option<(CasClient, String)>,
 ) -> CommandResult<BrowserOpenResult> {
     let Some(window) = app.get_window("main") else {
         return CommandResult::err("主窗口不存在");
@@ -198,13 +263,60 @@ pub(crate) async fn open_url_inapp(
 
     let app_for_nav = app.clone();
     let app_for_load = app.clone();
+    // 免密补票的防循环护栏（per-webview 生命周期：每次 add_child 新建一份）
+    let last_reticket: Mutex<Option<(String, Instant)>> = Mutex::new(None);
     let child = window.add_child(
         WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(parsed))
             .initialization_script(INJECT_JS)
             // 导航白名单（与 decide_open 同源）：放行 emit browser://nav，拒绝
-            // emit browser://blocked 并拦下（返回 false）
+            // emit browser://blocked 并拦下（返回 false）。免密补票：CAS 登录页
+            // 拦下 → spawn 里 TGT 换 ST → 带票回跳（on_navigation 是同步回调，
+            // 换票为 async 只能 spawn；换票失败回导航登录页，用户手登降级）。
             .on_navigation(move |u| {
                 let url_str = u.as_str().to_string();
+                if inapp_url_allowed(&url_str) {
+                    if let Some(service) = cas_login_service(&u) {
+                        let cooldown_ok = {
+                            let mut guard = last_reticket.lock().expect("补票护栏锁");
+                            let fresh = matches!(
+                                guard.as_ref(),
+                                Some((s, t)) if *s == service && t.elapsed() < RETICKET_COOLDOWN
+                            );
+                            if !fresh {
+                                *guard = Some((service.clone(), Instant::now()));
+                            }
+                            !fresh
+                        };
+                        if cooldown_ok {
+                            if let Some((cas_client, tgt)) = cas.as_ref() {
+                                // spawn 要求 'static：clone 进 future（CasClient 是 Arc
+                                // 包装，clone 廉价；TGT String 同理）
+                                let cas_client = cas_client.clone();
+                                let tgt = tgt.clone();
+                                let app2 = app_for_nav.clone();
+                                let nav_service = service.clone();
+                                let login_page = url_str.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    match cas_client.sso_ticket(&tgt, &nav_service).await {                                        Ok(st) => {
+                                            let target = ticket_redirect(&nav_service, &st);
+                                            log::info!("[browser] 免密补票 → {target}");
+                                            reticket_navigate(&app2, &target).await;
+                                        }
+                                        Err(e) => {
+                                            // TGT 过期/网络失败：放回登录页，用户手登降级
+                                            log::warn!("[browser] 免密补票失败（{e}），回登录页");
+                                            reticket_navigate(&app2, &login_page).await;
+                                        }
+                                    }
+                                });
+                                // 拦下本轮登录页导航：换票成功由 spawn 接管带票跳转，
+                                // 失败由 spawn 送回登录页（护栏防 302 循环）
+                                log::info!("[browser] 拦 CAS 登录页换票 service={service}");
+                                return false;
+                            }
+                        }
+                    }
+                }
                 let allow = inapp_url_allowed(&url_str);
                 let event = if allow { "browser://nav" } else { "browser://blocked" };
                 log::info!("[browser] on_navigation {} allowed={}", url_str, allow);
@@ -258,16 +370,19 @@ pub(crate) async fn open_url_inapp(
 
 /// 应用内打开 url：校园域/内网充值 IP 进 webview（`in_app=true`）；域外公网
 /// 返回 `in_app=false`，前端降级走旧 open_app 系统浏览器；非 http/https 拒绝。
+/// （async 命令带 State 引用，Tauri 2 要求外层 Result 包裹。）
 #[tauri::command]
 pub async fn open_in_app_browser(
     app: AppHandle,
+    state: State<'_, AppState>,
     url: String,
-) -> CommandResult<BrowserOpenResult> {
-    match decide_open(&url) {
+) -> Result<CommandResult<BrowserOpenResult>, String> {
+    let cas = session_cas(&state).await;
+    Ok(match decide_open(&url) {
         OpenDecision::Blocked => CommandResult::err("仅支持 http/https 链接"),
         OpenDecision::External => CommandResult::ok(BrowserOpenResult { in_app: false, url }),
-        OpenDecision::InApp => open_url_inapp(app, url).await,
-    }
+        OpenDecision::InApp => open_url_inapp(app, url, cas).await,
+    })
 }
 
 /// 关闭应用内浏览器：销毁副 webview + 主 webview 复原整窗。
@@ -350,6 +465,38 @@ pub async fn app_browser_forward(app: AppHandle) -> CommandResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CAS 登录页 URL 解析出 service（percent-decode）；非 CAS 登录页 → None。
+    #[test]
+    fn cas_login_service_parsed() {
+        let u: tauri::Url =
+            "https://wxcas.cwxu.edu.cn/lyuapServer/login?service=https%3A%2F%2Fjwgl.cwxu.edu.cn%2Fsso%2Flyiotlogin"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            cas_login_service(&u).as_deref(),
+            Some("https://jwgl.cwxu.edu.cn/sso/lyiotlogin")
+        );
+        let plain: tauri::Url = "https://my.cwxu.edu.cn/".parse().unwrap();
+        assert_eq!(cas_login_service(&plain), None);
+        let cas_no_service: tauri::Url = "https://wxcas.cwxu.edu.cn/lyuapServer/login"
+            .parse()
+            .unwrap();
+        assert_eq!(cas_login_service(&cas_no_service), None);
+    }
+
+    /// 带票回跳拼接：service 自带 query 用 `&`，否则 `?`（session.rs 同款）。
+    #[test]
+    fn ticket_redirect_appends_by_query() {
+        assert_eq!(
+            ticket_redirect("https://webvpn.cwxu.edu.cn/login?cas_login=true", "ST-1"),
+            "https://webvpn.cwxu.edu.cn/login?cas_login=true&ticket=ST-1"
+        );
+        assert_eq!(
+            ticket_redirect("https://jwgl.cwxu.edu.cn/sso/lyiotlogin", "ST-2"),
+            "https://jwgl.cwxu.edu.cn/sso/lyiotlogin?ticket=ST-2"
+        );
+    }
 
     /// 校园域（`*.cwxu.edu.cn`）命中白名单 → 进应用内 webview。
     #[test]

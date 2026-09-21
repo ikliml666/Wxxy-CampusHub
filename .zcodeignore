@@ -1,0 +1,60 @@
+# 本地工作文档（交接/侦察/计划/验证记录），只留本地不进远端仓库
+docs/
+# 项目计划（含内网地址与侦察结论，本地工作文档）
+PLAN.md
+# 个人油猴脚本（与项目无关）
+一键填分4.user.js
+
+# 敏感信息（严禁提交）
+账号与密码.txt
+
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+# TS 增量编译产物：每次 build 都变，无提交价值
+*.tsbuildinfo
+
+# 验证码样本（体积大且无提交价值，labels/samples.json 与模板 JSON 照常进 git）
+scripts/captcha-samples/*.png
+
+# 环境与本地
+.env
+*.local
+
+# 标注辅助拼图（由 contact_sheet 从样本生成，随样本一起不进 git）
+scripts/captcha-sheets/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

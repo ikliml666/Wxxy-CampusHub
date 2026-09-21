@@ -40,6 +40,7 @@
 - [[learnings\synjones-charge-yuan-vs-fen-and-pending-orders|慧新E校 charge 侧金额是元、一卡通侧是分；待支付单「恒 500」旧结论已推翻]]
 - [[learnings\subagent-batch-image-labeling|批量图片标注不可靠：改结构化拼图 + 客观特征交叉校验]]
 - [[learnings\zhengfang-tiaoxiu-swap-entries|教务调休条目形态与公告置换冗余]]
+- [[learnings\seamless-reticket|校 CAS 无 cookie 设计与应用内免密补票]]
 - [[learnings\zhengfang-kblist-multi-section-per-jxb|正方 kbList 同一教学班按多时段拆多条——diff 匹配键必须含时段]]
 - [[learnings\jwglxt-sso-chain|正方教务 SSO 链与课表接口取证（ST 绑定 service / TGT 不落 cookie / 901 会话特征）]]
 - [[learnings\srun-webvpn-crypto|深澜 WebVPN 加密算法与网络归属探测（IV 派生与 TUN 抢路由坑）]]

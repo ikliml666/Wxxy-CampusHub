@@ -390,6 +390,7 @@ pub(crate) fn browser_recharge_url(feeitem_id: &str, zone: RouteZone) -> String 
 #[tauri::command]
 pub async fn open_recharge_in_browser(
     app: AppHandle,
+    state: State<'_, AppState>,
     feeitem_id: String,
 ) -> Result<CommandResult<()>, String> {
     let id = feeitem_id.trim();
@@ -403,10 +404,21 @@ pub async fn open_recharge_in_browser(
             Ok(()) => CommandResult::empty(),
             Err(e) => CommandResult::err(&format!("打开浏览器失败：{e}")),
         },
-        OpenDecision::InApp => match browser::open_url_inapp(app, url).await {
-            r if r.success => CommandResult::empty(),
-            r => CommandResult::err(r.message.as_deref().unwrap_or("打开充值页失败")),
-        },
+        OpenDecision::InApp => {
+            // 免密补票会话（CAS 无 cookie 设计：浏览器 302 到 CAS 登录页时由
+            // browser.rs on_navigation 拦下换票带票回跳；未登录则手登降级）
+            let cas = {
+                let guard = state.session.lock().await;
+                guard.as_ref().and_then(|s| {
+                    let tgt = s.tgt.clone()?;
+                    Some((s.client.clone(), tgt))
+                })
+            };
+            match browser::open_url_inapp(app, url, cas).await {
+                r if r.success => CommandResult::empty(),
+                r => CommandResult::err(r.message.as_deref().unwrap_or("打开充值页失败")),
+            }
+        }
     })
 }
 

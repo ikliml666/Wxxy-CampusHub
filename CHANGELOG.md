@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-09-21 · 应用内免密直达 + 日程页课表 chip 剔除（用户真机反馈轮）
+
+- **模块**：`tauri-app/src-tauri/src/commands/{browser,electricity}.rs`、`tauri-app/frontend/src/panels/SchedulePanel.tsx`；`.codewiki/learnings/seamless-reticket.md(新)`
+- **免密直达（提前完成原"下一批"核心项）**：校 CAS 为无 cookie 设计（登录后 jar 为空，会话复用全靠客户端 TGT，jwglxt.rs 实测注释）——Rust jar 登录态无法以 cookie 进入 WebView，免密只能各自换票。实现：`on_navigation` 拦下 302 链终点的 CAS 登录页 → 解析 query `service` → `sso_ticket(tgt, service)` 现换 ST → 带票回跳（应用在自己域种会话 cookie 进 WebView，后续自持）。spawn 内异步换票（on_navigation 同步回调）、同 service 8s 冷却防 302 循环、TGT 过期送回登录页手登降级。`open_in_app_browser`/`open_recharge_in_browser` 加 State 取会话下发（前端无感；Tauri 2 要求 async+引用参数命令外层 Result 包裹）
+- **真机实锤**：教务系统拦票换票后 302 链自动进学生主界面（`index_initMenu.html?jsdm=xs`），whall 深层 URL 直接作 service 验票通过——零手动登录。目录里"校园一键通"应用本身 404（金智平台对该入口直连限制，与免密机制无关）。校外免密（B 类 wrap + 内网 service 可达性）留下一批
+- **日程页课表 chip 剔除**：get_schedule_classify 返回的课程类分类整个过滤（name 含「课表」或 code 含 course，与 isCourseEvent 判据一致）——上一轮只剔了事件、chip 残留点击即空列表（用户真机反馈）
+- **验证**：`cargo test --lib` **165 passed / 0 failed**（新增 cas_login_service 解析 + ticket_redirect 拼接单测）、`npx tsc --noEmit` 零错误
+
 ## 2026-09-21 · 应用内浏览器第一批：三入口改应用内 WebView 打开 + 注入优化（免密直达留第二批）
 
 - **模块**：`tauri-app/src-tauri/src/{commands/browser.rs(新),browser_inject.js(新),commands/{electricity,mod}.rs,lib.rs,Cargo.toml}`、`tauri-app/frontend/src/{components/browser/{BrowserOverlay,BrowserToolbar,BrowserStatusView,BrowserEventsBridge}(新),components/{AppShell,ecard/EcardPowerView}.tsx,panels/{AppsPanel,InfoPanel}.tsx,stores/browserStore.ts(新),shared/{types.ts,tauriApi.ts,constants.ts(新)}}`、`crates/campus-portal/src/article.rs`（仅 pub(crate) 可见性，白名单零改动）
