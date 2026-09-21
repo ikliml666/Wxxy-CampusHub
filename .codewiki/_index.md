@@ -53,6 +53,7 @@
 - [[modules\webvpn-routing|WebVPN 校外路由（campus-webvpn 与注入点全景）]]
 - [[modules\ecard-panel|一卡通页（前端 + 命令面，M4.5）]]
 - [[modules\frontend-shell|前端外壳（frontend-shell）]]
+- [[modules\inapp-browser|应用内浏览器（inapp-browser）]]
 - [[modules\campus-synjones|慧新E校协议核心（campus-synjones）]]
 - [[modules\campus-hub-tauri|接线层（campus-hub src-tauri）]]
 - [[modules\electricity-panel|电费页（前端）]]

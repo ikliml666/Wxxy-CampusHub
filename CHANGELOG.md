@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-09-21 · 应用内浏览器第一批：三入口改应用内 WebView 打开 + 注入优化（免密直达留第二批）
+
+- **模块**：`tauri-app/src-tauri/src/{commands/browser.rs(新),browser_inject.js(新),commands/{electricity,mod}.rs,lib.rs,Cargo.toml}`、`tauri-app/frontend/src/{components/browser/{BrowserOverlay,BrowserToolbar,BrowserStatusView,BrowserEventsBridge}(新),components/{AppShell,ecard/EcardPowerView}.tsx,panels/{AppsPanel,InfoPanel}.tsx,stores/browserStore.ts(新),shared/{types.ts,tauriApi.ts,constants.ts(新)}}`、`crates/campus-portal/src/article.rs`（仅 pub(crate) 可见性，白名单零改动）
+- **改动**：
+  1. **三入口分流**：通知原文/门户应用目录/电费充值兜底改走 `decide_open` 纯函数三态——校园域（*.cwxu.edu.cn ∪ 10.3.100.110）进应用内 webview；域外（知网/万方/超星等 external 类）自动降级旧 `open_app` 系统浏览器；非 http/https 拒绝。白名单口径零扩大（`is_allowed_info_url` 红线未动，新增域后缀攻击单测）
+  2. **主窗口内嵌第二 webview**（Tauri 2 multiwebview + `unstable` feature）：主 webview 缩顶 48px（React 工具栏渲染在此条内）、副 webview 占剩余区加载校方页，`WindowEvent::Resized` relayout；关闭即 `Webview::close()` 复原。spike 六问真机实锤（`.codewiki/learnings/inapp-webview-spike.md`）
+  3. **注入优化**（browser_inject.js 按 host 分桶）：表格/图片防溢出、焦点环、正文居中、`target=_blank`/`window.open` 改应用内导航；alert 只收集不拦截（弹窗名单灰度制）；三禁（不自动填表/hook 官方校验/伪造 cookie）
+  4. **前端**：browserStore（弹层态 + history persist 上限 20）+ BrowserOverlay 工具栏/进度条/blocked 提示条 + BrowserEventsBridge 常驻桥（`browser://opened` 事件 → `storeSyncOpen`，防"Rust 直建 webview 而前端无感"的无 chrome 死路——final review 抓出的 C1）+ 30s loading watchdog（含页内导航/刷新 started 回写场景，scoped re-review 补全）
+  5. **操作简便化**：Esc/Alt+方向键、在外部浏览器逃生口、打开历史（persist）、CAS 登录页提示条（"登录一次后本应用将记住状态"——WebView2 profile 持久化）
+- **验证**：`cargo test -p campus-hub --lib` **160 passed / 0 failed**（含 decide_open 四态 + 域后缀攻击）；`npx tsc --noEmit` + `npm run build` 零错误；CDP 真机实锤——InApp 打开（cas/webvpn 域）、**WebVPN 网关重定向链**（tsgcnki → webvpn 网关加密路径 → 网关登录页）、blocked 拦截 UI（"已拦截非校园网链接"）、Esc 关闭复原、resize bounds 贴合、电费入口工具栏完整（C1 修复后复验）。留用户验收：webview 内登录一次后的跨重启自持、通知 needsBrowser 真页、电费充值真页（有效片区 id）
+- **已知问题/下批**：免密直达（CAS TGT 换 ST，本批最大收益项）、Esc 多层双关、导航栈事件启用、弹窗灰度名单、errorMsg 面板内 toast；详见 `.codewiki/modules/inapp-browser.md`
+
 ## 2026-09-21 · M4/M5 真机验证轮：校外全链路探针实锤 + 通知闭环真触发 + 三处真实缺陷修复
 
 - **模块**：`tauri-app/src-tauri/{src/{lib.rs,commands/{notification,auth,timetable}.rs},Cargo.toml,tests/webvpn_offcampus_live.rs(新)}`；无前端改动
