@@ -1094,6 +1094,20 @@ export interface PlatLoginLogs {
   current: number;
   pages: number;
 }
+
+// ==================== 内置浏览器（契约冻结于 commit a6358ee 的 Rust 侧 DTO） ====================
+
+/** `open_in_app_browser` → data：`inApp=false` = 域外应用，前端降级走系统浏览器（open_app）。 */
+export type BrowserOpenResult = { inApp: boolean; url: string };
+
+/**
+ * 弹层当前导航态。⚠️ `canBack` / `canForward` 首批恒 false：接口形状先行冻结，
+ * 但本批 Rust 侧没有导航栈事件源（`browser://nav` 只带 url），工具栏按钮按禁用态渲染。
+ */
+export type BrowserNavState = { url: string; canBack: boolean; canForward: boolean };
+
+/** 内置浏览器访问历史条目（browserStore persist 的唯一落盘字段，键 `campushub-browser`）。 */
+export type BrowserHistoryItem = { url: string; host: string; at: number };
 // ==================== M5 通知中心契约（2026-09-20，tauri commands/notification.rs 镜像） ====================
 //
 // 后台 poll_tick 产出三类通知：info（门户资讯）/ todo（门户待办）/ electricity（电费低余额）；

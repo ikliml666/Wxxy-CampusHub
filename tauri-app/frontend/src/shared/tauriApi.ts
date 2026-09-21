@@ -34,3 +34,18 @@ export const getNotificationSettings = () =>
 /** 保存通知设置（间隔须 5～720 分钟、阈值 ≥ 0，非法走 message 中文原因）。 */
 export const saveNotificationSettings = (settings: NotificationSettings) =>
   invokeCommand("save_notification_settings", { settings });
+
+// ==================== 内置浏览器（tauri commands，契约冻结 commit a6358ee） ====================
+// 事件（Task 5 在 BrowserOverlay 组件内挂 listen，此处只封装命令）：
+// browser://load (phase: "started"|"finished") / browser://blocked (url) / browser://nav (url)
+
+import type { BrowserOpenResult } from "./types";
+
+/** 打开内置浏览器；`inApp=false` = 域外应用，调用方须降级 open_app 走系统浏览器。 */
+export const openInAppBrowser = (url: string) =>
+  invokeCommand<BrowserOpenResult>("open_in_app_browser", { url });
+export const closeAppBrowser = () => invokeCommand("close_app_browser");
+export const appBrowserNavigate = (url: string) => invokeCommand("app_browser_navigate", { url });
+export const appBrowserReload = () => invokeCommand("app_browser_reload");
+export const appBrowserBack = () => invokeCommand("app_browser_back");
+export const appBrowserForward = () => invokeCommand("app_browser_forward");
