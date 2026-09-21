@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { BrowserHistoryItem, BrowserNavState } from "../shared/types";
+import { browserHostOf } from "../shared/constants";
 import {
   appBrowserNavigate,
   closeAppBrowser,
@@ -21,18 +22,9 @@ import {
 /** history 上限（persist 落盘条数上限，最新在前）。 */
 const HISTORY_LIMIT = 20;
 
-/** 提取 host 展示用；非标准 url（解析失败）兜底空串，不抛错。 */
-const safeHost = (url: string): string => {
-  try {
-    return new URL(url).host;
-  } catch {
-    return "";
-  }
-};
-
 /** 同 url 去重置顶 + 截断到上限。 */
 const pushHistory = (history: BrowserHistoryItem[], url: string): BrowserHistoryItem[] => {
-  const item: BrowserHistoryItem = { url, host: safeHost(url), at: Date.now() };
+  const item: BrowserHistoryItem = { url, host: browserHostOf(url), at: Date.now() };
   return [item, ...history.filter((h) => h.url !== url)].slice(0, HISTORY_LIMIT);
 };
 
@@ -59,6 +51,8 @@ export const useBrowserStore = create<{
   setNav: (patch: Partial<BrowserNavState>) => void;
   setLoading: (b: boolean) => void;
   setBlocked: (url: string | null) => void;
+  /** 清空 errorMsg（状态提示条的关闭按钮回写，Task 5） */
+  clearError: () => void;
 }>()(
   persist(
     (set) => ({
@@ -126,6 +120,7 @@ export const useBrowserStore = create<{
       setNav: (patch) => set((s) => ({ nav: { ...s.nav, ...patch } })),
       setLoading: (b) => set({ loading: b }),
       setBlocked: (url) => set({ blockedUrl: url }),
+      clearError: () => set({ errorMsg: null }),
     }),
     {
       name: "campushub-browser",

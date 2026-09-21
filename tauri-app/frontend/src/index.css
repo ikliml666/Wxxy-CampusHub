@@ -169,6 +169,17 @@ body {
   font-display: swap;
   src: url("/fonts/outfit-latin-400-normal.woff2") format("woff2");
 }
+
+/* 内置浏览器工具栏 indeterminate 进度条：1/6 宽小段横向往返（BrowserToolbar 消费，
+   animate-[browser-progress_1.2s_ease-in-out_infinite]） */
+@keyframes browser-progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(500%);
+  }
+}
 @font-face {
   font-family: "Outfit";
   font-style: normal;

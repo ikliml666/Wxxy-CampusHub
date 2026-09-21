@@ -49,3 +49,22 @@ export const appBrowserNavigate = (url: string) => invokeCommand("app_browser_na
 export const appBrowserReload = () => invokeCommand("app_browser_reload");
 export const appBrowserBack = () => invokeCommand("app_browser_back");
 export const appBrowserForward = () => invokeCommand("app_browser_forward");
+
+/**
+ * 逃生口：在系统浏览器打开 url（Task 5，工具栏 ExternalLink 与拦截提示共用）。
+ * 按 URL 判降级：校方域（cwxu.edu.cn 及子域）走 open_in_browser 域名白名单，
+ * 其余（含充值内网 IP 10.3.100.110，域名白名单不覆盖）走 open_app 协议白名单
+ * （isCas 为旧契约占位参数，恒 false，与 browserStore 降级链路一致）。
+ */
+export const openExternalBrowser = (url: string) => {
+  let host = "";
+  try {
+    host = new URL(url).host;
+  } catch {
+    // 解析失败 host 为空 → 走 open_app 协议白名单判定（后端兜底校验）
+  }
+  const campus = host === "cwxu.edu.cn" || host.endsWith(".cwxu.edu.cn");
+  return campus
+    ? invokeCommand("open_in_browser", { url })
+    : invokeCommand("open_app", { url, isCas: false });
+};

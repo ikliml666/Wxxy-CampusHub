@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/tooltip";
 import AccountMenu from "@/components/AccountMenu";
 import CommandPalette, { MOD_KEY_LABEL } from "@/components/CommandPalette";
+import BrowserOverlay from "@/components/browser/BrowserOverlay";
 import DockNav from "@/components/DockNav";
 import { TodayPanel } from "@/panels/TodayPanel";
 import { TimetablePanel } from "@/panels/TimetablePanel";
@@ -160,6 +161,7 @@ export default function AppShell() {
 
         <DockNav />
         <CommandPalette />
+        <BrowserOverlay />
       </div>
     </TooltipProvider>
   );
