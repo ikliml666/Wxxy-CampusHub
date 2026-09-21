@@ -36,3 +36,13 @@ Tauri 2（tauri 2.11.5，Windows WebView2）主窗口内嵌第二 webview 的 AP
 - 正式 open/close 必须串行化保护：close 后 WebView2 销毁异步未落定时，立即同 label `add_child` 可能撞 label 冲突（spike 已加 close_stale 兜底，正式实现沿用）。
 - 副 webview 页面默认无 IPC capability（不能 invoke Tauri 命令）——注入脚本不得依赖页面侧 invoke，宿主通信走 `on_navigation` / `on_page_load` 回调。
 - dev 启动：`tauri-app` 目录 `npm run tauri dev`（根 package.json 装 @tauri-apps/cli；frontend 另有自己的 npm install）。端口 1420 冲突时先查孤儿 vite（`netstat -ano | grep 1420`）。
+
+## Task 3 正式实现落盘（2026-09-21）
+
+正式命令落在 `tauri-app/src-tauri/src/commands/browser.rs`（spike 代码已移除），冒烟真机验证通过：
+
+- **API 签名补钉**：`on_page_load(Fn(Webview<R>, PageLoadPayload<'_>))`——payload 有 `.url()` 与 `.event()`，事件枚举 `tauri::webview::PageLoadEvent::Started/Finished`；`Webview::reload()` / `Webview::eval()` 真机可用；确认无 `Webview::navigate`，导航用 eval `location.href`（url 经 `serde_json::to_string` 成 JS 字符串字面量防拆串）。
+- **设计决策（open 侧重建而非导航复用）**：brief 原写「已有 app-browser 则导航复用」，但 `Webview::close()` 异步销毁且无存活态判定——`get_webview` 返回 Some 无法区分「活的」与「销毁中」，复用会 eval 到悬空 webview。故 open 侧统一 `close_stale_child`（close + 每 50ms 轮询 `get_webview` 变 None，20 次 = 1s 超时放行）→ 重建，「单 webview、无多标签」契约语义不变。
+- **失败回滚**：`add_child` 失败时主 webview 必须复原整窗，不留下 48px 裁剪态。
+- **冒烟结论（2026-09-21 dev 真机）**：open my.cwxu.edu.cn → CAS 重定向链（my → /auth → wxcas.cwxu.edu.cn）全部 `allowed=true` 放行 + on_page_load started/finished 正常；eval 强跳 baidu → `allowed=false` 拦截（`browser://blocked` 路径执行）；close 复原成功。bounds 计算 `1280x812` 逻辑尺寸正确。
+- **遗留观察（Task 7）**：注入 style 标签（`campushub-inject`）在副 webview 内不可远程观测（无 devtools 通道），本次以 initialization_script 机制沿用 spike 六问 2 已验证结论旁证；`WindowEvent::Resized` 高频 relayout 的拖拽流畅度未人工验证。

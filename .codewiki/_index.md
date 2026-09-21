@@ -33,6 +33,7 @@
 - [[learnings\ecard-keyboard-pseudochar-protocol|安全键盘伪字符映射协议（键面必须渲染图片）]]
 - [[learnings\official-ecard-packet-capture-parity|官方一卡通动态抓包对照与对接修复（unlostCard 大小写 / flag 档位 / 账户 value 重复）]]
 - [[learnings\cwxu-official-site-content-extraction|官网正文抓取与鉴权门降级设计（content.jsp 系不可抓）]]
+- [[learnings\inapp-webview-spike|应用内多webview spike 结论（Task 1）]]
 - [[learnings\portal-app-catalog-and-icons|应用目录、图标代拉与 appLink 校验分工（受保护资源与两种白名单）]]
 - [[learnings\synjones-charge-yuan-vs-fen-and-pending-orders|慧新E校 charge 侧金额是元、一卡通侧是分；待支付单「恒 500」旧结论已推翻]]
 - [[learnings\subagent-batch-image-labeling|批量图片标注不可靠：改结构化拼图 + 客观特征交叉校验]]
