@@ -393,12 +393,20 @@ pub(crate) async fn open_url_inapp(
                     log::warn!("[browser] emit browser://load: {e}");
                 }
                 if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                    let pending = pending_for_load.lock().expect("pending 锁").take();
-                    if let Some(target) = pending {
-                        log::info!("[browser] 网关会话就绪，派发原目标 {target}");
-                        let js = format!("location.href={};", json!(target));
-                        if let Err(e) = wv.eval(&js) {
-                            log::warn!("[browser] 派发原目标失败：{e}");
+                    // 派发时机严格限定「网关域页面的 Finished」——wengine cookie
+                    // 随带票导航链的响应落库，此时会话才真正建立。此前任何
+                    // Finished（如 webview 初建的 about:blank）都不得消费 pending：
+                    // 过早派发会让原目标在网关会话建立前导航、再次 302 回登录页
+                    // 且撞 8s 冷却窗放行（2026-09-21 用户"仍需登录"的根因实锤）。
+                    let gateway_ready = payload.url().as_str().contains("webvpn.cwxu.edu.cn");
+                    if gateway_ready {
+                        let pending = pending_for_load.lock().expect("pending 锁").take();
+                        if let Some(target) = pending {
+                            log::info!("[browser] 网关会话就绪（{}），派发原目标 {target}", payload.url());
+                            let js = format!("location.href={};", json!(target));
+                            if let Err(e) = wv.eval(&js) {
+                                log::warn!("[browser] 派发原目标失败：{e}");
+                            }
                         }
                     }
                 }

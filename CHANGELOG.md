@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-09-21 · 网关免密时序修复（B 类应用"仍需登录"根因）
+
+- **模块**：`tauri-app/src-tauri/src/commands/browser.rs`
+- **根因（日志时序实锤）**：网关补票的 pending 回跳目标被 **webview 初建时 `about:blank` 的 load Finished 过早消费**——派发原目标发生在带票导航（wengine 会话建立）之前，知网在无网关会话下再次 302 回登录页，且撞 8s 冷却窗放行 → 用户看到登录页
+- **修复**：pending 派发时机严格限定「网关域页面的 Finished」（`payload.url()` 含 webvpn 域才消费）——此时 wengine cookie 已随带票导航链响应落库，会话真正建立
+- **验证（CDP 真机）**：知网完整链——拦网关登录页 → 换票 → 带票导航 → `wengine-vpn-token-login` Finished 派发 → 最终落点**网关代理的知网页面**（title「中国知网」），零登录；166 测试全绿
+- **关于"登录时一起登录网关"**：Rust 侧预登录对 WebView 无效（校 CAS 无 cookie 设计 + 双 cookie store 隔离，见 seamless-reticket learning）；WebView 侧网关会话经本次修复后**一次建立、profile 持久化**，后续 B 类打开零等待——预建隐藏 webview 的收益仅剩冷启动首开 2~3 秒，不值得额外内存与网络开销（YAGNI）
+
 ## 2026-09-21 · 鉴权正文取证定性 + 空态文案如实化
 
 - **模块**：`tauri-app/frontend/src/panels/InfoPanel.tsx`
