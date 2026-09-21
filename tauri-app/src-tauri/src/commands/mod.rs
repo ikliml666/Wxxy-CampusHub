@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod browser;
 pub mod ecard;
 pub mod electricity;
 pub mod electricity_history;

@@ -14,7 +14,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # tray-icon：托盘常驻（M5 批 4）；image-ico/image-png：运行时解码 include_bytes! 嵌入的
 # icons/icon.ico / default_window_icon 回落链（Wxxy-CampusLogin 同款 feature 组合）
-tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
+# unstable（Task 1 spike，2026-09-21）：多 webview API（get_window/get_webview/add_child）
+# 在 tauri 2 全部挂 unstable feature 门；spike 结论落盘后 Task 3 决定去留
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png", "unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time", "macros"] }

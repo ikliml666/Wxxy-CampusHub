@@ -125,6 +125,9 @@ pub fn run() {
             commands::notification::mark_notifications_read,
             commands::notification::get_notification_settings,
             commands::notification::save_notification_settings,
+            // Task 1 spike（应用内浏览器）：临时注册，Task 3 重写正式命令后移除
+            commands::browser::spike_inapp_webview,
+            commands::browser::spike_close_inapp,
         ])
         // M4 批 2 启动补采：今天还没采过 + 有内存会话时，后台补一次日余额快照。
         // 不弹窗、不阻塞启动（spawn 后立刻返回）、失败只记日志（不出现 token/账号/户号）。
@@ -155,6 +158,33 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 commands::notification::poll_tick(handle).await;
+            });
+            // [spike] Task 1 临时（应用内浏览器真机验证，Task 3 移除本块）：
+            // 启动后自动时序，无需任何交互，只看控制台 [spike] 打点 + 截图——
+            //   t+5s  run#1（example.com）：缩顶/add_child/注入/拦截（六问 1/2/3）
+            //   t+15s close：close 副 webview + 主 webview 复原（六问 4）
+            //   t+35s run#2（my.cwxu.edu.cn）：close→重开换 URL 载同域（六问 6 profile 持久化铺垫）
+            // 六问 5（resize 错乱）由控制者真机拖窗口观察。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                eprintln!("[spike] ===== t+5s run#1 (example.com) =====");
+                match commands::browser::spike_run_with_url(&handle, "https://example.com") {
+                    Ok(()) => eprintln!("[spike] run#1 done"),
+                    Err(e) => eprintln!("[spike] run#1 err: {e}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                eprintln!("[spike] ===== t+15s close =====");
+                match commands::browser::spike_close_core(&handle) {
+                    Ok(()) => eprintln!("[spike] close done"),
+                    Err(e) => eprintln!("[spike] close err: {e}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                eprintln!("[spike] ===== t+35s run#2 (my.cwxu.edu.cn, profile 持久化铺垫) =====");
+                match commands::browser::spike_run_with_url(&handle, "https://my.cwxu.edu.cn") {
+                    Ok(()) => eprintln!("[spike] run#2 done"),
+                    Err(e) => eprintln!("[spike] run#2 err: {e}"),
+                }
             });
             // 托盘常驻（M5 批 4）：图标 + 「显示主窗口 / 退出」菜单，左键唤起
             // 窗口。创建失败只 log（缺托盘不影响应用）。
