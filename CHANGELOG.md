@@ -1,5 +1,20 @@
 # 更新日志
 
+## 2026-09-21 · UI 改造轮：资讯附件内嵌 PDF 查看器 + 日程页重设计去课程重复 + 电费通知设置迁移
+
+- **模块**：`crates/campus-portal/{src/{lib.rs,article.rs,client.rs}}`、`tauri-app/src-tauri/{src/{commands/portal.rs,lib.rs},tauri.conf.json}`；前端 `tauri-app/frontend/src/{panels/{SchedulePanel,InfoPanel,SettingsPanel}.tsx,components/{PdfViewerDialog(新),ecard/{EcardPowerView,EcardPowerNotifCard(新)}}.tsx,shared/{types.ts,tauriApi.ts,attachment.ts(新)},vite.config.ts,package.json}`
+- **资讯附件 + 内嵌 PDF 查看器（GitHub 调研定案 react-pdf）**：
+  - 后端：`get_info_detail` 新增 `attachments: { name, url }[]`——协议层 `extract_attachments`（`article.rs`）从正文容器抽取常见文件后缀 `<a>` 链接（相对 URL 补全、去重保序、链接文本为名），新增 `is_allowed_attachment_url`（`*.cwxu.edu.cn` + 精确 `10.3.100.110`，原 `is_allowed_info_url` 白名单不放宽、混淆域拒绝有单测）；新命令 `download_attachment`（命令数 105→106）：带 RecordingJar 会话代理下载（门户 cookie 自动携带，解决「cookie 在 Rust 侧前端 fetch 拿不到」）、双重 15MB 限流（content-length 预检 + 流式累计兜底）、返回 `{ fileName, base64 }`
+  - 前端：详情页标题下新增附件区（空列表不渲染），类型图标按后缀映射；**PDF** 打开 `PdfViewerDialog` 弹层（`react-pdf@11` + `React.lazy` 按需 704KB 独立 chunk；大面积 `min(1100px,94vw)×90vh` 充分利用空间；工具条 = 文件名 + scroll-spy 页码 + 缩放 0.6–2.0 + 下载 + 关闭；Esc/遮罩关闭、焦点管理、锁背景滚动；全页顺序渲染 <50 页口径）；**非 PDF** 经 `downloadAndSaveAttachment` 统一出口 → Blob + `a[download]` 系统保存，按钮 idle/loading/done/error 四态完整
+  - CSP 最小放行（tauri.conf.json）：`script-src` + `'wasm-unsafe-eval'`（pdf.js v4 扫描件 JPEG2000 WASM 解码）、新增 `worker-src 'self' blob:`、`img-src` + `blob:`；`connect-src` 未动（下载全走 Rust）；worker 用 `new URL(..., import.meta.url)` 产物化同源加载；CJK 中文 PDF 必配 cmaps（`vite-plugin-static-copy` v4 `rename: { stripBase: true }` 扁平拷 168 个 bcmap，旧选项 `structured` 已废弃）
+- **日程页重设计（消除与课表页重复）**：
+  - 移除课程：`isCourseEvent`（`classifyName === "课程" || classifyCode 含 "course"` 双判据）在周分桶/月计数/最近日程三处入桶前统一剔除，页头描述同步去掉「课程」；月视图角标不再调 `get_schedule_day_counts`，改由过滤后的 `get_schedule_month` 月明细前端自算（同源保证角标与列表口径一致；后端命令保留未删）
+  - 布局修复「挤在一起」：容器 `max-w-3xl` → `w-full max-w-6xl`，周历 `overflow-x-auto` + 列最小 136px，事件块 `truncate` → `line-clamp-2`；详情卡星期文案改按事件自身日期，周历块与最近日程行共用
+  - 下方自动显示「最近日程」：独立 fetch 今天起 30 天（同接口同过滤），按自然日分组升序（今天/明天/周X + 日期），行 = 域色竖条 + 标题 + 时间 + 地点 + 分类 chip，点击联动详情卡；今天无事件/30 天全空各有空态，loading 骨架/错误重试四态完整
+- **电费通知设置迁移（设置页 → 一卡通 · 电费子页）**：开关/阈值/频率三行整体迁入新卡 `EcardPowerNotifCard`（电费子页底部，wallet 域色），阈值非数字/负数校验与整包保存契约原样保留；设置页 `NotifSettingsCard` 只剩公告/待办，save 构造 `{...settings}` 电费字段原样回传——两处编辑互不覆盖
+- **验证**：`cargo check` 通过；`cargo test -p campus-portal` **55 passed / 0 failed**（含附件抽取新增单测）、`cargo test --lib`（src-tauri）**158 passed / 0 failed**（含白名单/文件名/percent-decode 新增 3 个）；`npm run build`（tsc -b && vite build）通过，cmaps 168 项就位、pdf.worker 与 PdfViewerDialog 均为独立 chunk；主包 940KB 与改造前相当
+- **未验证（留真机）**：PDF 实际渲染（CSP wasm/worker 在 WebView2 生效、中文 CMap 效果）需登录后点开真实带附件通知；`a[download]` 在 WebView2 的保存行为；日程页与附件区视觉走查
+
 ## 2026-09-21 · M4/M5 真机验证轮：校外全链路探针实锤 + 通知闭环真触发 + 三处真实缺陷修复
 
 - **模块**：`tauri-app/src-tauri/{src/{lib.rs,commands/{notification,auth,timetable}.rs},Cargo.toml,tests/webvpn_offcampus_live.rs(新)}`；无前端改动

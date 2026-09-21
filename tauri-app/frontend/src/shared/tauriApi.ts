@@ -34,3 +34,9 @@ export const getNotificationSettings = () =>
 /** 保存通知设置（间隔须 5～720 分钟、阈值 ≥ 0，非法走 message 中文原因）。 */
 export const saveNotificationSettings = (settings: NotificationSettings) =>
   invokeCommand("save_notification_settings", { settings });
+
+// ==================== 资讯附件（tauri commands/portal.rs：download_attachment） ====================
+
+/** 下载校园官网附件（后端白名单校验链接）：成功 data = { fileName, base64 }（裸 base64，无 data: 前缀）。 */
+export const downloadAttachment = (url: string) =>
+  invokeCommand<{ fileName: string; base64: string }>("download_attachment", { url });

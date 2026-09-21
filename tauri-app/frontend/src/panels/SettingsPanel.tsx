@@ -96,7 +96,8 @@ function SetRow({
 }
 
 /**
- * 通知设置卡片（M5 批 3）：三源开关 + 电费阈值 + 轮询间隔只读展示。
+ * 通知设置卡片（M5 批 3）：公告/待办开关 + 轮询间隔只读展示。
+ * 电费开关与阈值已迁至一卡通 · 电费子页（EcardPowerNotifCard），本卡不再承载。
  *
  * 公告开关的落盘语义 = `infoColumns` 空/非空（后端契约）；打开且列表为空时
  * 拉 `get_info_columns` 全量回填（前端不硬编码栏目 id）。轮询间隔只读——
@@ -107,8 +108,6 @@ function NotifSettingsCard() {
   const [settings, setSettings] = useState<NotificationSettings | null>(null);
   const [infoOn, setInfoOn] = useState(true);
   const [todoOn, setTodoOn] = useState(true);
-  const [elecOn, setElecOn] = useState(true);
-  const [thresholdText, setThresholdText] = useState("10");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
@@ -123,8 +122,6 @@ function NotifSettingsCard() {
         setSettings(r.data);
         setInfoOn(r.data.infoColumns.length > 0);
         setTodoOn(r.data.todoEnabled);
-        setElecOn(r.data.electricityEnabled);
-        setThresholdText(String(r.data.electricityThresholdYuan));
         setPhase("ready");
       } else {
         setPhase("error");
@@ -191,29 +188,14 @@ function NotifSettingsCard() {
     setMsg(null);
   };
 
-  const toggleElec = () => {
-    setElecOn((v) => !v);
-    setMsg(null);
-  };
-
+  // 电费字段（electricityEnabled / electricityThresholdYuan）原样回传不改，
+  // 编辑入口在一卡通 · 电费子页的「电费通知」卡。
   const save = () => {
     if (!settings) return;
-    const raw = thresholdText.trim();
-    const t = Number(raw);
-    if (raw === "" || !Number.isFinite(t)) {
-      setMsg({ kind: "err", text: "电费提醒阈值必须是数字" });
-      return;
-    }
-    if (t < 0) {
-      setMsg({ kind: "err", text: "电费提醒阈值不能为负数" });
-      return;
-    }
     const next: NotificationSettings = {
       ...settings,
       infoColumns: infoOn ? settings.infoColumns : [],
       todoEnabled: todoOn,
-      electricityEnabled: elecOn,
-      electricityThresholdYuan: t,
     };
     setSaving(true);
     setMsg(null);
@@ -236,24 +218,9 @@ function NotifSettingsCard() {
         <SetRow title="待办通知" desc="办事大厅出现新待办时提醒">
           <ToggleSwitch ariaLabel="待办通知" checked={todoOn} onToggle={toggleTodo} />
         </SetRow>
-        <SetRow title="电费提醒" desc="绑定宿舍余额低于阈值时提醒（每天最多一次）">
-          <ToggleSwitch ariaLabel="电费提醒" checked={elecOn} onToggle={toggleElec} />
-        </SetRow>
-        <SetRow title="电费提醒阈值" desc="余额低于该值时提醒（元）">
-          <input
-            type="number"
-            min={0}
-            step={0.5}
-            value={thresholdText}
-            onChange={(e) => setThresholdText(e.target.value)}
-            aria-label="电费提醒阈值（元）"
-            className="tabular-num w-24 shrink-0 rounded-control border border-line bg-surface px-2 py-1.5 text-right text-body text-text outline-none transition-colors duration-[var(--dur-fast)] ease-out-soft focus:border-brand"
-          />
-        </SetRow>
         {settings && (
           <p className="tabular-num px-1 text-caption text-text-2">
-            检查频率：资讯每 {settings.infoIntervalMin} 分钟 · 待办每 {settings.todoIntervalMin} 分钟 ·
-            电费每 {settings.electricityIntervalMin} 分钟
+            检查频率：资讯每 {settings.infoIntervalMin} 分钟 · 待办每 {settings.todoIntervalMin} 分钟
           </p>
         )}
         {msg && (

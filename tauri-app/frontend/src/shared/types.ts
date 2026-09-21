@@ -116,6 +116,14 @@ export interface InfoDetail {
   html: string | null;
   needsBrowser: boolean;
   url: string;
+  /** 正文附件列表（恒为数组、可为空）：name 为展示文件名，url 走 download_attachment 白名单下载 */
+  attachments: InfoAttachment[];
+}
+
+/** 资讯正文附件（get_info_detail → data.attachments）。 */
+export interface InfoAttachment {
+  name: string;
+  url: string;
 }
 
 /** 待办分栏（接口实际返回 6 个 tab；前端按契约只展示 todo/done/apply 三栏）。 */
