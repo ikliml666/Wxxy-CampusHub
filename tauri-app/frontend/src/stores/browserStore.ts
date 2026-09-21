@@ -158,8 +158,10 @@ export const useBrowserStore = create<{
 
       setNav: (patch) => set((s) => ({ nav: { ...s.nav, ...patch } })),
       setLoading: (b) => {
-        // I2：loading 复位（finished 回写）即撤保险
-        if (!b) clearLoadingWatchdog();
+        // I2：置 true 也重新 arm——页内导航/刷新（browser://load started 回写）
+        // 同样可能丢 finished，兜底须对全部 loading 场景生效；置 false 撤保险
+        if (b) armLoadingWatchdog();
+        else clearLoadingWatchdog();
         set({ loading: b });
       },
       setBlocked: (url) => set({ blockedUrl: url }),
