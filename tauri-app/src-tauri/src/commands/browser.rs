@@ -40,7 +40,7 @@ use tauri::{
     WebviewUrl, WebviewBuilder,
 };
 
-use campus_auth::cas::{CasClient, CAS_BASE};
+use campus_auth::cas::{CasClient, WEBVPN_SERVICE};
 use super::auth::CommandResult;
 use crate::infra::state::AppState;
 
@@ -121,6 +121,12 @@ fn ticket_redirect(service: &str, st: &str) -> String {
 /// 防补票循环护栏：ST 被拒（service 不匹配等）时应用会再次 302 回 CAS 登录页，
 /// 不设限就无限换票。同 service 8s 内只补一次（窗口外视为新的登录流）。
 const RETICKET_COOLDOWN: Duration = Duration::from_secs(8);
+
+/// 深澜网关登录页判定（B 类应用 302 链的终点；与 CAS 登录页是**两套登录**——
+/// 网关有自己的 wengine 会话，免密走 M4 实证的 `WEBVPN_SERVICE` 换票）。
+fn is_gateway_login(url: &tauri::Url) -> bool {
+    url.host_str() == Some("webvpn.cwxu.edu.cn") && url.path().starts_with("/login")
+}
 
 /// spawn 内导航副 webview（`app_browser_navigate` 同款 eval 实现；webview 可能在
 /// 换票期间被用户关闭 → 静默放弃）。
@@ -263,8 +269,14 @@ pub(crate) async fn open_url_inapp(
 
     let app_for_nav = app.clone();
     let app_for_load = app.clone();
+    let initial_url_for_nav = url.clone();
     // 免密补票的防循环护栏（per-webview 生命周期：每次 add_child 新建一份）
     let last_reticket: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    // 网关补票后的回跳目标：on_navigation 拦下网关登录页时记入（本次打开的原
+    // 目标），on_page_load Finished（网关会话已建立）派发导航。两闭包共享。
+    let pending_target: std::sync::Arc<Mutex<Option<String>>> =
+        std::sync::Arc::new(Mutex::new(None));
+    let pending_for_load = pending_target.clone();
     let child = window.add_child(
         WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(parsed))
             .initialization_script(INJECT_JS)
@@ -275,6 +287,49 @@ pub(crate) async fn open_url_inapp(
             .on_navigation(move |u| {
                 let url_str = u.as_str().to_string();
                 if inapp_url_allowed(&url_str) {
+                    // ② 网关登录页（B 类应用 302 链终点）：WEBVPN_SERVICE 换票 →
+                    // 带票登录种 wengine 会话 → load Finished 后派发原目标
+                    if is_gateway_login(&u) && cas.is_some() {
+                        let cooldown_ok = {
+                            let mut guard = last_reticket.lock().expect("补票护栏锁");
+                            let fresh = matches!(
+                                guard.as_ref(),
+                                Some((s, t)) if s == WEBVPN_SERVICE && t.elapsed() < RETICKET_COOLDOWN
+                            );
+                            if !fresh {
+                                *guard = Some((WEBVPN_SERVICE.to_string(), Instant::now()));
+                            }
+                            !fresh
+                        };
+                        if cooldown_ok {
+                            let (cas_client, tgt) = cas.as_ref().unwrap();
+                            let (cas_client, tgt) = (cas_client.clone(), tgt.clone());
+                            let app2 = app_for_nav.clone();
+                            let pending2 = pending_target.clone();
+                            let original = initial_url_for_nav.clone();
+                            tauri::async_runtime::spawn(async move {
+                                match cas_client.sso_ticket(&tgt, WEBVPN_SERVICE).await {
+                                    Ok(st) => {
+                                        log::info!("[browser] 网关免密成功，建会话后回 {original}");
+                                        *pending2.lock().expect("pending 锁") = Some(original);
+                                        reticket_navigate(
+                                            &app2,
+                                            &ticket_redirect(WEBVPN_SERVICE, &st),
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        // TGT 过期/失败：送回网关登录页，用户手登降级
+                                        log::warn!("[browser] 网关免密失败（{e}），回登录页");
+                                        reticket_navigate(&app2, WEBVPN_SERVICE).await;
+                                    }
+                                }
+                            });
+                            log::info!("[browser] 拦网关登录页换票");
+                            return false;
+                        }
+                    }
+                    // ① CAS 登录页：解析 service 换票带票回跳
                     if let Some(service) = cas_login_service(&u) {
                         let cooldown_ok = {
                             let mut guard = last_reticket.lock().expect("补票护栏锁");
@@ -297,7 +352,8 @@ pub(crate) async fn open_url_inapp(
                                 let nav_service = service.clone();
                                 let login_page = url_str.clone();
                                 tauri::async_runtime::spawn(async move {
-                                    match cas_client.sso_ticket(&tgt, &nav_service).await {                                        Ok(st) => {
+                                    match cas_client.sso_ticket(&tgt, &nav_service).await {
+                                        Ok(st) => {
                                             let target = ticket_redirect(&nav_service, &st);
                                             log::info!("[browser] 免密补票 → {target}");
                                             reticket_navigate(&app2, &target).await;
@@ -325,7 +381,8 @@ pub(crate) async fn open_url_inapp(
                 }
                 allow
             })
-            // 加载进度事件：前端 Task 4 据此显示 loading 态
+            // 加载进度事件：前端 Task 4 据此显示 loading 态；网关会话建立后派发
+            // pending 回跳目标（Finished 时网关 cookie 已落 WebView cookie store）
             .on_page_load(move |wv, payload| {
                 let phase = match payload.event() {
                     tauri::webview::PageLoadEvent::Started => "started",
@@ -335,7 +392,16 @@ pub(crate) async fn open_url_inapp(
                 if let Err(e) = app_for_load.emit("browser://load", json!({ "phase": phase })) {
                     log::warn!("[browser] emit browser://load: {e}");
                 }
-                let _ = wv; // 回调签名要求，本批不用
+                if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                    let pending = pending_for_load.lock().expect("pending 锁").take();
+                    if let Some(target) = pending {
+                        log::info!("[browser] 网关会话就绪，派发原目标 {target}");
+                        let js = format!("location.href={};", json!(target));
+                        if let Err(e) = wv.eval(&js) {
+                            log::warn!("[browser] 派发原目标失败：{e}");
+                        }
+                    }
+                }
             }),
         LogicalPosition::new(0.0, TOPBAR_LOGICAL),
         LogicalSize::new(w, (h - TOPBAR_LOGICAL).max(0.0)),
@@ -496,6 +562,20 @@ mod tests {
             ticket_redirect("https://jwgl.cwxu.edu.cn/sso/lyiotlogin", "ST-2"),
             "https://jwgl.cwxu.edu.cn/sso/lyiotlogin?ticket=ST-2"
         );
+    }
+
+    /// 网关登录页判定：B 类 302 链终点命中，门户/CAS 登录页不误判。
+    #[test]
+    fn gateway_login_detected() {
+        let g: tauri::Url = "https://webvpn.cwxu.edu.cn/login?cas_login=true".parse().unwrap();
+        assert!(is_gateway_login(&g));
+        let g2: tauri::Url = "https://webvpn.cwxu.edu.cn/login".parse().unwrap();
+        assert!(is_gateway_login(&g2));
+        let cas_page: tauri::Url =
+            "https://wxcas.cwxu.edu.cn/lyuapServer/login?service=x".parse().unwrap();
+        assert!(!is_gateway_login(&cas_page));
+        let portal: tauri::Url = "https://webvpn.cwxu.edu.cn/https/abcdef/".parse().unwrap();
+        assert!(!is_gateway_login(&portal));
     }
 
     /// 校园域（`*.cwxu.edu.cn`）命中白名单 → 进应用内 webview。

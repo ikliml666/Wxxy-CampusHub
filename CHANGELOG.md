@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-09-21 · WebVPN 网关免密补票（B 类应用打开不再手登网关）
+
+- **模块**：`tauri-app/src-tauri/src/commands/browser.rs`
+- **改动**：用户真机反馈「需要 webvpn 的应用还是要登录」——B 类应用 302 链终点是**深澜网关自己的登录页**（`webvpn.cwxu.edu.cn/login`），此前免密只拦学校 CAS 登录页（`wxcas`/lyuapServer），网关不命中。补第二路：`on_navigation` 判定网关登录页（`is_gateway_login`）→ 拦下 → `sso_ticket(tgt, WEBVPN_SERVICE)` 换票（M4 实证的网关 service）→ 带票导航 `{WEBVPN_SERVICE}&ticket=ST` 种 wengine 会话进 WebView → `on_page_load Finished` 派发原目标（`pending_target` 两闭包共享 Arc<Mutex>）→ 网关认会话代理进站点。同 service 8s 冷却防循环复用；换票失败送回网关登录页手登降级。新增 `gateway_login_detected` 单测
+- **验证**：`cargo test --lib` **166 passed / 0 failed**；真机待用户复验 B 类应用（知网/财务系统等）打开即入
+
 ## 2026-09-21 · 应用内免密直达 + 日程页课表 chip 剔除（用户真机反馈轮）
 
 - **模块**：`tauri-app/src-tauri/src/commands/{browser,electricity}.rs`、`tauri-app/frontend/src/panels/SchedulePanel.tsx`；`.codewiki/learnings/seamless-reticket.md(新)`
