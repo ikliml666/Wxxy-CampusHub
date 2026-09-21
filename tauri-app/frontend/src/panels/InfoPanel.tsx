@@ -325,14 +325,17 @@ export function InfoPanel() {
                   }
                 />
               ) : detail.data.needsBrowser ? (
-                // 正文受官网鉴权保护（auth 开门页/非 2xx）：明确说明 + 浏览器打开，
-                // 不走错误态/重试（重试无效，站点侧拦截与网络无关）
+                // 正文受官网内容权限保护（content.jsp 系，服务端 auth 门）：2026-09-21
+                // 取证定性——官网列表页对该内容连链接都不渲染（href=#）、任意
+                // header/cookie/协议组合直连均被拦、门户 API 亦无正文代理
+                // （detailType=link 外链型）。这是学校侧权限配置，非客户端可解，
+                // 文案如实说明；按钮保留（学校放开权限后即可用，应用内免密直达）。
                 <EmptyState
                   compact
                   icon={ExternalLink}
                   domain="info"
-                  title="正文需在浏览器中查看"
-                  hint="该栏目正文由学校官网鉴权保护，无法在应用内展示。"
+                  title="该正文受学校官网权限保护"
+                  hint="经实测，此类栏目在浏览器中直接打开同样被官网拦截（提示“您无权访问”），属学校侧内容权限设置，与应用无关。可联系发布部门确认，或稍后重试。"
                   action={
                     <>
                       <Button
@@ -341,7 +344,7 @@ export function InfoPanel() {
                         onClick={() => openInBrowser(detail.data.url)}
                       >
                         <ExternalLink aria-hidden="true" />
-                        打开原文
+                        仍要尝试打开
                       </Button>
                       {openErr && <p className="text-caption text-text-2">{openErr}</p>}
                     </>

@@ -1,5 +1,12 @@
 # 更新日志
 
+## 2026-09-21 · 鉴权正文取证定性 + 空态文案如实化
+
+- **模块**：`tauri-app/frontend/src/panels/InfoPanel.tsx`
+- **取证结论（content.jsp 系「需鉴权」正文为学校侧内容权限，客户端无解）**：用户真机反馈《通用英语》免修公示看不了，深度取证——①官网列表页对该类内容服务端连链接都不渲染（`href="#"`，WebView 执行 JS 后亦然）；②任意 header/cookie/Referer/UA/协议组合直连一律落 `auth.htm`「您无权访问」（纯静态 843B，无登录引导）；③官网列表页访问不种任何 cookie（无服务端会话绑定可重放）；④门户 API `infoCenter/auth/{id}` 仅回元数据（`detailType:"link"` 外链型、`attachmentFileList:[]`、`infoDetail:null`），`unauthorize/getInfoDetail`、`getPageContent` 同样无正文——门户网页版点开同样是外链直跳，一样被拦。结论：学校官网（博达 webplus）对该栏目设了服务端内容权限，任何客户端手段无法越过
+- **改动**：needsBrowser 空态文案如实化（标题「该正文受学校官网权限保护」+ hint 说明取证结论与"与应用无关"，按钮改「仍要尝试打开」保留——学校放开权限后即可用且免密直达）
+- **验证**：`npx tsc --noEmit` 零错误
+
 ## 2026-09-21 · WebVPN 网关免密补票（B 类应用打开不再手登网关）
 
 - **模块**：`tauri-app/src-tauri/src/commands/browser.rs`
