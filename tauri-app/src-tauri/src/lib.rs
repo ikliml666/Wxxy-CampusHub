@@ -46,6 +46,7 @@ pub fn run() {
             commands::portal::get_schedule_month,
             commands::portal::get_schedule_day_counts,
             commands::portal::open_app,
+            commands::portal::download_attachment,
             commands::timetable::get_timetable,
             commands::timetable::import_timetable,
             commands::timetable::add_course_manual,

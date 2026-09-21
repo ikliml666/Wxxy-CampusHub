@@ -14,7 +14,10 @@ pub mod client;
 pub mod parse;
 
 pub use access::{classify_app_access, AppAccess};
-pub use article::{extract_article, html_text, is_allowed_info_url, is_auth_wall, is_http_url};
+pub use article::{
+    extract_article, html_text, is_allowed_attachment_url, is_allowed_info_url, is_auth_wall,
+    is_http_url,
+};
 pub use client::PortalClient;
 pub use parse::{
     block_time_slots, collect_schedule_notices, elapsed_slot_count, guess_image_mime,
@@ -135,6 +138,18 @@ pub struct ScheduleNoticeBrief {
     pub matched_keywords: Vec<String>,
 }
 
+/// 资讯正文附件（正文容器内指向 pdf/doc/zip 等常见文件后缀的 `<a href>`，
+/// 抽取规则见 `article::extract_attachments`；下载走 `download_attachment`
+/// 命令，白名单 `is_allowed_attachment_url`）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InfoAttachment {
+    /// 展示名：链接文本优先，空文本回落 URL 尾段文件名。
+    pub name: String,
+    /// 绝对 URL（相对地址已按详情页 base 补全）。
+    pub url: String,
+}
+
 /// 资讯正文（计划 §2.1 `InfoDetail { title, html }` 的兼容扩展：正常返回
 /// 清洗后的 HTML；正文被站点鉴权保护时 `needsBrowser=true` 正常返回（非错误），
 /// 前端引导在浏览器中打开 `url`）。
@@ -149,6 +164,10 @@ pub struct InfoDetail {
     pub needs_browser: bool,
     /// 原始正文页 URL（`needsBrowser` 时用于浏览器打开；打开前仍强制域名白名单）。
     pub url: String,
+    /// 正文附件列表（无附件 / `needsBrowser` 时为空数组；serde default 保持
+    /// 旧数据兼容——序列化恒有键、值为数组）。
+    #[serde(default)]
+    pub attachments: Vec<InfoAttachment>,
 }
 
 /// 待办分栏（`queryTabItems`；接口实际返回 6 个 tab，前端按契约只展示三个）。
