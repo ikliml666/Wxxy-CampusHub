@@ -444,7 +444,7 @@ export function EcardPowerView({
     void runQuery(r.feeitemId, r.path);
   };
 
-  /** 充值：在系统浏览器打开官方充值页（电费房间充值的外部兜底入口）。 */
+  /** 充值：应用内打开官方充值页（Rust 侧直建副 webview，经 browser://opened 事件同步前端工具栏）。 */
   const recharge = async () => {
     if (!areaId) return;
     const r = await invokeCommand("open_recharge_in_browser", { feeitemId: areaId });

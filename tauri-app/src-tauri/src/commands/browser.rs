@@ -22,6 +22,9 @@
 //!   eval `location.href`），白名单外导航由 on_navigation 返回 false 拦下。
 //!
 //! 事件（Rust → 前端 emit，载荷 camelCase JSON；前端 Task 4 listen）：
+//! - `browser://opened` `{"url":"..."}`（[`open_url_inapp`] 成功路径；前端
+//!   BrowserEventsBridge 常驻 listen 同步 store——Rust 直建副 webview 的入口
+//!   （电费 open_recharge_in_browser）不经前端 store，缺它就是无 chrome 死路）
 //! - `browser://load`    `{"phase":"started"|"finished"}`（on_page_load）
 //! - `browser://nav`     `{"url":"..."}`（on_navigation 放行）
 //! - `browser://blocked` `{"url":"..."}`（on_navigation 拒绝）
@@ -244,6 +247,12 @@ pub(crate) async fn open_url_inapp(
         "[browser] open label={BROWSER_LABEL} rect=(0,48 {w}x{}) url={url}",
         (h - TOPBAR_LOGICAL).max(0.0)
     );
+    // C1：成功路径广播 browser://opened。前端 BrowserEventsBridge 常驻 listen
+    // 后调 storeSyncOpen（等价 browserOpen 的 inApp 分支但不回调命令）——命令
+    // 链路（open_in_app_browser）同开时幂等：同值重置 + history 去重置顶。
+    if let Err(e) = app.emit("browser://opened", json!({ "url": url.clone() })) {
+        log::warn!("[browser] emit browser://opened: {e}");
+    }
     CommandResult::ok(BrowserOpenResult { in_app: true, url })
 }
 
