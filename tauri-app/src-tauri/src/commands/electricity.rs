@@ -47,6 +47,7 @@
 //! 片区 id、不带 token；`showData` 之外的 `map.data` 含户号（PII），crate 层已不透出。
 
 use super::auth::{session_client, CommandResult};
+use super::browser::{self, OpenDecision};
 use super::synjones::{
     detect_zone, ensure_webvpn_session, err_text, synjones_session_routed, wrapped_base,
     ERR_OFFCAMPUS_RELOGIN,
@@ -377,11 +378,15 @@ pub(crate) fn browser_recharge_url(feeitem_id: &str, zone: RouteZone) -> String 
     }
 }
 
-/// 充值入口：在系统浏览器打开官方充值页（2026-09-19 裁决：不再内嵌官方界面，
+/// 充值入口：打开官方充值页（2026-09-19 裁决：不再内嵌官方界面，
 /// 客户端直调官方接口的充值在后续批次接入）。
 /// 入参只允许数字片区 id，URL 由后端拼装，前端无法借它打开任意地址（与 `portal::open_in_browser`
 /// 的白名单思路一致，只是这里的合法目标是内网 IP；M4 起校外经 `browser_recharge_url`
 /// 包装为网关 URL，前端拿不到原始拼接过程）。
+/// Task 6：改走应用内浏览器同一套 decide 分流——校园域/内网 IP 进副 webview
+/// （`browser::open_url_inapp`），域外退系统浏览器（防御分支：现拼装结果恒域内，
+/// 校内直连是 `10.3.100.110`、校外经 WebVPN 包装是 `*.cwxu.edu.cn`，都必 InApp），
+/// 非 http/https 拒绝。命令名与入参契约不变，前端 EcardPowerView 无感。
 #[tauri::command]
 pub async fn open_recharge_in_browser(
     app: AppHandle,
@@ -392,12 +397,17 @@ pub async fn open_recharge_in_browser(
         return Ok(CommandResult::err("片区 id 非法"));
     }
     let url = browser_recharge_url(id, detect_zone().await);
-    Ok(
-        match app.opener().open_url(url.clone(), None::<&str>) {
+    Ok(match browser::decide_open(&url) {
+        OpenDecision::Blocked => CommandResult::err("仅支持 http/https 链接"),
+        OpenDecision::External => match app.opener().open_url(url, None::<&str>) {
             Ok(()) => CommandResult::empty(),
             Err(e) => CommandResult::err(&format!("打开浏览器失败：{e}")),
         },
-    )
+        OpenDecision::InApp => match browser::open_url_inapp(app, url).await {
+            r if r.success => CommandResult::empty(),
+            r => CommandResult::err(r.message.as_deref().unwrap_or("打开充值页失败")),
+        },
+    })
 }
 
 // ---------------- 充值六条（M3.1 批 C） ----------------

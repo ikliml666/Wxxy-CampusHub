@@ -32,7 +32,6 @@
       location.href = a.href;
     }
   }, true);
-  var _open = window.open;
   window.open = function (u) { if (u) location.href = String(u); return null; };
   // ④ 弹窗治理：本批仅收集观察（console 打点），不改 alert/confirm 行为——
   //    隐藏名单灰度后再上，避免误伤校方业务弹窗（设计文档 B.4 护栏）

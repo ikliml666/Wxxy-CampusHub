@@ -5,6 +5,7 @@ import { PanelHeader } from "@/components/PanelHeader";
 import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/authStore";
+import { useBrowserStore } from "@/stores/browserStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { AppCatalog, AppItem } from "@/shared/types";
 import { invokeCommand } from "@/shared/tauriApi";
@@ -45,8 +46,8 @@ function accessBadge(access: AppItem["access"]): { label: string; muted: boolean
   return null;
 }
 
-/** 单个应用卡：点击经后端 open_app 在系统浏览器打开（协议白名单在后端强制）；
- * 可达性徽标按后端附录 A 实测表推导。 */
+/** 单个应用卡：点击经 browserOpen 打开（校园域/内网进应用内 webview，域外自动
+ * 降级系统浏览器，去向决策在后端）；可达性徽标按后端附录 A 实测表推导。 */
 function AppCard({
   item,
   onOpen,
@@ -107,10 +108,11 @@ function GroupSkeleton() {
 export function AppsPanel() {
   const status = useAuthStore((s) => s.status);
   const openLoginDialog = useUiStore((s) => s.openLoginDialog);
+  const browserOpen = useBrowserStore((s) => s.browserOpen);
   const authed = status === "authed";
 
   const [catalog, setCatalog] = useState<CatalogState>({ phase: "loading" });
-  // 打开失败的即时反馈（成功时系统浏览器直接弹出，无需状态）
+  // 打开失败的即时反馈（常规失败由 browserStore.errorMsg 走弹层状态条，此处兜 invoke 层异常）
   const [openErr, setOpenErr] = useState<string | null>(null);
   // 可达性提示（webvpn：提示后仍打开原链接；unavailable：只提示不打开）
   const [accessHint, setAccessHint] = useState<string | null>(null);
@@ -158,8 +160,10 @@ export function AppsPanel() {
         `「${item.name}」需校园网或 WebVPN 环境：校外网络下可能无法访问，已尝试打开原链接。`,
       );
     }
-    invokeCommand("open_app", { url: item.link, isCas: item.isCas }).then((r) => {
-      if (!r.success) setOpenErr(`「${item.name}」打开失败：${r.message ?? "未知原因"}`);
+    // 打开去向（校园域/内网 → 应用内 webview；域外降级系统浏览器）由 browserStore
+    // 内部处理；常规失败进 store.errorMsg（弹层状态条），此处仅兜 invoke 层异常。
+    browserOpen(item.link).catch(() => {
+      setOpenErr(`「${item.name}」打开失败：未知原因`);
     });
   };
 

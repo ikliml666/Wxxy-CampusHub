@@ -5,6 +5,7 @@ import { PanelHeader } from "@/components/PanelHeader";
 import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/authStore";
+import { useBrowserStore } from "@/stores/browserStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { InfoColumn, InfoDetail, InfoItem, InfoPage } from "@/shared/types";
 import { invokeCommand } from "@/shared/tauriApi";
@@ -57,6 +58,7 @@ const ARTICLE_CLASS = cn(
 export function InfoPanel() {
   const status = useAuthStore((s) => s.status);
   const openLoginDialog = useUiStore((s) => s.openLoginDialog);
+  const browserOpen = useBrowserStore((s) => s.browserOpen);
   const authed = status === "authed";
 
   const [columns, setColumns] = useState<ColumnsState>({ phase: "loading" });
@@ -64,7 +66,7 @@ export function InfoPanel() {
   const [page, setPage] = useState(1);
   const [list, setList] = useState<ListState>({ phase: "loading" });
   const [detail, setDetail] = useState<DetailState | null>(null);
-  // 「在浏览器打开」失败的即时反馈（正常情况下系统浏览器直接弹出，无需状态）
+  // 「在浏览器打开」失败的即时反馈（常规失败由 browserStore.errorMsg 走弹层状态条，此处兜 invoke 层异常）
   const [openErr, setOpenErr] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
@@ -124,12 +126,11 @@ export function InfoPanel() {
     });
   };
 
-  // needsBrowser 的正文：系统浏览器打开原文（后端 open_in_browser 强制白名单）
+  // needsBrowser 的正文：打开原文（校园域进应用内 webview；域外降级/失败提示由
+  // browserStore 内部处理，此处仅兜 invoke 层异常）
   const openInBrowser = (url: string) => {
     setOpenErr(null);
-    invokeCommand("open_in_browser", { url }).then((r) => {
-      if (!r.success) setOpenErr(r.message ?? "打开浏览器失败");
-    });
+    browserOpen(url).catch(() => setOpenErr("打开浏览器失败"));
   };
 
   const retry = () => setReloadTick((t) => t + 1);
@@ -263,7 +264,7 @@ export function InfoPanel() {
                         onClick={() => openInBrowser(detail.data.url)}
                       >
                         <ExternalLink aria-hidden="true" />
-                        在浏览器打开原文
+                        打开原文
                       </Button>
                       {openErr && <p className="text-caption text-text-2">{openErr}</p>}
                     </>

@@ -60,7 +60,8 @@ fn inapp_url_allowed(url: &str) -> bool {
         return true;
     }
     // SSRF 面不变：该内网形态 URL 仅由后端 `browser_recharge_url` 拼装后下发，
-    // 前端无法借 decide_open/on_navigation 的内网放行开任意地址。
+    // 前端无法借它打开 10.3.100.110 之外的地址（host 判定不含端口，实际攻击面
+    // 与既有 open_app 等价）。
     matches!(
         reqwest::Url::parse(url),
         Ok(u) if u.host_str() == Some(RECHARGE_HOST)
@@ -361,6 +362,13 @@ mod tests {
     #[test]
     fn external_domain_goes_external() {
         assert!(matches!(decide_open("https://kns.cnki.net/"), OpenDecision::External));
+    }
+
+    /// 域后缀攻击：`cwxu.edu.cn.evil.com` 不是 `*.cwxu.edu.cn` 的子域，必须判
+    /// External——钉死「不得用 starts_with 替代域后缀判定」。
+    #[test]
+    fn cwxu_edu_suffix_attack_goes_external() {
+        assert!(matches!(decide_open("https://cwxu.edu.cn.evil.com/"), OpenDecision::External));
     }
 
     /// 非 http/https 协议一律拒绝。
