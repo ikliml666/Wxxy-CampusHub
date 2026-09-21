@@ -368,7 +368,8 @@ pub async fn delete_electricity_room(id: String) -> Result<CommandResult<Vec<Sav
 /// 浏览器充值 URL（纯函数供单测）：校外把内网官网页包装成网关 URL（浏览器自身持有
 /// WebVPN 登录态，未登录时网关会弹登录页——链路始终可达）；校内/未知保持内网直开。
 /// `has_vpn_session` 恒传 true：桌面 App 的网关会话与浏览器无关，包装决策只看归属。
-fn browser_recharge_url(feeitem_id: &str, zone: RouteZone) -> String {
+/// Task: 应用内浏览器复用（应用内充值入口改经 `commands::browser::open_url_inapp` 打开）。
+pub(crate) fn browser_recharge_url(feeitem_id: &str, zone: RouteZone) -> String {
     let raw = format!("{BERSERKER_BASE}{RECHARGE_PATH_PREFIX}{}", feeitem_id.trim());
     match route(&raw, zone, true) {
         RouteDecision::Wrapped(w) => w,

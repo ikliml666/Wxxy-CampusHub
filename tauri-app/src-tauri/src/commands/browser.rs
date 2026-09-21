@@ -19,6 +19,48 @@ use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewBuilder,
 };
 
+// ---------------- 打开去向决策层（Task 2） ----------------
+
+/// 充值页内网 IP（慧新E校官网 base）：校园域语义，[`is_allowed_info_url`] 的
+/// `*.cwxu.edu.cn` 白名单不覆盖，decide/导航白名单需额外放行。
+pub(crate) const RECHARGE_HOST: &str = "10.3.100.110";
+
+/// 打开去向三态（纯函数判定，单测钉死）。
+pub(crate) enum OpenDecision {
+    /// 进应用内 webview（校园域或内网充值 IP）
+    InApp,
+    /// 域外公网站点 → 前端降级走旧 open_app 系统浏览器
+    External,
+    /// 非 http/https，拒绝
+    Blocked,
+}
+
+/// 应用内 webview 的**导航白名单**（与 [`decide_open`] 的 InApp 判据同源，
+/// Task 3 的 `on_navigation` 拦截也用它）：校园域（`*.cwxu.edu.cn`）或内网充值 IP。
+fn inapp_url_allowed(url: &str) -> bool {
+    if campus_portal::is_allowed_info_url(url) {
+        return true;
+    }
+    // SSRF 面不变：该内网形态 URL 仅由后端 `browser_recharge_url` 拼装后下发，
+    // 前端无法借 decide_open/on_navigation 的内网放行开任意地址。
+    matches!(
+        reqwest::Url::parse(url),
+        Ok(u) if u.host_str() == Some(RECHARGE_HOST)
+    )
+}
+
+/// 打开去向判定（纯函数）：协议白名单 → 导航白名单 → 域外。
+pub(crate) fn decide_open(url: &str) -> OpenDecision {
+    if !campus_portal::is_http_url(url) {
+        return OpenDecision::Blocked;
+    }
+    if inapp_url_allowed(url) {
+        OpenDecision::InApp
+    } else {
+        OpenDecision::External
+    }
+}
+
 /// Result 打点格式化：ok / err: 原因
 fn fmt_res(r: &tauri::Result<()>) -> String {
     match r {
@@ -145,4 +187,37 @@ pub async fn spike_inapp_webview(app: AppHandle, url: Option<String>) -> Result<
 #[tauri::command]
 pub async fn spike_close_inapp(app: AppHandle) -> Result<(), String> {
     spike_close_core(&app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 校园域（`*.cwxu.edu.cn`）命中白名单 → 进应用内 webview。
+    #[test]
+    fn campus_domain_goes_inapp() {
+        assert!(matches!(decide_open("https://my.cwxu.edu.cn/xx"), OpenDecision::InApp));
+    }
+
+    /// 充值页内网 IP（慧新E校官网）是校园域语义；`is_allowed_info_url` 不覆盖，
+    /// decide_open 需额外放行该 host。
+    #[test]
+    fn recharge_internal_ip_goes_inapp() {
+        assert!(matches!(
+            decide_open("http://10.3.100.110/charge-pc/pays/7"),
+            OpenDecision::InApp
+        ));
+    }
+
+    /// 域外公网站点 → 前端降级走旧 open_app 系统浏览器。
+    #[test]
+    fn external_domain_goes_external() {
+        assert!(matches!(decide_open("https://kns.cnki.net/"), OpenDecision::External));
+    }
+
+    /// 非 http/https 协议一律拒绝。
+    #[test]
+    fn javascript_url_blocked() {
+        assert!(matches!(decide_open("javascript:alert(1)"), OpenDecision::Blocked));
+    }
 }
