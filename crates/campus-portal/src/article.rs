@@ -13,7 +13,7 @@
 //!   片段（剔除 script/style/iframe/事件属性，相对地址转绝对）。
 //! 清洗在后端完成，前端直接渲染，不再二次处理。
 
-use crate::{InfoDetail, PortalError};
+use crate::{InfoAttachment, InfoDetail, PortalError};
 use ego_tree::iter::Edge;
 use scraper::{node::Node, ElementRef, Html, Selector};
 use std::fmt::Write as _;
@@ -47,6 +47,101 @@ pub fn is_http_url(raw: &str) -> bool {
         return false;
     };
     matches!(u.scheme(), "http" | "https")
+}
+
+/// 附件下载 URL 白名单：[`is_allowed_info_url`] 的校园域判断 + 一卡通服务器
+/// `10.3.100.110`（资讯正文实测会挂一卡通域下的附件直链）。
+///
+/// **独立函数而非放宽** [`is_allowed_info_url`]：正文抓取 / 浏览器打开路径的
+/// 域名白名单是回归保护（见测试 `open_in_browser_domain_whitelist_stays_tight`），
+/// 只应在「后端要发起下载请求」的附件路径放宽。host 精确匹配 `10.3.100.110`
+/// （IP 没有后缀语义），scheme 仍限 http/https（防 SSRF 口径不变）。
+pub fn is_allowed_attachment_url(raw: &str) -> bool {
+    if is_allowed_info_url(raw) {
+        return true;
+    }
+    let Ok(u) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    matches!(u.scheme(), "http" | "https")
+        && u.host_str().map(|h| h == "10.3.100.110").unwrap_or(false)
+}
+
+/// 附件链接的常见文件后缀（大小写不敏感，匹配 URL 路径尾段扩展名；查询
+/// 参数不参与判定）。
+const ATTACHMENT_EXTS: &[&str] = &[
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "zip", "rar", "7z", "txt",
+];
+
+/// URL 路径尾段是否为附件扩展名（无 `.` 的路径整体参与比对，天然不命中）。
+fn is_attachment_ext(u: &reqwest::Url) -> bool {
+    u.path()
+        .rsplit('.')
+        .next()
+        .is_some_and(|ext| ATTACHMENT_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// URL 尾段文件名兜底（path 末段，保留 percent 编码——解码需额外依赖，链接
+/// 文本通常是服务端给好的原始名，兜底场景可接受）；空段回落「附件」。
+fn url_tail_file_name(u: &reqwest::Url) -> String {
+    u.path_segments()
+        .and_then(|mut segs| segs.next_back().map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "附件".to_string())
+}
+
+/// 从正文容器抽取附件链接（`<a href>` 指向 [`ATTACHMENT_EXTS`] 常见文件后缀）。
+///
+/// 相对 URL 以详情页为 base 补全为绝对；仅保留 http/https（与 `sanitize_url`
+/// 同口径，`javascript:` 等丢弃）。同名同 href 去重、按出现顺序保留；`name`
+/// 取链接全部文本（去首尾空白），空文本回落 URL 尾段文件名。
+fn extract_attachments(root: &ElementRef, base: &reqwest::Url) -> Vec<InfoAttachment> {
+    let mut out: Vec<InfoAttachment> = Vec::new();
+    for edge in root.traverse() {
+        // Open 边才算一次（Close 边是同一节点的重复事件）
+        let Edge::Open(node) = edge else {
+            continue;
+        };
+        let Node::Element(el) = node.value() else {
+            continue;
+        };
+        if el.name() != "a" {
+            continue;
+        }
+        // 取链接全部后代文本需要 ElementRef（text() 是它的方法）
+        let Some(a) = ElementRef::wrap(node) else {
+            continue;
+        };
+        let Some(href) = a.value().attr("href") else {
+            continue;
+        };
+        let Ok(abs) = base.join(href.trim()) else {
+            continue;
+        };
+        if !matches!(abs.scheme(), "http" | "https") || !is_attachment_ext(&abs) {
+            continue;
+        }
+        let text = a.text().collect::<String>();
+        let name = {
+            let t = text.trim();
+            if t.is_empty() {
+                url_tail_file_name(&abs)
+            } else {
+                t.to_string()
+            }
+        };
+        if out
+            .iter()
+            .any(|a| a.name == name && a.url == abs.as_str())
+        {
+            continue;
+        }
+        out.push(InfoAttachment {
+            name,
+            url: abs.to_string(),
+        });
+    }
+    out
 }
 
 /// 危险标签：连同整棵子树剔除（可执行代码 / 嵌入对象 / 表单控件）。
@@ -283,6 +378,9 @@ pub fn extract_article(page_html: &str, page_url: &str) -> Result<InfoDetail, Po
         html: Some(html),
         needs_browser: false,
         url: page_url.to_string(),
+        // 附件与 html 同源（同一正文容器、同一 base 补全），前端点击走
+        // download_attachment 命令下载
+        attachments: extract_attachments(&content, &base),
     })
 }
 
@@ -542,6 +640,32 @@ mod tests {
         // 空输入 → 空串
         assert_eq!(html_text(""), "");
         assert_eq!(html_text("<p></p>"), "");
+    }
+
+    // ---------- 附件抽取（download_attachment 命令的数据源） ----------
+
+    #[test]
+    fn article_extracts_attachments_from_content_links() {
+        // 1 个 pdf 附件（大写扩展名 + 相对 URL）+ 1 个普通 .htm 链接，内容虚构
+        let page = r#"<html><head><title>附件测试</title></head>
+<body><div class="v_news_content">
+  <p>附件：<a href="/__local/A/B/12/notice_list.PDF">录取名单.pdf</a></p>
+  <p>相关：<a href="/info/1033/2.htm">另一篇通知</a></p>
+</div></body></html>"#;
+        let d = extract_article(page, PAGE_URL).unwrap();
+        assert_eq!(
+            d.attachments.len(),
+            1,
+            "普通 .htm 链接不得计入附件: {:?}",
+            d.attachments
+        );
+        let a = &d.attachments[0];
+        assert_eq!(a.name, "录取名单.pdf", "name 取链接文本");
+        // 相对 URL 以详情页为 base 补全为绝对
+        assert_eq!(a.url, "https://tw.cwxu.edu.cn/__local/A/B/12/notice_list.PDF");
+        // 无附件的页面（PAGE_FIXTURE）→ 空数组，不报错
+        let none = extract_article(PAGE_FIXTURE, PAGE_URL).unwrap();
+        assert!(none.attachments.is_empty());
     }
 
     // ---------- is_auth_wall（依据主智能体 2026-09-18 实机 curl 结论构造，脱敏） ----------

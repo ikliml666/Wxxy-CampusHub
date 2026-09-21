@@ -37,6 +37,9 @@ source_files:
   - tauri-app/frontend/src/components/ecard/EcardTransferView.tsx
   - tauri-app/frontend/src/components/ecard/EcardBankView.tsx
   - tauri-app/frontend/src/components/ecard/MiniLine.tsx
+  - tauri-app/frontend/src/components/ecard/EcardPowerNotifCard.tsx
+  - tauri-app/frontend/src/components/PdfViewerDialog.tsx
+  - tauri-app/frontend/src/shared/attachment.ts
   - tauri-app/frontend/src/panels/SettingsPanel.tsx
 tags:
   - react
@@ -55,7 +58,7 @@ tags:
 ## IPC 出口与契约类型（shared/）
 
 - `tauriApi.ts:8-17`：`invokeCommand<T>(cmd, args)` 是**唯一 IPC 出口**，invoke 抛错包装为 `{ success:false, message:String(e) }`，调用方只处理 CommandResult（契约详见 [[modules/campus-hub-tauri|接线层]] 与 [[_architecture|架构总览]]）。
-- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态）；`types.ts:127-177`：M2 批次 3 契约 7 接口（`AppAccess` 四值联合类型 + `AppItem`（含 `access`，M2 遗留项新增）/ `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全，`extra` 承载会议附加信息）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` **8 项**（M4.5：today/timetable/info/todo/schedule/apps/**ecard**/settings，原 "wallet"+"power" 合并为 "ecard"，注释明示三处同步：本类型 + DockNav DOCK_ITEMS + AppShell PANEL_MAP）；`types.ts:188` 起：M2.5 课表契约 12 接口（镜像 `campus-schedule::model` 与 `commands/timetable.rs` 的 camelCase 序列化：`CourseSource` / `Course`（`startSection/endSection/classId/remark` 为 `| null` 恒存在；`colorIndex` 导入课程是**课名哈希大数**，取色必须 `% 色板长度`）/ `CourseTableConfig` / `OverrideKind` / `CourseOverride` / `Timetable` / `TimeSlot` / `TimetableView`（批次 4 修订契约）/ `ImportResult` / `ManualCourseInput` / `NoticeConfidence` / `NoticeCandidate`——⚠️ `NoticeCandidate` 的 Option 字段 Rust 侧 `skip_serializing_if` 缺省省略 → TS 用**可选属性**（非 `| null`），与 Course/Override 的恒存在 null 字段区分）。
+- `types.ts:1`：`CommandResult<T>`；`types.ts:3-41`：M2 批次 1 门户契约 4 接口（`SemesterInfo` / `WalletSummary` / `CourseBrief` / `PortalOverview`，镜像 Rust `commands/portal.rs` DTO，camelCase，子项均可 null）；`types.ts:43-114`：M2 批次 2 契约 7 接口（`InfoColumn` / `InfoItem` / `InfoPage` / `InfoDetail` / `TodoTab` / `TodoItem` / `TodoPage`；`InfoDetail` 含 `needsBrowser` 三分类——`true` 时前端引导浏览器打开、不显示错误态；2026-09-21 起新增 `attachments: InfoAttachment[]`（`{ name, url }` 恒为数组，协议层 `extract_attachments` 从正文抽取，选型与管线见 [[decisions/attachment-inline-viewer|附件内嵌查看器与鉴权下载管线]]））；`types.ts:127-177`：M2 批次 3 契约 7 接口（`AppAccess` 四值联合类型 + `AppItem`（含 `access`，M2 遗留项新增）/ `AppGroup` / `AppCatalog`（pinned = 收藏钉选）/ `ScheduleClassify` / `ScheduleEvent`（毫秒时间戳，classifyName/color 后端按 code 映射补全，`extra` 承载会议附加信息）/ `ScheduleDayCount`）；`types.ts:116` 起：`PanelId` **8 项**（M4.5：today/timetable/info/todo/schedule/apps/**ecard**/settings，原 "wallet"+"power" 合并为 "ecard"，注释明示三处同步：本类型 + DockNav DOCK_ITEMS + AppShell PANEL_MAP）；`types.ts:188` 起：M2.5 课表契约 12 接口（镜像 `campus-schedule::model` 与 `commands/timetable.rs` 的 camelCase 序列化：`CourseSource` / `Course`（`startSection/endSection/classId/remark` 为 `| null` 恒存在；`colorIndex` 导入课程是**课名哈希大数**，取色必须 `% 色板长度`）/ `CourseTableConfig` / `OverrideKind` / `CourseOverride` / `Timetable` / `TimeSlot` / `TimetableView`（批次 4 修订契约）/ `ImportResult` / `ManualCourseInput` / `NoticeConfidence` / `NoticeCandidate`——⚠️ `NoticeCandidate` 的 Option 字段 Rust 侧 `skip_serializing_if` 缺省省略 → TS 用**可选属性**（非 `| null`），与 Course/Override 的恒存在 null 字段区分）。
 - `cn.ts:3-5`：clsx + tailwind-merge 的 `cn()`。
 
 ## authStore：登录态单一来源（zustand + persist）
@@ -127,7 +130,7 @@ tags:
 
 ## EcardsPanel：一卡通页（M4.5，9→8 面板合并）
 
-原「钱包」（WalletPanel）与「电费」（PowerPanel）合并为 `panels/EcardsPanel.tsx`（宫格首页 ⇄ 子页，`EcardView` **九值**：home/balance/bill/stats/recharge/power + M4.5 批 4 新增 `cardops`/`transfer`/`bank` 三子页——卡务操作、卡间转账、银行卡绑定，组件为 `components/ecard/EcardCardOpsView.tsx` / `EcardTransferView.tsx` / `EcardBankView.tsx`，密码输入统一走通用安全键盘 `SecureKeypad.tsx`），两个旧面板文件已删除；电费内容整体迁入 `components/ecard/EcardPowerView.tsx`（级联/常用房间/结果卡逻辑未动，见 [[modules/electricity-panel|电费页]]）。宫格新增三入口按 `config` 门控（挂失分区 `showLost`、银行卡项 `enabledApps` 含 `yinhangka`/`bind-bank-card`；多卡绑定不做——本校 `getAllApps` 无 `bind-campus-card`）。子页与数据源、命令面（含 15 条写命令）、门控、单位口径与脱敏策略详见 [[modules/ecard-panel|一卡通页]]，合并决策见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]。TodayPanel 快捷动作「查电费」「卡片充值」改指 `ecard` 面板并**直达子页**（`TodayPanel.tsx:109-110` 设 `ecardView: "power"/"recharge"`，`TodayPanel.tsx:441` 应用）。
+原「钱包」（WalletPanel）与「电费」（PowerPanel）合并为 `panels/EcardsPanel.tsx`（宫格首页 ⇄ 子页，`EcardView` **九值**：home/balance/bill/stats/recharge/power + M4.5 批 4 新增 `cardops`/`transfer`/`bank` 三子页——卡务操作、卡间转账、银行卡绑定，组件为 `components/ecard/EcardCardOpsView.tsx` / `EcardTransferView.tsx` / `EcardBankView.tsx`，密码输入统一走通用安全键盘 `SecureKeypad.tsx`），两个旧面板文件已删除；电费内容整体迁入 `components/ecard/EcardPowerView.tsx`（级联/常用房间/结果卡逻辑未动，见 [[modules/electricity-panel|电费页]]）。宫格新增三入口按 `config` 门控（挂失分区 `showLost`、银行卡项 `enabledApps` 含 `yinhangka`/`bind-bank-card`；多卡绑定不做——本校 `getAllApps` 无 `bind-campus-card`）。子页与数据源、命令面（含 15 条写命令）、门控、单位口径与脱敏策略详见 [[modules/ecard-panel|一卡通页]]，合并决策见 [[decisions/ecard-panel-merge|一卡通面板合并决策]]。TodayPanel 快捷动作「查电费」「卡片充值」改指 `ecard` 面板并**直达子页**（`TodayPanel.tsx:109-110` 设 `ecardView: "power"/"recharge"`，`TodayPanel.tsx:441` 应用）。**2026-09-21 起电费子页底部挂 `EcardPowerNotifCard`**（`components/ecard/EcardPowerNotifCard.tsx`）：电费提醒开关 + 阈值 + 检查频率，原在设置页 `NotifSettingsCard` 内、随「通知设置跟着业务走」迁入电费子页（设置页卡片保留公告/待办两项，save 契约 `{...settings}` 整包回传不变——电费字段在两处编辑互不覆盖）。
 
 ## TodayPanel：今日页真实数据（M2 批次 1）
 
@@ -149,6 +152,7 @@ tags:
 - **内嵌正文**：`fetchDetail` 打开即带条目标题渲染骨架（`InfoPanel.tsx:114-125`）；后端清洗 HTML 经 `dangerouslySetInnerHTML` 直接渲染，**前端不二次清洗**（`InfoPanel.tsx:281`）；正文容器 `onClick={stopLinkNav}` 统一拦截 `<a>` 导航——WebView 不随正文跳转外站（`InfoPanel.tsx:40-42,278`）；已切走（返回列表/打开另一条）后的过期响应按 URL 比对丢弃（`InfoPanel.tsx:119-120`）；「返回列表」只置 `detail=null`，列表状态保留。
 - **needsBrowser 分支**（`InfoPanel.tsx:249-271`）：显示「正文需在浏览器中查看 / 该栏目正文由学校官网鉴权保护，无法在应用内展示」+「在浏览器打开原文」（调 `open_in_browser`，失败内联文案）+「返回列表」——**无错误态/重试**（官网鉴权拦截与网络无关，重试无效）。
 - 正文排版 `ARTICLE_CLASS`（`InfoPanel.tsx:45-55`）：段落/标题/表格/列表/图片/引用的最小样式，全部走 token 与 `[_a]` 域色选择器；外链 `<a>` 语义保留但点击被拦截。
+- **附件区与 PDF 查看器**（2026-09-21 新增）：详情标题与正文之间渲染 `attachments` 区块（空数组不渲染），每项 = 类型图标（`shared/attachment.ts` 的 `attachmentIcon` 按后缀映射）+ 文件名 + 动作副文案；**PDF（`isPdfAttachment`）** 点击开 `PdfViewerDialog` 弹层（`React.lazy` 按需加载——pdfjs 约 704KB 独立 chunk 不进主包；`fixed inset-0` 大面积 `min(1100px,94vw)×90vh`，工具条 = 文件名 + scroll-spy 页码 + 缩放 0.6–2.0 + 下载 + 关闭，Esc/遮罩关闭、打开聚焦/关闭还焦点、锁背景滚动），数据流 = `downloadAttachment(url)` → 裸 base64 → `base64ToBytes` → `<Document file={{ data }}>`，全部页顺序渲染（<50 页口径不虚拟化），CJK 依赖 vite-plugin-static-copy 拷入的 cmaps（坑见 [[learnings/webview2-pdf-csp-cmap|WebView2 内嵌 PDF 的 CSP 与 CMap 三坑]]）；**非 PDF** 走 `downloadAndSaveAttachment` 统一出口（`shared/attachment.ts`）→ Blob + `a[download]` 触发系统保存，按钮 idle/loading/done/error 四态完整。选型与鉴权管线见 [[decisions/attachment-inline-viewer|附件内嵌查看器与鉴权下载管线]]。
 
 ## TodoPanel：待办页真实数据（M2 批次 2）
 
@@ -169,8 +173,10 @@ tags:
 
 - **周区间计算**：`weekRange(offset)`（`SchedulePanel.tsx:81`）取第 offset 周的 `[周一 00:00.000, 周日 23:59.999]` 本地毫秒区间；列序周一为 0（`getDay()` 周日=0 折算到第 6 列）。周切换器头部显示日期区间（如 `9.14 – 9.20`）。
 - **周/月双视图**（M2 遗留项）：头部 `periodSwitcher`（`SchedulePanel.tsx:272`）= 周/月 toggle + 箭头（`shiftPeriod` 按视图切周/切月，月标题 `YYYY年M月`）；切视图清详情。
-- **月视图与角标**：`monthGrid(offset)`（`SchedulePanel.tsx:63`）自然月网格（首格 = 当月 1 日所在周的周一，列序与周视图一致）；角标数据 `get_schedule_day_counts`（`SchedulePanel.tsx:213`，独立 `CountsState` 四态）——⚠️ **角标为当日全量日程数**（bs-schedule 计数接口无分类过滤参数，会议不计入，如实呈现不伪造）；今日格高亮；`gotoWeek`（`SchedulePanel.tsx:253`）点击某天跳到该天所在周（明细按当前过滤取数）；全不选分类时月视图同样不发请求（与周视图一致）；计数失败只降级角标（错误条 + 重试），日历不受影响。
-- **取数**：切周 / 切分类过滤触发 `get_schedule_month`（`startMs/endMs/codes`，周视图 effect `SchedulePanel.tsx:180`；**月视图不发明细请求**）；**全不选分类时不发请求**（服务端空 codes 语义未实测，前端规避）；事件四态与计数四态各自独立。
+- **月视图与角标**：`monthGrid(offset)`（`SchedulePanel.tsx:63`）自然月网格（首格 = 当月 1 日所在周的周一，列序与周视图一致）；角标 **2026-09-21 起不再调 `get_schedule_day_counts`**，改由过滤课程后的 `get_schedule_month` 月明细前端自算（按 `startMs` 落日计数，`MonthDetailState` 四态）——月明细本就全量返回，同源保证角标与列表口径一致（旧口径「当日全量、会议不计入」作废）；今日格高亮；`gotoWeek` 点击某天跳到该天所在周（明细按当前过滤取数）；全不选分类时月视图同样不发请求（与周视图一致）；月明细失败只降级角标（错误条 + 重试），日历不受影响。
+- **取数**：切周 / 切分类过滤触发 `get_schedule_month`（`startMs/endMs/codes`，周视图 effect；月视图 2026-09-21 起也走同一命令发明细请求）；**全不选分类时不发请求**（服务端空 codes 语义未实测，前端规避）；事件四态与月明细四态各自独立。
+- **课程过滤与容器**（2026-09-21 新增）：`isCourseEvent`（`classifyName === "课程" || classifyCode 含 "course"` 双判据）在周分桶/月计数/最近日程三处**入桶前统一剔除**——课程归属课表页呈现，日程页不再与课表重复；容器 `max-w-3xl` 放宽为 `w-full max-w-6xl`，周历 `overflow-x-auto` + 列最小 136px（内网格 952px），事件块 `truncate` 改 `line-clamp-2` 完整显示时间与标题（旧版每列仅约 100px 挤压截断的根因消除）；详情卡星期文案改按事件自身日期（`dayIndexOfSelf`），周历块与最近日程行共用。
+- **最近日程**（2026-09-21 新增）：日历下方固定区块，独立 fetch 今天起 30 天（同接口同过滤口径），`buildUpcomingGroups` 按自然日分组升序（今天/明天/周X + 日期标签），行 = 域色竖条 + 标题 + 时间 + 地点 + 分类 chip，点击联动上方详情卡；今天无事件给「今日无日程」空态、30 天全空给整体空态，loading 骨架/错误重试四态完整。
 - **5 类彩色过滤 chips**：`get_schedule_classify` 取分类与**服务端色值**（chip 与日程块色标同源）；点击 toggle；chips 自带加载骨架与出错重试。
 - **会议块与单时刻**：会议由后端并入 `get_schedule_month` 响应（`classifyCode=Default-Meeting`）；**服务端无结束时刻 → `endMs=startMs`**，`fmtTimeRange`（`SchedulePanel.tsx:98`）对等值显示单时刻（不伪造时间段）；详情卡 `extra` 非空时追加一行附加信息（主持人/参会人员/承办单位）。
 - **落列与高亮**：事件按开始时间落列（`dayIndexOf`，跨周事件忽略）；**今日列/今日格高亮仅当前周/当月生效**。

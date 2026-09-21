@@ -68,3 +68,9 @@ export const openExternalBrowser = (url: string) => {
     ? invokeCommand("open_in_browser", { url })
     : invokeCommand("open_app", { url, isCas: false });
 };
+
+// ==================== 资讯附件（tauri commands/portal.rs：download_attachment） ====================
+
+/** 下载校园官网附件（后端白名单校验链接）：成功 data = { fileName, base64 }（裸 base64，无 data: 前缀）。 */
+export const downloadAttachment = (url: string) =>
+  invokeCommand<{ fileName: string; base64: string }>("download_attachment", { url });

@@ -58,15 +58,16 @@ tags:
 | `get_portal_overview` | — | `PortalOverview{ semester, wallet, nextCourse, fetchedAt }`，三个子项均可 null（无会话 → err「请先登录」；2026-09-18 M2 批次 1 新增） | `portal.rs:23-79` |
 | `get_info_columns` | — | `InfoColumn[]`（后端固定 7 栏：订阅接口 + 实测全量兜底） | `portal.rs:86-97` |
 | `get_info_list` | `columnId, page, pageSize` | `InfoPage`（total/pageCount 不可靠原样透传，前端满页判断分页） | `portal.rs:101-115` |
-| `get_info_detail` | `url` | `InfoDetail{ title, html?, needsBrowser, url }` 三分类（正常 HTML / 鉴权门 `needsBrowser=true` 非错误 / 真错误；正文已由协议层白名单清洗，命令层不二次处理） | `portal.rs:119-131` |
+| `get_info_detail` | `url` | `InfoDetail{ title, html?, needsBrowser, url, attachments }` 三分类（正常 HTML / 鉴权门 `needsBrowser=true` 非错误 / 真错误；正文已由协议层白名单清洗，命令层不二次处理；`attachments: InfoAttachment{ name, url }[]` 2026-09-21 新增，协议层 `extract_attachments` 抽取、`#[serde(default)]` 恒为数组） | `portal.rs:119-131` |
 | `get_todo_tabs` | — | `TodoTab[]`（接口 6 tab 全量透传，前端按契约展示三个） | `portal.rs:135-146` |
 | `get_todo_list` | `tabId, page, pageSize` | `TodoPage`（tabId 白名单校验在协议层 `query_todo_list`） | `portal.rs:150-164` |
 | `open_in_browser` | `url` | 无（白名单强制 `*.cwxu.edu.cn`，非法域名 err「仅支持校园官网链接」；2026-09-18 M2 批次 2 新增） | `portal.rs:183-192` |
 | `get_app_catalog` | — | `AppCatalog{ groups, pinned }`（图标已由后端代拉为 data URL，失败条目 iconUrl 为 null；2026-09-18 M2 批次 3 新增） | `portal.rs:199-210` |
 | `get_schedule_classify` | — | `ScheduleClassify[]`（5 类，会话内后端已缓存） | `portal.rs:214-225` |
 | `get_schedule_month` | `startMs, endMs, codes` | `ScheduleEvent[]`（区间倒挂 err「日程区间无效」，前端 bug 防御；**M2 遗留项起 codes 含 `Default-Meeting` 时并入会议卡日程**——失败空贡献不影响课表，失败时 stderr 有 `[meeting-diag]` 打点） | `portal.rs:229-261` |
-| `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25） | `portal.rs:264-281` |
+| `get_schedule_day_counts` | `startMs, endMs` | `ScheduleDayCount[]`（月视图角标；bs-schedule 计数接口无分类参数，计数为当日全量日程数；2026-09-18 M2 遗留项新增，命令数 24 → 25；⚠️ 前端 2026-09-21 起不再消费——月角标改由 `get_schedule_month` 过滤课程后的月明细自算，本命令保留未删） | `portal.rs:264-281` |
 | `open_app` | `url, isCas` | 无（**协议白名单** `is_http_url` 仅 http/https，非法 err「仅支持 http/https 链接」；`isCas` 契约保留字段、当前不影响打开策略——可达性提示由前端按 `AppItem.access` 分级给出） | `portal.rs:284-301` |
+| `download_attachment` | `url` | `AttachmentData{ fileName, base64 }`（裸标准 base64；**附件域白名单** `is_allowed_attachment_url` = `*.cwxu.edu.cn` + 精确 `10.3.100.110`，混淆域拒绝有单测；无会话 err「需要登录后才能下载附件」；双重 15MB 限流——content-length 预检 + 流式累计兜底，超限 err「附件过大，请从原文页下载」；带 RecordingJar 会话 GET 门户 cookie 自动携带；2026-09-21 新增，命令数 105 → 106，选型见 [[decisions/attachment-inline-viewer|附件内嵌查看器与鉴权下载管线]]） | `portal.rs:334-479` |
 | `get_timetable` | — | `TimetableView{ timetable, slots, currentWeek, today }`（**纯本地读取，无网络、无需登录态**：读 `timetable.json`，缺失/损坏 → 空课表 `courses: []` 不报错；`slots` = `effective_slots_at(config, today)`（`config.slots` 自定义优先、回落内置 `campus_portal::block_time_slots()`，批 2 2026-09-19 加 date 参数预留 P3 区间命中、本批不消费；收尾轮单点化）**下发给前端做时间标签唯一事实源**、`currentWeek` = `weeks::current_week`（无开学日/今天越出学期为 null）、`today` = "YYYY-MM-DD"；组装纯函数 `build_timetable_view` 可单测。批次 1 原返回裸 `Timetable`，2026-09-18 批次 4 前修订（契约 §2.3），命令数 25 → 26） | `timetable.rs:36-71` |
 | `import_timetable` | — | `ImportResult{ added, changed, removed, total, changes }`（内核 [`run_timetable_import`](#) 见下节，含**教务为准清理**；M2.5 批次 2 新增、2026-09-20 抽取，命令数 26 → 27） | `timetable.rs` |
 | `add_course_manual` | `input: ManualCourseInput{ name, teacher, position, day, startSection, endSection, weeks, colorIndex, remark? }` | `Course`（source=Manual、id=`manual-<纳秒>`；入参校验：课程名/星期/节次/周次，M2.5 批次 2） | `timetable.rs:203` |

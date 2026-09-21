@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, lazy, Suspense } from "react";
 import { ArrowLeft, ChevronLeft, ChevronRight, ExternalLink, Newspaper, Rss } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader } from "@/components/PanelHeader";
@@ -7,9 +7,19 @@ import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/authStore";
 import { useBrowserStore } from "@/stores/browserStore";
 import { useUiStore } from "@/stores/uiStore";
-import type { InfoColumn, InfoDetail, InfoItem, InfoPage } from "@/shared/types";
+import type { InfoAttachment, InfoColumn, InfoDetail, InfoItem, InfoPage } from "@/shared/types";
 import { invokeCommand } from "@/shared/tauriApi";
+import {
+  attachmentIcon,
+  downloadAndSaveAttachment,
+  isPdfAttachment,
+} from "@/shared/attachment";
 import { cn } from "@/shared/cn";
+
+// PDF 查看器按需加载：pdfjs 体积大，静态导入会拖慢面板首屏
+const PdfViewerDialog = lazy(() =>
+  import("@/components/PdfViewerDialog").then((m) => ({ default: m.PdfViewerDialog })),
+);
 
 const PAGE_SIZE = 10;
 
@@ -55,6 +65,72 @@ const ARTICLE_CLASS = cn(
   "[&_th]:px-2 [&_th]:py-1 [&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-6",
 );
 
+/**
+ * 附件行：PDF 打开内嵌查看器弹层，其余下载到本机。
+ * 三态完整：loading（按钮 spinner + 禁用）/ done（「已开始下载 fileName」）/
+ * error（命令返回的中文文案，再次点击重试）。
+ */
+function AttachmentItem({
+  att,
+  onPreview,
+}: {
+  att: InfoAttachment;
+  onPreview: (att: InfoAttachment) => void;
+}) {
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [doneName, setDoneName] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
+  const pdf = isPdfAttachment(att.name);
+  const Icon = attachmentIcon(att.name);
+
+  const handleClick = () => {
+    if (pdf) {
+      onPreview(att);
+      return;
+    }
+    if (status === "loading") return;
+    setStatus("loading");
+    setErrorMsg("");
+    downloadAndSaveAttachment(att.url)
+      .then((fileName) => {
+        setDoneName(fileName);
+        setStatus("done");
+      })
+      .catch((e: unknown) => {
+        setErrorMsg(e instanceof Error ? e.message : "附件下载失败");
+        setStatus("error");
+      });
+  };
+
+  return (
+    <div>
+      <Button
+        variant="outline"
+        className="w-full justify-start"
+        aria-busy={status === "loading"}
+        disabled={status === "loading"}
+        onClick={handleClick}
+      >
+        <Icon aria-hidden className="shrink-0 text-text-2" />
+        <span className="min-w-0 flex-1 truncate text-left">{att.name}</span>
+        <span className="shrink-0 text-caption font-normal text-text-2">
+          {pdf ? "预览" : status === "loading" ? "下载中…" : "下载"}
+        </span>
+      </Button>
+      {status === "done" && (
+        <p role="status" className="mt-1 px-1 text-caption text-text-2">
+          已开始下载 {doneName}
+        </p>
+      )}
+      {status === "error" && (
+        <p role="alert" className="mt-1 px-1 text-caption text-alert">
+          {errorMsg}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function InfoPanel() {
   const status = useAuthStore((s) => s.status);
   const openLoginDialog = useUiStore((s) => s.openLoginDialog);
@@ -66,7 +142,8 @@ export function InfoPanel() {
   const [page, setPage] = useState(1);
   const [list, setList] = useState<ListState>({ phase: "loading" });
   const [detail, setDetail] = useState<DetailState | null>(null);
-  // 「在浏览器打开」失败的即时反馈（常规失败由 browserStore.errorMsg 走弹层状态条，此处兜 invoke 层异常）
+  const [pdfView, setPdfView] = useState<InfoAttachment | null>(null);
+  // 「打开原文」失败的即时反馈（常规失败由 browserStore.errorMsg 走弹层状态条，此处兜 invoke 层异常）
   const [openErr, setOpenErr] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
@@ -275,6 +352,19 @@ export function InfoPanel() {
                   <h2 className="mb-4 text-display-s font-semibold text-text">
                     {detail.data.title}
                   </h2>
+                  {/* 附件区：空列表不渲染区块；PDF 进查看器弹层，其余本机下载 */}
+                  {(detail.data.attachments ?? []).length > 0 && (
+                    <section aria-label="附件" className="mt-2 mb-4">
+                      <div className="mb-2 text-caption font-medium text-text-2">
+                        附件 · {detail.data.attachments.length}
+                      </div>
+                      <ul className="space-y-2">
+                        {detail.data.attachments.map((att, i) => (
+                          <AttachmentItem key={`${att.url}-${i}`} att={att} onPreview={setPdfView} />
+                        ))}
+                      </ul>
+                    </section>
+                  )}
                   {/* 后端已按标签/属性白名单清洗（剔除 script/事件属性、相对地址转
                       绝对），前端不二次清洗；正文内 <a> 导航统一拦截 */}
                   <article
@@ -382,6 +472,16 @@ export function InfoPanel() {
             </>
           )}
         </>
+      )}
+
+      {pdfView && (
+        <Suspense fallback={null}>
+          <PdfViewerDialog
+            name={pdfView.name}
+            url={pdfView.url}
+            onClose={() => setPdfView(null)}
+          />
+        </Suspense>
       )}
     </section>
   );

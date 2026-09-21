@@ -10,20 +10,28 @@
 //! 敏感纪律：JWT 与邮箱 `loginUrl` 在 campus-portal 内部消化，本命令只透出
 //! 钱包数字、课程简报、资讯条目与清洗后的正文 HTML，不含任何凭据字段。
 
-use super::auth::CommandResult;
+use super::auth::{session_client, CommandResult};
 use crate::infra::state::AppState;
+use base64::Engine as _;
 use campus_portal::{
-    is_allowed_info_url, is_http_url, next_course_from_now, AppCatalog, CourseBrief, InfoColumn,
-    InfoDetail, InfoPage, PortalClient, ScheduleClassify, ScheduleDayCount, ScheduleEvent,
-    SemesterInfo, TodoPage, TodoTab, WalletSummary,
+    is_allowed_attachment_url, is_allowed_info_url, is_http_url, next_course_from_now, AppCatalog,
+    CourseBrief, InfoColumn, InfoDetail, InfoPage, PortalClient, ScheduleClassify, ScheduleDayCount,
+    ScheduleEvent, SemesterInfo, TodoPage, TodoTab, WalletSummary,
 };
 use serde::Serialize;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
 /// 无会话时的约定文案（与 profile.rs 同口径，前端据此引导登录）。
 const ERR_NO_SESSION: &str = "请先登录";
+
+/// 附件响应体上限 15 MB：base64 后约 20 MB，经 IPC 序列化已是前端内存压力
+/// 上限，超出引导用户从原文页浏览器下载。
+const ATTACHMENT_MAX_BYTES: usize = 15 * 1024 * 1024;
+
+/// 附件下载超时（15 MB 慢链路预留，与 10s 的 HTML 正文抓取不同量级）。
+const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// get_portal_overview → data。
 #[derive(Debug, Serialize)]
@@ -307,4 +315,198 @@ pub async fn open_app(
         Ok(()) => CommandResult::empty(),
         Err(e) => CommandResult::err(&format!("打开浏览器失败: {e}")),
     })
+}
+
+// ---------------- 资讯附件（pdf 查看器铺路：下载命令 + DTO） ----------------
+// 配套 CSP 放行在 tauri.conf.json（该文件为严格 JSON 且 security 段拒绝未知
+// 键，注释无法落在原处，故记于此）：script-src 加 'wasm-unsafe-eval'（pdf.js
+// wasm 解码）、新增 worker-src 'self' blob:（pdf.js worker）、img-src 加
+// blob: data:（内嵌位图）；connect-src 未动。
+
+/// download_attachment → data（base64 为裸标准编码，前端自行拼 data: / 喂
+/// pdf.js；fileName 已尽量还原原始名，展示兜底由前端处理）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentData {
+    pub file_name: String,
+    pub base64: String,
+}
+
+/// 最小 percent-decode（`%XX` → 字节，非法 `%` 序列原样保留），仅用于附件
+/// 文件名展示层；手写不引 percent-encoding 依赖（reqwest/url 的内部依赖
+/// 不直接可用）。
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 附件文件名：Content-Disposition 的 `filename*=`（RFC 5987，取 `''` 后段并
+/// percent-decode）优先，其次 `filename=`（剥引号），都无回落 URL 尾段；尾段
+/// 也取不到时给「附件」。
+fn file_name_of(disposition: Option<&str>, url: &reqwest::Url) -> String {
+    if let Some(cd) = disposition {
+        if let Some(v) = cd
+            .split(';')
+            .find_map(|p| p.trim().strip_prefix("filename*="))
+        {
+            let raw = v.trim_matches('"').rsplit("''").next().unwrap_or(v);
+            let name = percent_decode(raw.trim());
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        if let Some(v) = cd
+            .split(';')
+            .find_map(|p| p.trim().strip_prefix("filename="))
+        {
+            let name = percent_decode(v.trim().trim_matches('"'));
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    url.path_segments()
+        .and_then(|mut segs| segs.next_back().map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .map(|s| percent_decode(&s))
+        .unwrap_or_else(|| "附件".to_string())
+}
+
+/// 下载资讯附件（`download_attachment`）。
+///
+/// 安全链路：① URL 白名单（[`is_allowed_attachment_url`]：校园域 + 一卡通
+/// `10.3.100.110`，防 SSRF）；② 必须有会话（门户域 cookie 在 RecordingJar，
+/// GET 时自动携带，复用 [`session_client`]）；③ 响应体**流式**累计、超
+/// [`ATTACHMENT_MAX_BYTES`] 即断开（content_length 可缺失/谎报，不能只看头）。
+/// 成功返回文件名 + base64，由前端落盘 / 渲染，后端不写盘。
+#[tauri::command]
+pub async fn download_attachment(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<CommandResult<AttachmentData>, String> {
+    if !is_allowed_attachment_url(&url) {
+        return Ok(CommandResult::err("仅支持校园官网附件链接"));
+    }
+    let Some(client) = session_client(&state).await else {
+        return Ok(CommandResult::err("需要登录后才能下载附件"));
+    };
+    let Ok(parsed) = reqwest::Url::parse(&url) else {
+        return Ok(CommandResult::err("附件链接无法解析"));
+    };
+    let mut resp = match client
+        .http_client()
+        .get(parsed.clone())
+        .timeout(ATTACHMENT_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return Ok(CommandResult::err(&format!("下载附件失败: {e}"))),
+    };
+    if !resp.status().is_success() {
+        return Ok(CommandResult::err(&format!(
+            "下载附件失败 (HTTP {})",
+            resp.status().as_u16()
+        )));
+    }
+    // 头里直接报得清的超限快断（省一次无效下载）；缺失/谎报由流式循环兜底
+    if resp
+        .content_length()
+        .is_some_and(|n| n as usize > ATTACHMENT_MAX_BYTES)
+    {
+        return Ok(CommandResult::err("附件过大，请从原文页下载"));
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > ATTACHMENT_MAX_BYTES {
+                    return Ok(CommandResult::err("附件过大，请从原文页下载"));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => return Ok(CommandResult::err(&format!("下载附件失败: {e}"))),
+        }
+    }
+    let file_name = file_name_of(
+        resp.headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        &parsed,
+    );
+    Ok(CommandResult::ok(AttachmentData {
+        file_name,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_url_whitelist() {
+        assert!(is_allowed_attachment_url(
+            "https://www.cwxu.edu.cn/__local/A/B/12/x.pdf"
+        ));
+        // 一卡通内网服务器放行（附件直链实测会挂在这里）
+        assert!(is_allowed_attachment_url("http://10.3.100.110/upload/x.pdf"));
+        assert!(is_allowed_attachment_url("https://jwc.cwxu.edu.cn/a.docx"));
+        // 混淆 / 非 http 形态拒绝
+        assert!(!is_allowed_attachment_url("https://cwxu.edu.cn.evil.com/x.pdf"));
+        assert!(!is_allowed_attachment_url(
+            "https://evil.com/?u=http://10.3.100.110/x.pdf"
+        ));
+        assert!(!is_allowed_attachment_url("ftp://10.3.100.110/x.pdf"));
+        assert!(!is_allowed_attachment_url("not a url"));
+    }
+
+    #[test]
+    fn file_name_prefer_disposition_then_url_tail() {
+        let u =
+            reqwest::Url::parse("https://www.cwxu.edu.cn/__local/A/B/12/report.PDF").unwrap();
+        // filename= 带引号
+        assert_eq!(
+            file_name_of(Some(r#"attachment; filename="期末安排.pdf""#), &u),
+            "期末安排.pdf"
+        );
+        // filename* RFC 5987 形态（percent-decode）
+        assert_eq!(
+            file_name_of(Some("attachment; filename*=UTF-8''%E6%8A%A5%E8%A1%A8.pdf"), &u),
+            "报表.pdf"
+        );
+        // CD 无 filename / 无 CD → URL 尾段
+        assert_eq!(file_name_of(Some("attachment"), &u), "report.PDF");
+        assert_eq!(file_name_of(None, &u), "report.PDF");
+    }
+
+    #[test]
+    fn percent_decode_minimal() {
+        assert_eq!(percent_decode("%E4%B8%AD.pdf"), "中.pdf");
+        assert_eq!(percent_decode("plain.pdf"), "plain.pdf");
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+        assert_eq!(percent_decode("bad%zz"), "bad%zz");
+    }
 }

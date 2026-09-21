@@ -18,12 +18,14 @@
 - [[decisions\timetable-view-contract|课表视图契约（TimetableView 下发 slots 与 currentWeek）]]
 - [[decisions\timetable-notice-l1l2|调课通知 L1/L2 分级口径与 noticeId 取舍]]
 - [[decisions\ecard-transfer-removed|账户转账功能删除决策（官方全站无转账操作界面）]]
+- [[decisions\attachment-inline-viewer|附件内嵌查看器与鉴权下载管线]]
 ## Learning
 
 - [[learnings\cas-sso-plaintext-redirect|CAS SSO 回跳的三处坑：重定向中断、明文落点、探测误判]]
 - [[learnings\tailwind-v4-shadcn-token-mapping|Tailwind v4：shadcn 语义 token 不写 @theme 就没有工具类]]
 - [[learnings\tauri-multiwindow-cdp-verification|Tauri 多窗口应用的 CDP 点验：必须按 URL 选 target（附非主窗口 IPC 权限验证法）]]
 - [[learnings\tauri-webview-ui-verification|Tauri/WebView2 真机 UI 验收：vite 供旧模块与点击注入失效的可用替代路径]]
+- [[learnings\webview2-pdf-csp-cmap|WebView2 内嵌 PDF 的 CSP 与 CMap 三坑]]
 - [[learnings\plat-api-same-token|plat 体系鉴权与 API 清单（token 同源直调）]]
 - [[learnings\ecard-write-protocol-json-body|一卡通写操作协议实测（JSON body / 双层判定 / 三套金额单位）与转账结论]]
 - [[learnings\ecard-stats-params-and-secure-keyboard|一卡通统计参数实测与安全键盘机制]]

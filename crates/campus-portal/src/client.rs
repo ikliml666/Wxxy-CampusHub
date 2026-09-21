@@ -434,6 +434,8 @@ impl PortalClient {
                 html: None,
                 needs_browser: true,
                 url: url.to_string(),
+                // 无正文自然无附件
+                attachments: Vec::new(),
             });
         }
         extract_article(&text, url)

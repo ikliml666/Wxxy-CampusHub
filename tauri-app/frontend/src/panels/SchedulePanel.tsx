@@ -1,18 +1,25 @@
 import { useEffect, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, Clock, MapPin } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHeader, domainVar } from "@/components/PanelHeader";
 import { Surface } from "@/components/Surface";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/authStore";
 import { useUiStore } from "@/stores/uiStore";
-import type { ScheduleClassify, ScheduleDayCount, ScheduleEvent } from "@/shared/types";
+import type { ScheduleClassify, ScheduleEvent } from "@/shared/types";
 import { invokeCommand } from "@/shared/tauriApi";
 import { cn } from "@/shared/cn";
 
 const DAY_HEADERS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"] as const;
 
 const DAY_MS = 86_400_000;
+
+/** 周历列最小宽（7 × 136px = 952px，窄面板横向滚动）。 */
+const WEEK_COL_MIN = 136;
+const WEEK_GRID_MIN = WEEK_COL_MIN * 7;
+
+/** 「最近日程」窗口：今天起 30 天。 */
+const UPCOMING_DAYS = 30;
 
 /** 分类四态。 */
 type ClassifyState =
@@ -27,10 +34,20 @@ type EventsState =
   | { phase: "empty" }
   | { phase: "error"; message: string };
 
-/** 每日计数四态（月视图角标；拉取失败只影响角标，不影响日历本身）。 */
-type CountsState =
+/**
+ * 月明细四态（月视图角标）：角标不再走 get_schedule_day_counts，改由
+ * 过滤课程后的月明细前端自算（月明细本就全量返回，与周列表同源同过滤口径）。
+ * 拉取失败只影响角标与空态，网格与跳周不受影响。
+ */
+type MonthDetailState =
   | { phase: "loading" }
-  | { phase: "ready"; map: Record<string, number> }
+  | { phase: "ready"; map: Record<string, number>; total: number }
+  | { phase: "error"; message: string };
+
+/** 最近日程四态。 */
+type UpcomingState =
+  | { phase: "loading" }
+  | { phase: "ready"; data: ScheduleEvent[] }
   | { phase: "error"; message: string };
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -90,7 +107,7 @@ const sameDay = (a: Date, b: Date) =>
   a.getMonth() === b.getMonth() &&
   a.getDate() === b.getDate();
 
-/** Date → 计数接口的 day 键 "YYYY-MM-DD"。 */
+/** Date → 计数 day 键 "YYYY-MM-DD"。 */
 const fmtDayKey = (d: Date) =>
   `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
@@ -105,6 +122,55 @@ function dayIndexOf(ms: number, weekStart: Date): number | null {
   const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const idx = Math.round((midnight - weekStart.getTime()) / DAY_MS);
   return idx >= 0 && idx <= 6 ? idx : null;
+}
+
+/**
+ * 课程类条目判定：课程归属课表页（TimetablePanel）呈现，日程页在分桶/计数前剔除。
+ * 双判据容错：classifyName 恒等「课程」，或 classifyCode 含 "course"（大小写不敏感）。
+ */
+function isCourseEvent(ev: ScheduleEvent): boolean {
+  return ev.classifyName === "课程" || ev.classifyCode.toLowerCase().includes("course");
+}
+
+/** 事件自身所在列序（0=周一…6=周日），详情卡不再绑定周视图列序。 */
+const dayIndexOfSelf = (ms: number) => (new Date(ms).getDay() + 6) % 7;
+
+/** 「最近日程」分组：按自然日升序，今天/明天/周X + 日期标签。 */
+type UpcomingGroup = {
+  dayMs: number;
+  label: string;
+  dateLabel: string;
+  isToday: boolean;
+  events: ScheduleEvent[];
+};
+
+function buildUpcomingGroups(events: ScheduleEvent[]): UpcomingGroup[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const buckets = new Map<string, { dayMs: number; events: ScheduleEvent[] }>();
+  for (const ev of events) {
+    const d = new Date(ev.startMs);
+    d.setHours(0, 0, 0, 0);
+    const key = fmtDayKey(d);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.events.push(ev);
+    else buckets.set(key, { dayMs: d.getTime(), events: [ev] });
+  }
+  return [...buckets.values()]
+    .sort((a, b) => a.dayMs - b.dayMs)
+    .map(({ dayMs, events: evs }) => {
+      const d = new Date(dayMs);
+      const offsetDays = Math.round((dayMs - today.getTime()) / DAY_MS);
+      const label =
+        offsetDays === 0 ? "今天" : offsetDays === 1 ? "明天" : DAY_HEADERS[(d.getDay() + 6) % 7];
+      return {
+        dayMs,
+        label,
+        dateLabel: fmtDay(dayMs),
+        isToday: sameDay(d, today),
+        events: evs.sort((a, b) => a.startMs - b.startMs),
+      };
+    });
 }
 
 /** 分类过滤 chip：色点用接口给的 classifyColor，选中态沿用域色 token。 */
@@ -150,7 +216,8 @@ export function SchedulePanel() {
   const [weekOffset, setWeekOffset] = useState(0);
   const [monthOffset, setMonthOffset] = useState(0);
   const [events, setEvents] = useState<EventsState>({ phase: "loading" });
-  const [counts, setCounts] = useState<CountsState>({ phase: "loading" });
+  const [monthDetail, setMonthDetail] = useState<MonthDetailState>({ phase: "loading" });
+  const [upcoming, setUpcoming] = useState<UpcomingState>({ phase: "loading" });
   const [selected, setSelected] = useState<ScheduleEvent | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
@@ -175,7 +242,7 @@ export function SchedulePanel() {
   }, [authed, reloadTick]);
 
   // 周区间明细：切周 / 切过滤触发；全不选或不处于周视图时不发请求
-  //（服务端空 codes 语义未实测，前端规避）
+  //（服务端空 codes 语义未实测，前端规避）。课程类条目在入桶前剔除。
   const { startMs, endMs, start } = weekRange(weekOffset);
   useEffect(() => {
     if (!authed || viewMode !== "week" || classify.phase !== "ready" || selectedCodes.length === 0)
@@ -187,7 +254,8 @@ export function SchedulePanel() {
       (r) => {
         if (!alive) return;
         if (r.success && r.data) {
-          setEvents(r.data.length > 0 ? { phase: "ready", data: r.data } : { phase: "empty" });
+          const visible = r.data.filter((ev) => !isCourseEvent(ev));
+          setEvents(visible.length > 0 ? { phase: "ready", data: visible } : { phase: "empty" });
         } else {
           setEvents({ phase: "error", message: r.message ?? "日程获取失败" });
         }
@@ -199,28 +267,32 @@ export function SchedulePanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, classify, selectedCodes, viewMode, weekOffset, reloadTick]);
 
-  // 每日计数（月视图角标）：切月触发；全不选时不发。计数失败只降级角标
-  //（网格与跳转不受影响），不白屏。⚠️ 角标为当日全量日程数（bs-schedule
-  // 计数接口无分类过滤参数，如实呈现）。
+  // 月明细（月视图角标）：与周列表同一接口同一过滤口径，角标由过滤后的明细
+  // 前端自算（按开始日落日计数）；失败只降级角标，不白屏。
   const month = viewMode === "month" ? monthGrid(monthOffset) : null;
   useEffect(() => {
     if (!authed || viewMode !== "month" || classify.phase !== "ready" || selectedCodes.length === 0) {
       return;
     }
     let alive = true;
-    setCounts({ phase: "loading" });
+    setMonthDetail({ phase: "loading" });
     const range = monthGrid(monthOffset);
-    invokeCommand<ScheduleDayCount[]>("get_schedule_day_counts", {
+    invokeCommand<ScheduleEvent[]>("get_schedule_month", {
       startMs: range.startMs,
       endMs: range.endMs,
+      codes: selectedCodes,
     }).then((r) => {
       if (!alive) return;
       if (r.success && r.data) {
+        const visible = r.data.filter((ev) => !isCourseEvent(ev));
         const map: Record<string, number> = {};
-        for (const { day, count } of r.data) map[day] = count;
-        setCounts({ phase: "ready", map });
+        for (const ev of visible) {
+          const key = fmtDayKey(new Date(ev.startMs));
+          map[key] = (map[key] ?? 0) + 1;
+        }
+        setMonthDetail({ phase: "ready", map, total: visible.length });
       } else {
-        setCounts({ phase: "error", message: r.message ?? "每日计数获取失败" });
+        setMonthDetail({ phase: "error", message: r.message ?? "月日程获取失败" });
       }
     });
     return () => {
@@ -228,6 +300,35 @@ export function SchedulePanel() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, classify, selectedCodes, viewMode, monthOffset, reloadTick]);
+
+  // 最近日程：今天起 30 天（与日历同一过滤口径，课程已剔除）。全不选时清空。
+  useEffect(() => {
+    if (!authed || classify.phase !== "ready" || selectedCodes.length === 0) {
+      setUpcoming({ phase: "ready", data: [] });
+      return;
+    }
+    let alive = true;
+    setUpcoming({ phase: "loading" });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    invokeCommand<ScheduleEvent[]>("get_schedule_month", {
+      startMs: today.getTime(),
+      endMs: today.getTime() + UPCOMING_DAYS * DAY_MS - 1,
+      codes: selectedCodes,
+    }).then((r) => {
+      if (!alive) return;
+      if (r.success && r.data) {
+        const visible = r.data.filter((ev) => !isCourseEvent(ev));
+        setUpcoming({ phase: "ready", data: visible });
+      } else {
+        setUpcoming({ phase: "error", message: r.message ?? "最近日程获取失败" });
+      }
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, classify, selectedCodes, reloadTick]);
 
   const toggleCode = (code: string) => {
     setSelectedCodes((cs) =>
@@ -242,7 +343,7 @@ export function SchedulePanel() {
     else setMonthOffset((m) => m + dir);
   };
 
-  /** 切换视图（周/月），清除选中详情（详情文案绑定周视图列序）。 */
+  /** 切换视图（周/月），清除选中详情。 */
   const switchView = (mode: "week" | "month") => {
     if (mode === viewMode) return;
     setSelected(null);
@@ -268,6 +369,10 @@ export function SchedulePanel() {
     }
     for (const col of byDay) col.sort((a, b) => a.startMs - b.startMs);
   }
+
+  const upcomingGroups =
+    upcoming.phase === "ready" ? buildUpcomingGroups(upcoming.data) : [];
+  const hasUpcomingToday = upcomingGroups.some((g) => g.isToday);
 
   const periodSwitcher = (
     <div className="flex items-center gap-1.5">
@@ -321,10 +426,10 @@ export function SchedulePanel() {
   );
 
   return (
-    <section className="mx-auto mt-8 max-w-3xl px-4">
+    <section className="mx-auto mt-8 w-full max-w-6xl px-4">
       <PanelHeader
         title="日程"
-        description="个人日程 · 活动 · 会议 · 值班 · 课程"
+        description="个人日程 · 活动 · 会议 · 值班"
         domain="sched"
         actions={authed ? periodSwitcher : undefined}
       />
@@ -373,10 +478,10 @@ export function SchedulePanel() {
             </div>
           )}
 
-          {/* 周视图 */}
+          {/* 周视图：列最小宽 136px，窄面板横向滚动；事件块两行截断不挤压 */}
           {viewMode === "week" && (
-            <Surface className="mt-4 overflow-hidden">
-              <div className="grid grid-cols-7">
+            <Surface className="mt-4 overflow-x-auto">
+              <div className="grid grid-cols-7" style={{ minWidth: WEEK_GRID_MIN }}>
                 {DAY_HEADERS.map((d, i) => (
                   <div
                     key={d}
@@ -398,7 +503,7 @@ export function SchedulePanel() {
                   <div
                     key={col}
                     className={cn(
-                      "flex min-h-28 flex-col gap-1.5 p-1.5",
+                      "flex min-h-32 flex-col gap-1.5 p-1.5",
                       col > 0 && "border-l border-line",
                       col === todayCol && weekOffset === 0 && "bg-sched/5",
                     )}
@@ -415,8 +520,8 @@ export function SchedulePanel() {
                         )}
                         style={{ borderLeft: `3px solid ${ev.color || domainVar.sched}` }}
                       >
-                        <p className="truncate text-caption font-medium text-text">{ev.title}</p>
-                        <p className="tabular-num text-caption text-text-2">
+                        <p className="line-clamp-2 text-caption font-medium text-text">{ev.title}</p>
+                        <p className="tabular-num mt-0.5 text-caption text-text-2">
                           {fmtTimeRange(ev.startMs, ev.endMs)}
                         </p>
                       </button>
@@ -427,7 +532,7 @@ export function SchedulePanel() {
             </Surface>
           )}
 
-          {/* 月视图：日期格 + 每日日程数角标（服务端全量计数）；点击某天跳到该周 */}
+          {/* 月视图：日期格 + 每日日程数角标（由过滤后的月明细自算）；点击某天跳到该周 */}
           {viewMode === "month" && month && (
             <Surface className="mt-4 overflow-hidden">
               <div className="grid grid-cols-7">
@@ -440,7 +545,10 @@ export function SchedulePanel() {
                   const d = new Date(month.gridStartMs + i * DAY_MS);
                   const inMonth = d.getMonth() === month.month;
                   const isToday = sameDay(d, new Date());
-                  const count = counts.phase === "ready" && inMonth ? counts.map[fmtDayKey(d)] : undefined;
+                  const count =
+                    monthDetail.phase === "ready" && inMonth
+                      ? monthDetail.map[fmtDayKey(d)]
+                      : undefined;
                   return (
                     <button
                       key={i}
@@ -480,7 +588,7 @@ export function SchedulePanel() {
             </Surface>
           )}
 
-          {/* 详情卡：选中事件的时间 / 地点 / 分类；未选中给操作提示 */}
+          {/* 详情卡：选中事件的时间 / 地点 / 分类（周历块与最近日程行共用） */}
           {selected ? (
             <Surface accent="sched" className="mt-3 px-4 py-3">
               <div className="flex items-center gap-2">
@@ -495,7 +603,7 @@ export function SchedulePanel() {
                 </span>
               </div>
               <p className="tabular-num mt-1.5 text-caption text-text-2">
-                {DAY_HEADERS[dayIndexOf(selected.startMs, start) ?? 0]}{" "}
+                {DAY_HEADERS[dayIndexOfSelf(selected.startMs)]}{" "}
                 {fmtDay(selected.startMs)} · {fmtTimeRange(selected.startMs, selected.endMs)}
               </p>
               {selected.place && (
@@ -503,12 +611,12 @@ export function SchedulePanel() {
               )}
               {selected.extra && <p className="mt-1 text-caption text-text-2">{selected.extra}</p>}
             </Surface>
-          ) : events.phase === "ready" ? (
+          ) : events.phase === "ready" && viewMode === "week" ? (
             <p className="mt-3 text-center text-caption text-text-2">点击日程块查看详情</p>
           ) : null}
 
           {/* 事件区四态（分类加载中沿用骨架；分类错误已在其上方显示）。
-              周视图吃明细，月视图吃每日计数，各自独立四态。 */}
+              周视图吃明细，月视图吃月明细，各自独立四态。 */}
           {classify.phase === "ready" && selectedCodes.length === 0 && (
             <Surface className="mt-3">
               <EmptyState
@@ -556,11 +664,11 @@ export function SchedulePanel() {
               />
             </Surface>
           )}
-          {/* 月视图：计数失败不白屏（角标缺失仍可点日期跳周），给错误提示可重试 */}
-          {viewMode === "month" && counts.phase === "error" && (
+          {/* 月视图：月明细失败不白屏（角标缺失仍可点日期跳周），给错误提示可重试 */}
+          {viewMode === "month" && monthDetail.phase === "error" && (
             <Surface accent="sched" className="mt-3 flex items-center justify-between gap-3 py-3 pl-4 pr-2">
               <p className="min-w-0 truncate text-body text-text-2">
-                每日计数获取失败：{counts.message}
+                月日程获取失败：{monthDetail.message}
               </p>
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => setReloadTick((t) => t + 1)}>
                 重试
@@ -568,9 +676,9 @@ export function SchedulePanel() {
             </Surface>
           )}
           {viewMode === "month" &&
-            counts.phase === "ready" &&
+            monthDetail.phase === "ready" &&
             selectedCodes.length > 0 &&
-            Object.values(counts.map).every((c) => c === 0) && (
+            monthDetail.total === 0 && (
               <Surface className="mt-3">
                 <EmptyState
                   compact
@@ -581,6 +689,115 @@ export function SchedulePanel() {
                 />
               </Surface>
             )}
+
+          {/* 最近日程：今天起 30 天，按日分组升序；行点击联动上方详情卡 */}
+          {classify.phase === "ready" && selectedCodes.length > 0 && (
+            <Surface className="mt-4 px-4 py-4">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-body font-medium text-text">最近日程</p>
+                {upcoming.phase === "ready" && upcoming.data.length > 0 && (
+                  <span className="shrink-0 text-caption text-text-2">
+                    今天起 {UPCOMING_DAYS} 天 · 共 {upcoming.data.length} 条
+                  </span>
+                )}
+              </div>
+
+              {upcoming.phase === "loading" ? (
+                <div aria-hidden className="mt-3 space-y-2">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <span className="h-4 w-12 shrink-0 animate-pulse rounded bg-line" />
+                      <span className="h-8 min-w-0 flex-1 animate-pulse rounded bg-line" />
+                    </div>
+                  ))}
+                </div>
+              ) : upcoming.phase === "error" ? (
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <p className="min-w-0 truncate text-body text-text-2">
+                    最近日程获取失败：{upcoming.message}
+                  </p>
+                  <Button variant="outline" size="sm" className="shrink-0" onClick={() => setReloadTick((t) => t + 1)}>
+                    重试
+                  </Button>
+                </div>
+              ) : upcoming.data.length === 0 ? (
+                <EmptyState
+                  compact
+                  icon={CalendarDays}
+                  domain="sched"
+                  title="最近暂无日程"
+                  hint={`未来 ${UPCOMING_DAYS} 天内没有日程安排。`}
+                />
+              ) : (
+                <div className="mt-3 space-y-4">
+                  {/* 今天无事件：单独给空态提示，其后仍列出后续日期 */}
+                  {!hasUpcomingToday && (
+                    <EmptyState
+                      compact
+                      icon={CalendarDays}
+                      domain="sched"
+                      title="今日无日程"
+                      hint="今天没有日程安排，看看接下来的日期。"
+                    />
+                  )}
+                  {upcomingGroups.map((g) => (
+                    <div key={g.dayMs}>
+                      <div className="flex items-baseline gap-2">
+                        <p
+                          className={cn(
+                            "text-caption font-medium",
+                            g.isToday ? "text-sched" : "text-text-2",
+                          )}
+                        >
+                          {g.label}
+                        </p>
+                        <p className="tabular-num text-caption text-text-2">{g.dateLabel}</p>
+                      </div>
+                      <ul className="mt-1.5 space-y-1.5">
+                        {g.events.map((ev) => (
+                          <li key={ev.id}>
+                            <button
+                              type="button"
+                              aria-pressed={selected?.id === ev.id}
+                              onClick={() => setSelected((s) => (s?.id === ev.id ? null : ev))}
+                              className={cn(
+                                "flex w-full items-center gap-3 rounded-inner border border-line bg-line/40 py-2 pr-3 pl-2.5 text-left transition-shadow duration-[var(--dur-fast)] ease-out-soft hover:shadow-card",
+                                selected?.id === ev.id && "ring-1 ring-sched",
+                              )}
+                              style={{ borderLeft: `3px solid ${ev.color || domainVar.sched}` }}
+                            >
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-body font-medium text-text">
+                                  {ev.title}
+                                </span>
+                                {ev.place && (
+                                  <span className="mt-0.5 flex items-center gap-1 text-caption text-text-2">
+                                    <MapPin aria-hidden className="size-3 shrink-0" />
+                                    <span className="truncate">{ev.place}</span>
+                                  </span>
+                                )}
+                              </span>
+                              <span className="tabular-num shrink-0 text-caption text-text-2">
+                                {fmtTimeRange(ev.startMs, ev.endMs)}
+                              </span>
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-surface px-2 py-0.5 text-caption text-text-2">
+                                <span
+                                  aria-hidden
+                                  className="size-1.5 rounded-full"
+                                  style={{ backgroundColor: ev.color || domainVar.sched }}
+                                />
+                                {ev.classifyName || "未分类"}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Surface>
+          )}
         </>
       )}
     </section>

@@ -2,6 +2,7 @@ import { Home, History, RefreshCw, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ElectricityPaymentsCard } from "@/components/ElectricityPaymentsCard";
 import { ElectricityTrendCard } from "@/components/ElectricityTrendCard";
+import { EcardPowerNotifCard } from "@/components/ecard/EcardPowerNotifCard";
 import { EmptyState } from "@/components/EmptyState";
 import { RechargeFlow } from "@/components/RechargeFlow";
 import { Surface } from "@/components/Surface";
@@ -478,7 +479,8 @@ export function EcardPowerView({
   );
 
   return (
-    <div className="grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-4">
+    <>
+      <div className="grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-4">
       {/* ── 左列：操作主线 ── */}
       <div className="flex min-w-0 flex-col gap-3">
         {/* 片区：该接口免登录（唯一匿名端点），未登录也先渲染出来 */}
@@ -929,7 +931,11 @@ export function EcardPowerView({
 
         <ElectricityPaymentsCard authed={authed} openLoginDialog={openLoginDialog} />
       </div>
-    </div>
+      </div>
+
+      {/* 电费通知设置（自设置页迁入）：页面底部整宽 */}
+      <EcardPowerNotifCard />
+    </>
   );
 }
 
