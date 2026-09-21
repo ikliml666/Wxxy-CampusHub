@@ -215,6 +215,11 @@ fn settle_backoff(mult: &mut u32, base_min: u32, result: &Result<(), String>, sl
 
 /// 通知轮询主循环（lib.rs setup spawn，单一实例）：三类检查合一，每 tick 热读
 /// settings；休眠时长 = 各**开启**源有效间隔的最小值（含失败退避）。
+/// 登录成功后的轮询唤醒器：登录/免密重登成功时 `notify_one` 一次，poll_tick 的
+/// 休眠立即中断并马上做一轮检查——否则隔夜死会话造成的失败退避（×2 起）会让
+/// 用户登录后首批通知最多等 20 分钟。无等待者时许可会被保存，效果一致。
+pub(crate) static POLL_KICK: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 pub(crate) async fn poll_tick(app: tauri::AppHandle) {
     // [资讯, 待办, 电费] 的退避倍数（成功归 1、失败 ×2）
     let mut backoff = [1u32, 1, 1];
@@ -254,7 +259,13 @@ pub(crate) async fn poll_tick(app: tauri::AppHandle) {
 
         // 无任何开启源 → 兜底 5 分钟慢轮询（等开关被打开 / 会话出现）
         let sleep = if sleep_secs == u64::MAX { POLL_IDLE_SECS } else { sleep_secs };
-        tokio::time::sleep(Duration::from_secs(sleep)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(sleep)) => {}
+            _ = POLL_KICK.notified() => {
+                // 登录成功唤醒：新会话不该背着旧会话的退避，归一后立即整轮检查
+                backoff = [1u32, 1, 1];
+            }
+        }
     }
 }
 

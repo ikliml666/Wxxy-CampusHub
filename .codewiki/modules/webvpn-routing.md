@@ -72,9 +72,10 @@ tags:
 - 电费匿名端点 `list_feeitems` 单独处理：**匿名也要网关会话**（网关 cookie），校外未登录（无 TGT）直接给可操作文案（`commands/electricity.rs`）。
 - `open_recharge_in_browser` 走 `browser_recharge_url`：校外把内网官网页包装成网关 URL（浏览器自身持有 WebVPN 登录态）。
 
-## 四、live 验证状态（2026-09-20）
+## 四、live 验证状态（2026-09-21 更新）
 
 - **已验证**：WebVPN 登录链真实走通（深澜 5 cookie、`is_alive=true`，`tests/webvpn_session_live.rs`）；`http://10.3.100.110/charge/feeitem` 经包装 URL 由网关返回 HTTP 200 真实 feeitemList（16101 字节）——**「网关是否代理内网 IP」这一最大风险已排除**。
-- **未验证**：带 `synjones-auth` 头的 berserker API 经网关透传；校外真机端到端（当前开发机在校园网内）。
+- **已验证（2026-09-21 校外全链路探针 PASS，`tauri-app/src-tauri/tests/webvpn_offcampus_live.rs`）**：CAS 登录 → `WebVpnSession::login` → **`sso_token_via` 经网关跑 SSO 桥换到慧新E校 token（307 字节 bearer）** → `wrapped_client` GET `queryCurrentCard` 经网关 HTTP 200，业务信封 code=200 且 `data.retcode="0"`（网关换的 token 被一卡通业务层完整接受），真实余额与批 14 真机记录吻合。此前「berserker API 带 `synjones-auth` 头经网关透传」缺口就此实锤。顺带固化响应形态：`data={account,card,errmsg,retcode,sno}`（`retcode` 双层判定的第二层在业务层）。
+- **未验证**：`net_zone` 判 OffCampus 后的自动触发（应用内接线）需校外真机端到端——当前开发机在校园网内，route 决策表由单测覆盖。
 
 相关：[[modules/campus-synjones|慧新E校协议核心]]、[[modules/campus-hub-tauri|接线层 campus-hub-tauri]]、[[decisions/webvpn-route-design|WebVPN 路由设计决策]]、[[learnings/srun-webvpn-crypto|深澜 WebVPN 加密算法与网络归属探测]]。

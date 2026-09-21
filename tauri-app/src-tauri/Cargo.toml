@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "macros"] }
 log = "0.4"
 base64 = "0.22"
 dirs = "6"
@@ -33,4 +33,13 @@ tauri-plugin-opener = "2"
 # 系统通知（M5 通知中心）：只在 Rust 侧经 NotificationExt 调用（poll_tick），
 # 不开放前端直接 invoke 插件命令，故无需额外 capability（与 opener 同款）。
 tauri-plugin-notification = "2"
+# 日志：log::warn/error 的输出端（此前无 logger，后台轮询的失败 warn 全部静默丢弃，
+# 排障盲区——M2 [meeting-diag] 教训重演）。dev 下进 stderr，tauri dev 终端可见。
+env_logger = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset"] }
+
+[dev-dependencies]
+# 校外（OffCampus）全链路 live 探针（tests/webvpn_offcampus_live.rs）：WebVPN 会话直用；
+# tokio macros/rt 供 #[tokio::test]（主依赖只开 sync/time，保持产品构建最小化）。
+campus-webvpn = { path = "../../crates/campus-webvpn" }
+tokio = { version = "1", features = ["macros", "rt"] }

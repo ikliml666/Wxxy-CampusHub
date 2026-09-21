@@ -129,6 +129,11 @@ pub fn run() {
         // M4 批 2 启动补采：今天还没采过 + 有内存会话时，后台补一次日余额快照。
         // 不弹窗、不阻塞启动（spawn 后立刻返回）、失败只记日志（不出现 token/账号/户号）。
         .setup(|app| {
+            // 日志初始化：log::warn/error 的输出端（默认 info 级、RUST_LOG 可覆盖）。
+            // 此前无 logger——后台轮询（poll_tick/auto_sync_tick）的失败 warn 全部
+            // 被静默丢弃，排障盲区（M2 [meeting-diag] 教训重演）。
+            let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+                .try_init();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 commands::electricity_history::startup_snapshot(handle).await;

@@ -3117,7 +3117,9 @@ mod tests {
         let ics = build_ics(&tt).unwrap();
         assert_eq!(vevent_count(&ics), 1, "10-01 类停课日 → 该日 VEVENT 剔除");
         assert!(ics.contains("DTSTART:20260907T080000"));
-        assert!(!ics.contains("20260921"));
+        // 只断言「该日无课程实例」：DTSTAMP 是生成当天（跑测试的日期），宽泛匹配
+        // 在日期滚到 2026-09-21 当天时会把 DTSTAMP 误判成课程实例。
+        assert!(!ics.contains("DTSTART:20260921"));
     }
 
     /// custom 课（is_custom_time，节次 None）→ DTSTART/DTEND 直接取 custom 时刻，

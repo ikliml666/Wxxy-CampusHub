@@ -348,6 +348,8 @@ async fn finish_login(
         tgt: Some(ok.tgt),
     });
     log::info!("登录成功: user={}", mask_username(username));
+    // 唤醒通知轮询：新会话立即做一轮检查（不背旧会话的失败退避，见 POLL_KICK）。
+    super::notification::POLL_KICK.notify_one();
     Ok(CommandResult::ok(LoginResultData::LoggedIn(LoginData {
         username: username.to_string(),
         // displayName 无来源时用 username（计划 Task 10 Interfaces）

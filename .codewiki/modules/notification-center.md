@@ -59,8 +59,16 @@ id」；`elec_should_alert`（`:278`）= 余额低于阈值 **且** 24h（`DAY_S
 - **失败指数退避**：`settle_backoff`（`:203`）成功归 1、失败 ×2，`BACKOFF_MAX_MULT=24`
   配最小间隔 5 分钟 = 封顶 2h（`:39-41`）。
 - **每 tick 热读 settings**——改设置无需重启轮询。
+- **登录唤醒**（2026-09-21 补）：`POLL_KICK`（tokio `Notify::const_new()`）+ 休眠改
+  `tokio::select!` 可中断；`finish_login` 成功点 `notify_one`（`auth.rs`）——否则隔夜
+  死会话的失败退避（×2 起）让用户重新登录后首批通知最多等 20 分钟。唤醒同时把退避
+  归一（新会话不背旧会话的退避）。
 - 每源拉取后按 `diff_seen` 结果落盘 + `push_unread` + 发系统通知；电费源成功提醒后
   记 `lastElecAlertAt`。
+
+**日志纪律**（2026-09-21 补）：lib.rs setup 里初始化 `env_logger`（默认 info，
+RUST_LOG 可覆盖，dev 进 stderr）——此前全仓无 logger，`log::warn!` 全部静默丢弃，
+轮询/补采失败原因完全不可见（M2 `[meeting-diag]` 教训重演）。
 
 **系统通知红线**（`NotificationExt`，`:106`）：只在 Rust 侧发送（插件不开放前端
 invoke），标题恒「锡院助手」（`NOTIFY_TITLE:43`），内容只含 kind 标签 + 通知标题，

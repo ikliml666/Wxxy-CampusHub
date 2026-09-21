@@ -1,5 +1,20 @@
 # 更新日志
 
+## 2026-09-21 · M4/M5 真机验证轮：校外全链路探针实锤 + 通知闭环真触发 + 三处真实缺陷修复
+
+- **模块**：`tauri-app/src-tauri/{src/{lib.rs,commands/{notification,auth,timetable}.rs},Cargo.toml,tests/webvpn_offcampus_live.rs(新)}`；无前端改动
+- **验证结果（全部实测证据）**：
+  - **M4 校外完整链路探针 PASS**（`webvpn_offcampus_live.rs`，校园网内即可跑）：CAS 登录 → `WebVpnSession::login` 深澜会话 → **`sso_token_via` 经网关跑 SSO 桥换到慧新E校 token（307 字节 bearer）** → `wrapped_client` GET `queryCurrentCard` 经网关 HTTP 200 → 业务信封 code=200 且 **retcode="0"**（网关换的 token 被一卡通业务层完整接受）→ 真实余额 70.46 元与批 14 真机记录吻合。此前「berserker API 带 synjones-auth 头经网关透传未验证」缺口就此补实锤；M4 仅剩 net_zone 判 OffCampus 后的自动触发待用户校外真机
+  - **M5 通知闭环全链路 PASS**（CDP + 真实数据）：免密登录 → POLL_KICK 唤醒轮询 → **3 条未读**（2 条门户真实新公告，其中「干部选聘公告」为当晨 01:30 新发 + 1 条电费提醒「当前余额 829.63 元低于阈值」）→ Bell 徽标「3」→ 通知面板渲染完整 → 「全部标为已读」→ unread 落盘清零 + 切面板徽标消失
+  - **托盘常驻 PASS**：点标题栏关闭 → 窗口隐藏（UIA 报无可见顶层窗口）→ **进程存活**（CloseRequested 被拦 = TRAY_READY = 托盘创建成功的功能性证明）；托盘图标肉眼确认与菜单唤回留用户侧
+  - **系统通知**：dev 模式 WinRT 调用无失败日志（弹窗视觉验收留 NSIS 打包版）
+- **验证中发现并修复的三处真实缺陷**：
+  1. **登录后首批通知延迟**：隔夜死会话使轮询失败退避（×2 起），用户重新登录后还要背最多 20 分钟退避 → `notification::POLL_KICK`（tokio Notify const）+ poll_tick 休眠改 `select!` 可中断 + `finish_login` 成功点 `notify_one`（新会话同时重置退避）——登录后立即做一轮完整检查
+  2. **日志盲区**：全仓无 logger 初始化，`log::warn!` 全部静默丢弃——轮询/补采失败原因完全不可见（M2 `[meeting-diag]` 教训重演）→ setup 里初始化 `env_logger`（默认 info，RUST_LOG 可覆盖，dev 进 stderr）
+  3. **日期敏感测试**：`ics_skips_events_on_skipped_dates` 用宽泛 `!contains("20260921")`，DTSTAMP（生成当天）在 9-21 当天跑测试误报 → 收窄为 `!contains("DTSTART:20260921")`（断言意图=该日无课程实例）
+- **顺带**：主目录 `npm install` 补装批 14 依赖（jsbarcode/react-qr-code 此前只在 worktree 装过，主目录白屏）；探针过程中实锤 queryCurrentCard 响应形态 `data={account,card,errmsg,retcode,sno}`（双层判定第二层在业务层）
+- **验证**：`cargo test -p campus-hub --lib` **155 passed / 0 failed**；探针 `test result: ok`（`CAMPUS_HUB_CREDS=… cargo test -p campus-hub --test webvpn_offcampus_live -- --ignored --nocapture`，读凭据文件、不打印 token/cookie）
+
 ## 2026-09-20 · M5 通知中心：通知基建 + 三源后台轮询 + 应用内通知页 + 托盘常驻
 
 - **模块**：`tauri-app/src-tauri/src/{infra/notification.rs(新),commands/notification.rs(新),app_tray.rs(新),lib.rs,Cargo.toml}`、`tauri-app/frontend/src/{panels/{NotificationsPanel(新),SettingsPanel}.tsx,components/{AppShell,DockNav}.tsx,stores/uiStore.ts,shared/{types.ts,tauriApi.ts}}`
